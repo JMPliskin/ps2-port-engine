@@ -649,17 +649,24 @@ Outcome DmaStat(Vm&, Context& c) { return Ret(c, u32(-1)); }    // < 0: finished
 // ---------------------------------------------------------------- cdvdman
 // The disc, read from the user's image. Reads finish at once.
 
+// sceCdRead(lsn, sectors, buffer, mode): mode points at sceCdRMode
+// { u8 trycount, spindlctrl, datapattern, pad }; the pattern picks 2048, 2328
+// or 2340 bytes a sector.
 Outcome CdRead(Vm& vm, Context& c) {
-    const u32 lsn = A(vm, c, 0), sectors = A(vm, c, 1), buffer = A(vm, c, 2);
-    std::vector<u8> data(std::size_t(sectors) * kSectorSize);
-    if (!GuestDisc().IsOpen() || !GuestDisc().Read(lsn, sectors, data.data())) return Ret(c, 0);
+    const u32 lsn = A(vm, c, 0), sectors = A(vm, c, 1), buffer = A(vm, c, 2), mode = A(vm, c, 3);
+    const u32 pattern = mode ? *vm.At(mode + 2, 1) : 0;
+    std::vector<u8> data(std::size_t(sectors) * Disc::PatternSize(pattern));
+    if (!GuestDisc().IsOpen() || !GuestDisc().ReadPattern(lsn, sectors, pattern, data.data()))
+        return Ret(c, 0);
     std::memcpy(vm.At(buffer, u32(data.size())), data.data(), data.size());
     return Ret(c, 1);
 }
 
 Outcome CdSync(Vm&, Context& c) { return Ret(c, 0); }              // done
 Outcome CdGetError(Vm&, Context& c) { return Ret(c, 0); }          // SCECdErNO
-Outcome CdGetDiskType(Vm&, Context& c) { return Ret(c, 0x14); }    // SCECdPS2DVD
+Outcome CdGetDiskType(Vm&, Context& c) {                          // SCECdPS2CD, SCECdPS2DVD
+    return Ret(c, GuestDisc().IsCd() ? 0x12 : 0x14);
+}
 Outcome CdDiskReady(Vm&, Context& c) { return Ret(c, 2); }         // SCECdComplete
 
 Outcome FlushDcache(Vm&, Context& c) { return Ret(c, 0); }

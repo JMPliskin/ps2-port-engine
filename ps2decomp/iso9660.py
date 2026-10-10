@@ -16,6 +16,8 @@ import os
 import struct
 from typing import BinaryIO, Iterator
 
+from .discimage import open_image
+
 SECTOR_SIZE = 2048
 SYSTEM_AREA_SECTORS = 16  # volume descriptors start here
 
@@ -128,7 +130,8 @@ class Iso9660:
 
     @classmethod
     def open(cls, path) -> "Iso9660":
-        return cls(open(path, "rb"), owns_stream=True)
+        """An .iso, a raw CD image (.bin) or the .cue sheet naming one."""
+        return cls(open_image(path), owns_stream=True)
 
     def close(self) -> None:
         if self._owns_stream:

@@ -2,6 +2,7 @@
 
 #include <cctype>
 #include <cstring>
+#include <string>
 
 namespace ps2host {
 
@@ -28,22 +29,83 @@ Disc::~Disc() {
     if (file_) std::fclose(file_);
 }
 
+namespace {
+
+// The image a .cue sheet names in its first FILE line, beside the sheet.
+std::string CueImage(const std::string& cue_path) {
+    std::FILE* cue = std::fopen(cue_path.c_str(), "rb");
+    if (!cue) return "";
+    std::string text;
+    char chunk[4096];
+    for (std::size_t n; (n = std::fread(chunk, 1, sizeof chunk, cue)) > 0;) text.append(chunk, n);
+    std::fclose(cue);
+    for (std::size_t at = 0; at < text.size();) {
+        std::size_t end = text.find_first_of("\r\n", at);
+        if (end == std::string::npos) end = text.size();
+        std::string line = text.substr(at, end - at);
+        at = end + 1;
+        line.erase(0, line.find_first_not_of(" \t"));
+        if (Upper(line.substr(0, 5)) != "FILE ") continue;
+        std::string name = line.substr(5);
+        name.erase(0, name.find_first_not_of(" \t"));
+        if (!name.empty() && name[0] == '"') {
+            const std::size_t close = name.find('"', 1);
+            name = name.substr(1, close == std::string::npos ? std::string::npos : close - 1);
+        } else {
+            name = name.substr(0, name.find_first_of(" \t"));
+        }
+        const std::size_t slash = cue_path.find_last_of("/\\");
+        return slash == std::string::npos ? name : cue_path.substr(0, slash + 1) + name;
+    }
+    return "";
+}
+
+const u8 kSync[12] = {0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00};
+
+u8 ToBcd(u32 v) { return u8((v / 10) << 4 | (v % 10)); }
+
+}  // namespace
+
 bool Disc::Open(const std::string& path) {
     if (file_) std::fclose(file_);
-    file_ = std::fopen(path.c_str(), "rb");
+    file_ = nullptr;
+    memory_.clear();
+    std::string image = path;
+    if (image.size() > 4 && Upper(image.substr(image.size() - 4)) == ".CUE") {
+        image = CueImage(path);
+        if (image.empty()) return false;
+    }
+    file_ = std::fopen(image.c_str(), "rb");
     if (!file_) return false;
     _fseeki64(file_, 0, SEEK_END);
     size_ = u64(_ftelli64(file_));
+    DetectFormat();
     return true;
 }
 
 void Disc::Use(std::vector<u8> image) {
     memory_ = std::move(image);
     size_ = memory_.size();
+    DetectFormat();
 }
 
-bool Disc::Read(u32 lsn, u32 count, u8* out) {
-    const u64 offset = u64(lsn) * kSectorSize, length = u64(count) * kSectorSize;
+// A raw image: every sector starts with the sync pattern, and sector 16 - the
+// volume descriptor, on every PS2 disc - says the mode.
+void Disc::DetectFormat() {
+    data_offset_ = 0;
+    u8 head[16];
+    if (size_ >= 17 * u64(kRawSectorSize) && ReadBytes(16 * u64(kRawSectorSize), 16, head) &&
+        std::memcmp(head, kSync, 12) == 0 && (head[15] == 1 || head[15] == 2))
+        data_offset_ = head[15] == 1 ? 16 : 24;
+    sectors_ = u32(size_ / (data_offset_ ? kRawSectorSize : kSectorSize));
+}
+
+bool Disc::IsCd() const {
+    // A CD holds at most about 360,000 sectors (80 minutes); a DVD image is raw-less.
+    return data_offset_ != 0 || sectors_ <= 360000;
+}
+
+bool Disc::ReadBytes(u64 offset, u64 length, u8* out) {
     if (offset + length > size_) return false;
     if (!memory_.empty()) {
         std::memcpy(out, memory_.data() + offset, size_t(length));
@@ -51,6 +113,46 @@ bool Disc::Read(u32 lsn, u32 count, u8* out) {
     }
     if (!file_ || _fseeki64(file_, s64(offset), SEEK_SET) != 0) return false;
     return std::fread(out, 1, size_t(length), file_) == length;
+}
+
+bool Disc::Read(u32 lsn, u32 count, u8* out) {
+    if (u64(lsn) + count > sectors_) return false;
+    if (!data_offset_) return ReadBytes(u64(lsn) * kSectorSize, u64(count) * kSectorSize, out);
+    // Raw: read the whole run at once, then keep each sector's data.
+    std::vector<u8> raw(std::size_t(count) * kRawSectorSize);
+    if (!ReadBytes(u64(lsn) * kRawSectorSize, raw.size(), raw.data())) return false;
+    for (u32 i = 0; i < count; ++i)
+        std::memcpy(out + std::size_t(i) * kSectorSize, &raw[std::size_t(i) * kRawSectorSize + data_offset_],
+                    kSectorSize);
+    return true;
+}
+
+bool Disc::ReadPattern(u32 lsn, u32 count, u32 pattern, u8* out) {
+    if (pattern != 1 && pattern != 2) return Read(lsn, count, out);
+    if (u64(lsn) + count > sectors_) return false;
+    const u32 size = PatternSize(pattern);
+    // 2340 starts at the header (offset 12), 2328 after the subheader (24).
+    const u32 from = pattern == 2 ? 12 : 24;
+    std::vector<u8> raw(kRawSectorSize);
+    for (u32 i = 0; i < count; ++i) {
+        u8* dst = out + std::size_t(i) * size;
+        if (data_offset_) {
+            if (!ReadBytes(u64(lsn + i) * kRawSectorSize, kRawSectorSize, raw.data())) return false;
+            std::memcpy(dst, &raw[from], size);
+            continue;
+        }
+        // An .iso: a Mode 2 Form 1 sector made around its data.
+        std::memset(raw.data(), 0, raw.size());
+        const u32 address = lsn + i + 150;          // the 2-second lead-in
+        raw[12] = ToBcd(address / 75 / 60);
+        raw[13] = ToBcd(address / 75 % 60);
+        raw[14] = ToBcd(address % 75);
+        raw[15] = 2;
+        raw[18] = raw[22] = 0x08;                   // subheader submode: data
+        if (!Read(lsn + i, 1, &raw[24])) return false;
+        std::memcpy(dst, &raw[from], size);
+    }
+    return true;
 }
 
 bool Disc::Find(const std::string& path, File* out) {

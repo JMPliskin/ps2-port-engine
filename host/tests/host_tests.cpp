@@ -127,6 +127,31 @@ void DiscFindsFilesByPath() {
     u8 sector[ps2host::kSectorSize];
     Check(disc.Read(21, 1, sector) && std::memcmp(sector, "hello", 5) == 0, "reading a sector");
     Check(!disc.Read(30, 1, sector), "reading past the end");
+    Check(disc.IsCd(), "a small .iso counts as a CD");
+
+    // The same disc as a raw CD image: Mode 2 sectors, data after the subheader.
+    std::vector<u8> raw(image.size() / kSectorSize * ps2host::kRawSectorSize, 0);
+    for (std::size_t i = 0; i < image.size() / kSectorSize; ++i) {
+        u8* s = &raw[i * ps2host::kRawSectorSize];
+        std::memset(s + 1, 0xFF, 10);
+        s[15] = 2;
+        s[16] = 0xAB;                                   // a subheader byte to see in 2340/2328 reads
+        std::memcpy(s + 24, &image[i * kSectorSize], kSectorSize);
+    }
+    ps2host::Disc cd;
+    cd.Use(raw);
+    Check(cd.IsCd(), "a raw image is a CD");
+    Check(cd.Find("/dir/inner.dat", &file) && file.lsn == 23 && file.size == 3, "a raw image's files");
+    Check(cd.Read(21, 1, sector) && std::memcmp(sector, "hello", 5) == 0, "a raw sector's data");
+    std::vector<u8> big(2340);
+    Check(cd.ReadPattern(21, 1, 2, big.data()) && big[3] == 2 && big[4] == 0xAB &&
+              std::memcmp(&big[12], "hello", 5) == 0,
+          "a 2340-byte read: header, subheader, data");
+    Check(cd.ReadPattern(21, 1, 1, big.data()) && std::memcmp(&big[0], "hello", 5) == 0,
+          "a 2328-byte read starts at the data");
+    Check(disc.ReadPattern(21, 1, 2, big.data()) && big[3] == 2 && std::memcmp(&big[12], "hello", 5) == 0,
+          "an .iso's 2340-byte read has a made header");
+    Check(!cd.Read(24, 1, sector), "reading past a raw image's end");
 }
 
 void BiosIsReadOnly() {

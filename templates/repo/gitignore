@@ -2,6 +2,10 @@
 # files, or anything derived from them that contains the game's code or assets.
 *.iso
 *.ISO
+*.bin
+*.BIN
+*.cue
+*.img
 extracted/
 asm/
 build/

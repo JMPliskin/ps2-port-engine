@@ -96,7 +96,7 @@ std::vector<u8> SCommand(u32 procedure, const std::vector<u8>& /*data*/) {
             return reply;
         }
         case 0x03:                                      // sceCdGetDiskType
-            return Word(GuestDisc().IsOpen() ? 0x14 : 0x00);   // SCECdPS2DVD, or none
+            return Word(!GuestDisc().IsOpen() ? 0x00 : GuestDisc().IsCd() ? 0x12 : 0x14);  // none, SCECdPS2CD, SCECdPS2DVD
         case 0x05: {                                    // sceCdTrayReq: result, tray state
             std::vector<u8> reply = Word(1);
             const std::vector<u8> closed = Word(0);
