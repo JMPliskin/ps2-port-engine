@@ -55,6 +55,13 @@ and how a release is made is skill `ps2-release`.
 
 ## Repository map
 
+The engine is its own repository (`ps2-port-engine`); each game is a
+repository of its own (`<game>-pc`, e.g. `burnout3-pc`) with the engine as a
+git submodule at `engine/`, pinned to an engine tag. Paths here are from a
+game repository's root. An engine change is made in the submodule (its own
+commits, pushed to `ps2-port-engine`), checked against every game's scripted
+runs, tagged, and then each game moves its pin.
+
 ```
 engine/ps2decomp/   the library (interpreter, derivation, struct recovery, ...)
 engine/tools/       CLI drivers; every one takes --game (default: $PS2_GAME, or
