@@ -381,6 +381,50 @@ _CONDITIONS = {
 }
 
 
+_POINTER_WORDS = {}
+
+
+def _pointer_words(image: bytes, base: int) -> list:
+    """Every aligned word of the image that holds an address inside it, sorted."""
+    key = (id(image), len(image), base)
+    if key not in _POINTER_WORDS:
+        words = struct.unpack_from("<%dI" % (len(image) // 4), image)
+        _POINTER_WORDS.clear()
+        _POINTER_WORDS[key] = sorted({w for w in words
+                                      if w & 3 == 0 and base <= w < base + len(image)})
+    return _POINTER_WORDS[key]
+
+
+def jump_targets(image: bytes, base: int, code) -> set:
+    """Addresses a jr through a register may reach in `code`: words anywhere in
+    the image that point into it (jump tables), address constants it builds
+    (lui with addiu/daddiu/ori on the same register) and its calls' return
+    points. A superset of the tables' entries; the start is always included."""
+    import bisect
+    addresses = {ins.addr for ins in code}
+    low, high = min(addresses), max(addresses) + 4
+    words = _pointer_words(image, base)
+    targets = {code[0].addr}
+    targets.update(w for w in words[bisect.bisect_left(words, low):bisect.bisect_left(words, high)]
+                   if w in addresses)
+    upper = {}
+    for ins in code:
+        m, raw = ins.mnemonic, ins.raw
+        if m == "lui":
+            upper.setdefault(ins.rt, set()).add((raw & 0xFFFF) << 16)
+        elif m in ("addiu", "daddiu", "ori") and ins.rs in upper:
+            low16 = raw & 0xFFFF
+            if m != "ori" and low16 & 0x8000:
+                low16 -= 0x10000
+            for hi in upper[ins.rs]:
+                value = (hi | low16) if m == "ori" else (hi + low16) & MASK32
+                if value in addresses:
+                    targets.add(value)
+        if ins.is_call and ins.addr + 8 in addresses:
+            targets.add(ins.addr + 8)
+    return targets
+
+
 def lift_function(image: bytes, base: int, start: int, end: int, chunks=()) -> str:
     """The C++ definition of one function; raises Refused if it cannot be lifted.
 
@@ -425,10 +469,15 @@ def lift_function(image: bytes, base: int, start: int, end: int, chunks=()) -> s
                 if ins.target <= ins.addr:
                     loop_heads.add(ins.target)
     if dispatch:
-        # A jump table can reach any instruction; every one is a possible target,
-        # and any of them can begin a loop.
-        labels = {ins.addr for ins in code}
-        loop_heads = set(labels)
+        # Where a jr through a register can land in this function: what a jump
+        # table or an address constant names, and the return points of its calls.
+        # Any of them can begin a loop. A target outside the set leaves through
+        # the dispatch's default, a tail transfer the host reports - never a
+        # silent wrong turn. (Every instruction a target made one compiler take
+        # twelve minutes over a function of thirteen thousand.)
+        dispatched = sorted(a for a in jump_targets(image, base, code) if a in by_address)
+        labels.update(dispatched)
+        loop_heads.update(dispatched)
     for _first, last in ranges[:-1]:
         if inside(last):
             labels.add(last)                # a piece that runs on into another
@@ -478,7 +527,7 @@ def lift_function(image: bytes, base: int, start: int, end: int, chunks=()) -> s
         elif m == "jr" and ins.rs == 31:
             body = [slot_text, "return;"]
         elif m == "jr":
-            body = ["jump = (u32)%s;" % _r(ins.rs), slot_text, _dispatch(code)]
+            body = ["jump = (u32)%s;" % _r(ins.rs), slot_text, "goto dispatch;"]
         elif m == "jalr":
             body = ["{ u32 target = (u32)%s;" % _r(ins.rs), slot_text, link,
                     "lifted::Call(c, target); }"]
@@ -501,6 +550,13 @@ def lift_function(image: bytes, base: int, start: int, end: int, chunks=()) -> s
                          "    lifted::TailCall(c, 0x%08Xu, entry_ra, entry_sp); return;" % after)
             labels.add(after) if inside(after) else None
     lines.append("    lifted::TailCall(c, 0x%08Xu, entry_ra, entry_sp);  /* runs off the end */" % running)
+    if dispatch:
+        # One switch for every jr through a register: a copy at each would be
+        # tens of thousands of cases apiece in a big function - beyond what a
+        # compiler takes in reasonable time and memory.
+        lines.append("    return;")
+        lines.append("dispatch:")
+        lines.append("    " + _dispatch(dispatched))
     lines.append("}")
     text = "\n".join(lines)
     # A label is only emitted at an instruction; make sure every goto has one.
@@ -516,7 +572,7 @@ def _transfer(target: int, inside) -> str:
     return "{ lifted::TailCall(c, 0x%08Xu, entry_ra, entry_sp); return; }" % target
 
 
-def _dispatch(code) -> str:
-    cases = " ".join("case 0x%08Xu: goto L_%08X;" % (ins.addr, ins.addr) for ins in code)
+def _dispatch(targets) -> str:
+    cases = " ".join("case 0x%08Xu: goto L_%08X;" % (a, a) for a in targets)
     return ("switch (jump) { %s default: lifted::TailCall(c, jump, entry_ra, entry_sp); "
             "return; }" % cases)

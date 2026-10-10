@@ -398,6 +398,19 @@ class TestLiftRefusals(unittest.TestCase):
         self.assertIn("goto L_%08X;" % (BASE + 0x0C), text)      # and back
         self.assertNotIn("TailCall(c, 0x%08Xu" % (BASE + 0x40), text)
 
+    def test_a_register_jump_dispatches_to_what_can_be_its_targets(self):
+        # 00: lui $t1, 0x0010 / 04: addiu $t1, $t1, 0x18 / 08: jr $a0 / 0C: nop /
+        # 10, 14, 18: addiu $v0, $zero, 1, 2, 3 / 1C: jr $ra / 20: nop; and a jump
+        # table at 0x40 naming 0x10. 0x18 is an address constant; 0x14 nothing names.
+        words = [lui(T1, 0x0010), addiu(T1, T1, 0x18), r_type(0x08, rs=A0), NOP,
+                 addiu(V0, 0, 1), addiu(V0, 0, 2), addiu(V0, 0, 3), JR_RA, NOP] + [NOP] * 7 + [BASE + 0x10]
+        image = struct.pack("<%dI" % len(words), *words)
+        text = lift.lift_function(image, BASE, BASE, BASE + 0x24)
+        self.assertEqual(text.count("switch (jump)"), 1)
+        for target in (BASE, BASE + 0x10, BASE + 0x18):
+            self.assertIn("case 0x%08Xu: goto L_%08X;" % (target, target), text)
+        self.assertNotIn("case 0x%08Xu:" % (BASE + 0x14), text)
+
     def test_vcallms_runs_vu0_through_the_host(self):
         # vcallms 0x30: the microprogram at instruction 6 (byte 0x30).
         image = struct.pack("<3I", 0x4A000038 | (6 << 6), JR_RA, NOP)

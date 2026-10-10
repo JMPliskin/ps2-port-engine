@@ -32,7 +32,26 @@ from ps2decomp.liftverify import abi_view, verify  # noqa: F401  (also used by t
 from ps2decomp import game as game_config
 from ps2decomp.emu import Machine
 
+# A file holds at most CHUNK functions and, past its first, CHUNK_BYTES of
+# source: a few huge functions (CodeWarrior's inlining makes some of 50 KB of
+# code) would otherwise put tens of megabytes in one file - one compiler at
+# /O2 for most of an hour, the others idle.
 CHUNK = 300
+CHUNK_BYTES = 1500000
+
+
+def _groups(addresses, texts):
+    """The addresses split into files' worth, in order."""
+    group, size = [], 0
+    for address in addresses:
+        length = len(texts[address])
+        if group and (len(group) >= CHUNK or size + length > CHUNK_BYTES):
+            yield group
+            group, size = [], 0
+        group.append(address)
+        size += length
+    if group:
+        yield group
 
 def lift_all(functions, image, base):
     """{address: C++}, plus a Counter of why the rest were refused."""
@@ -88,10 +107,9 @@ def write_chunks(lifted: dict, directory: str, prefix: str, unverified=None,
     for stale in os.listdir(directory):
         if stale.startswith(prefix) and stale.endswith(".cpp"):
             _remove(os.path.join(directory, stale))
-    addresses = sorted(lifted)
     paths = []
-    for index in range(0, len(addresses), CHUNK):
-        path = os.path.join(directory, "%s_%03d.cpp" % (prefix, index // CHUNK))
+    for index, group in enumerate(_groups(sorted(lifted), lifted)):
+        path = os.path.join(directory, "%s_%03d.cpp" % (prefix, index))
         with open(path, "w", encoding="utf-8", newline="\n") as handle:
             handle.write("/* Lifted from the original machine code by engine/tools/lift.py:\n"
                          " * one statement per instruction. Every function was checked\n"
@@ -99,7 +117,7 @@ def write_chunks(lifted: dict, directory: str, prefix: str, unverified=None,
                          " * NOT VERIFIED. Generated - do not edit. */\n\n")
             handle.write('#include "ps2rt/lifted.h"\n\n')
             handle.write("using namespace generated;\nusing namespace lifted;\n\n")
-            for address in addresses[index:index + CHUNK]:
+            for address in group:
                 if address in names:
                     handle.write("/* %s (%s) */\n" % names[address])
                 if address in unverified:
