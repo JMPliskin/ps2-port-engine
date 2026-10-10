@@ -21,6 +21,19 @@ VU tools document theirs (`engine/tools/pcsx2dump.py`, `PS2HOST_REPLAY_*`,
 - **The engine stays game-independent.** A fix every game needs goes in
   `engine/`; what only this game needs goes in its `port/` (an override, a
   hook). Never a game's address or quirk as a constant in `engine/`.
+- **The engine takes what two games proved, plus plumbing.** Host hooks,
+  settings storage, the profiler: engine. A game's own PC features (its menus'
+  mouse, its widescreen anchors, its packaging) stay in its repository, even
+  when they look general - until a second game needs the same; then move the
+  common part, shaped by both. Don't generalise from one game.
+- **An engine version is tagged only when every game passes.** The engine is
+  a submodule (`engine/`) of each game repository, pinned to a tag. An engine
+  change: commit in `engine/`, `python engine/tools/regress_all.py
+  [<other game repositories>]` (each one's `engine/` checked out at the
+  candidate commit - it warns otherwise), then - with the user's go-ahead, the
+  engine is public - push, tag, and move each game's pin.
+- **A new game starts from the templates**:
+  `python engine/tools/port.py init <name> --iso "<disc>" --title "..."`.
 - **A scripted run is the test.** `--virtual-time` runs are deterministic:
   the same presses on the same frames, byte-identical pictures on any machine.
   Every change to the GPU bridge, the renderer, the host's memory, DMA or VU

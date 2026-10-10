@@ -13,7 +13,8 @@ engine/runtime/   PS2 instruction semantics: FPU, VU0 macro mode, integer edge
                   port runs exactly the semantics every function was verified on.
 engine/host/      The PC platform: guest memory, dispatch, the EE kernel, devices.
 games/<g>/src/lifted/   The game's translated functions (lift.py --emit).
-games/<g>/port/   The game's port: CMakeLists.txt and overrides.cpp.
+games/<g>/port/   The game's port: CMakeLists.txt and overrides.cpp
+                  (a new game's from engine/templates: port.py init).
 ```
 
 Translated code reaches its environment only through a few hooks

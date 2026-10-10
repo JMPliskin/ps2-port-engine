@@ -60,8 +60,12 @@ Code finds the skills in `engine/.claude/skills`.
 
 1. A repository for it, with this one as its engine:
    `git submodule add https://github.com/danielgomesvieira2000/ps2-port-engine engine`
-2. `games/<game>/game.json` with the game's `name`, `title`, `iso` and
-   `executable` (`SLUS_...`, `SLES_...`: SYSTEM.CNF's BOOT2 line).
+2. The game's directory, from `templates/`:
+   `python engine/tools/port.py init <game> --iso "<your disc image>" --title "<Its Title>"`
+   writes `games/<game>/` (game.json with the executable read from the
+   disc's SYSTEM.CNF, the port's build, an empty overrides.cpp, the player's
+   README, a findings stub) and the repository's `.gitignore`, which keeps
+   disc material and the game's code out.
 3. The pipeline, from the game repository's root:
 
    ```sh
@@ -76,6 +80,16 @@ Code finds the skills in `engine/.claude/skills`.
 4. The bring-up loop: each run reports why it stopped; what every game needs
    is fixed here, what only this game needs in its own `port/`. See
    [docs/PORTING.md](docs/PORTING.md) and the skills.
+
+What belongs here: what two games have proved they both need, and the
+plumbing every port uses (the host's hooks, settings storage, the profiler).
+A game's own features - its menus' mouse support, its widescreen anchors,
+its packaging - stay in its repository until a second game needs the same;
+then the common part moves here, shaped by both.
+
+An engine version is tagged only after every game's recorded runs pass
+against it: `python engine/tools/regress_all.py [<other game repositories>]`.
+A game repository then moves its `engine/` submodule to the new tag.
 
 ## Tests
 

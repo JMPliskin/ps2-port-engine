@@ -4,6 +4,7 @@
     python engine/tools/port.py --game games/<name>            # generate, build, run
     python engine/tools/port.py --game games/<name> build      # generate and build only
     python engine/tools/port.py --game games/<name> run -- --trace
+    python engine/tools/port.py init <name> --iso "<disc image>" --title "..."  # a new game
 
 The port is the game's translated functions (src/lifted, from lift.py --emit) on
 the native host (engine/host): guest memory, a dispatch table from guest address
@@ -223,6 +224,11 @@ def run(game, executable: str, extra) -> int:
 
 
 def main(argv=None) -> int:
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if argv[:1] == ["init"]:
+        # A new game: there is no game directory yet for --game to name.
+        import init_game
+        return init_game.main(argv[1:])
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     game_config.add_argument(parser)
     parser.add_argument("action", nargs="?", default="all", choices=("all", "build", "run"))

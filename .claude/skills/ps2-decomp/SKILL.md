@@ -79,11 +79,14 @@ games/<name>/       game.json, src/, include/, config/functions.csv, docs/,
 ## Adding a new game
 
 1. Ask the user for the disc image. Never look for one online.
-2. Find the executable's name with
-   `python engine/tools/isotool.py list "<iso>"` (`SLUS_xxx.xx`, `SLES_...`,
-   `SCUS_...`; `SYSTEM.CNF` names it on the `BOOT2` line).
-3. Create `games/<name>/game.json` with at least `name`, `iso` (relative to the
-   game directory) and `executable`. Leave `layout` out at first. The image bounds
+2. In a new game repository with this engine as its `engine/` submodule
+   (`git submodule add https://github.com/danielgomesvieira2000/ps2-port-engine engine`).
+3. `python engine/tools/port.py init <name> --iso "<iso>" --title "<Title>"`
+   writes `games/<name>/` from `engine/templates/game` - `game.json` (`name`,
+   `title`, `iso` relative to the game directory, and `executable`, read from
+   SYSTEM.CNF's `BOOT2` line), the port's build, an empty overrides.cpp, the
+   player's README, a findings stub - and the repository's `.gitignore`.
+   Leave `layout` out at first. The image bounds
    come from the ELF, and `$gp` is detected from the entry code. If
    `engine/ps2decomp/game.py`'s `detect_gp` returns None, find `$gp` by hand in
    the entry code and set `"layout": {"gp": "0x..."}`.
@@ -139,8 +142,8 @@ games/<name>/       game.json, src/, include/, config/functions.csv, docs/,
    ```sh
    python engine/tools/port.py --game games/<name>
    ```
-   Copy `games/burnout3/port/` (CMakeLists.txt naming the target, an empty
-   overrides.cpp) for a new game. The run's report - why it stopped, the guest
+   `port.py init` (step 3) wrote its `port/` (CMakeLists.txt naming the
+   target, an empty overrides.cpp). The run's report - why it stopped, the guest
    call stack, kernel services, device registers - names the next thing the
    host must provide; implement it in engine/host if every game needs it, as
    an override in the game's port if only this one does.
