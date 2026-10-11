@@ -32,7 +32,9 @@ namespace ps2host {
 
 namespace {
 
-constexpr char kVersion[4] = {'2', '8', '0', '0'};
+// The release the IOP's loadfile answers: until the game reboots the IOP with
+// a replacement image, the one Burnout 3's ROM-booted IOP was taken to have.
+char g_version[4] = {'2', '8', '0', '0'};
 constexpr s32 kNoSuchProcedure = -1;
 constexpr u32 kResidentEnd = 0;     // a module's start result: started, stays loaded
 
@@ -67,7 +69,7 @@ std::vector<u8> RunFromDisc(s32 id, const std::string& path, const std::vector<u
 
 std::vector<u8> LoadFile(u32 procedure, const std::vector<u8>& data) {
     static s32 next_id = 1;
-    if (procedure == 0xFF) return std::vector<u8>(kVersion, kVersion + 4);
+    if (procedure == 0xFF) return std::vector<u8>(g_version, g_version + 4);
     if (procedure == 0 && data.size() >= 0x104) {
         const char* begin = reinterpret_cast<const char*>(&data[8]);
         const std::string path(begin, strnlen(begin, 252));
@@ -85,5 +87,31 @@ std::vector<u8> LoadFile(u32 procedure, const std::vector<u8>& data) {
 }  // namespace
 
 void InstallLoadFile() { RegisterRpcServer(0x80000006u, LoadFile); }
+
+// An IOP replacement image (IOPRPnnn.IMG) holds its modules, each with its
+// library tag - eight characters of name, four of release: "loadfile2340".
+// Its loadfile's release is what loadfile answers from then on.
+void UseIopImage(const std::string& path) {
+    std::string disc_path = path;
+    const std::size_t colon = disc_path.find(':');
+    if (colon != std::string::npos) disc_path = disc_path.substr(colon + 1);
+    std::vector<u8> image;
+    if (!GuestDisc().IsOpen() || !GuestDisc().ReadFile(disc_path, &image)) {
+        Note("iop image " + path, "IOP: reboot image " + path + " is not on the disc");
+        return;
+    }
+    static const char kTag[] = "loadfile";
+    for (std::size_t i = 0; i + 12 <= image.size(); ++i) {
+        if (std::memcmp(&image[i], kTag, 8) != 0) continue;
+        bool digits = true;
+        for (int k = 8; k < 12; ++k) digits = digits && image[i + k] >= '0' && image[i + k] <= '9';
+        if (!digits) continue;
+        std::memcpy(g_version, &image[i + 8], 4);
+        Note("iop image " + path, "IOP: rebooted with " + path + ": loadfile " +
+                                      std::string(g_version, 4));
+        return;
+    }
+    Note("iop image " + path, "IOP: reboot image " + path + " has no loadfile tag");
+}
 
 }  // namespace ps2host

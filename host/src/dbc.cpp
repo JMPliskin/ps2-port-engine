@@ -210,6 +210,110 @@ std::vector<u8> Server(u32 procedure, const std::vector<u8>& request) {
     }
 }
 
+/*
+ * The older controller module, padman (servers 0x80000100 and 0x80000101),
+ * behind libpad 2.x - as Mister Mosquito's copy (0x0010AF50-0x0010C100,
+ * "PsIIlibpad  2300", padman 4.x) speaks it. A call is procedure 1 with a
+ * 0x80-byte buffer: +0 the command, then its arguments; the answer's result
+ * is at +0xC.
+ *
+ *   0x12  version: +0xC = major << 8 | minor (the library needs major 4)
+ *   0x10  init      0x0F  end
+ *   0x01  scePadPortOpen: +4 port, +8 slot, +0x10 the EE pad area (two
+ *         0x80-byte frames); answer +0x14 the IOP address libpad DMAs its
+ *         actuator settings to
+ *   0x0E  scePadPortClose: +4 port, +8 slot
+ *
+ * The module writes the pad's state into the older of the two frames each
+ * frame, numbering it past the other:
+ *   +0x00 the report: 0 (ok), the mode ID (0x73: DualShock, analog), the
+ *         buttons (active low), the sticks; its length at +0x60
+ *   +0x58 u32 frame number (libpad reads the frame with the larger)
+ *   +0x50 u16 mode table (pad types: 4 digital, 7 DualShock), +0x64 2 (a
+ *         controller with modes), +0x65 the mode ID, +0x68 modes, +0x69 the
+ *         current mode, +0x6A actuators
+ *   +0x70 state (6: stable), +0x71 request state (0: done, 2: busy),
+ *   +0x72 1 (a controller is there)
+ */
+struct PadArea {
+    u32 port = 0, slot = 0, area = 0;
+    u32 frame = 0;
+};
+std::map<u64, PadArea>& PadAreas() {
+    static std::map<u64, PadArea> areas;
+    return areas;
+}
+constexpr u8 kPadmanMode = 0x73;                // DualShock, analog: 3 halfwords after the header
+
+std::vector<u8> Padman(u32 /*procedure*/, const std::vector<u8>& request) {
+    std::vector<u8> answer(request.size() < 0x80 ? 0x80 : request.size(), 0);
+    std::copy(request.begin(), request.end(), answer.begin());
+    const u32 command = At(request, 0);
+    switch (command) {
+        case 0x12:
+            Put(answer, 0xC, 0x0400);
+            return answer;
+        case 0x10: case 0x0F:
+            Put(answer, 0xC, 1);
+            return answer;
+        case 0x01: {
+            PadArea p;
+            p.port = At(request, 4);
+            p.slot = At(request, 8);
+            p.area = At(request, 0x10);
+            PadAreas()[u64(p.port) << 32 | p.slot] = p;
+            char text[96];
+            std::snprintf(text, sizeof text, "PAD: port %u slot %u open (pad area 0x%08X)%s",
+                          unsigned(p.port), unsigned(p.slot), unsigned(p.area),
+                          Present(p.port) && p.slot == 0 ? "" : ": nothing plugged in");
+            Note("padman open " + std::to_string(p.port), text);
+            Put(answer, 0xC, 1);
+            Put(answer, 0x14, 0x001F0000u + 0x100 * (p.port * 4 + p.slot));
+            return answer;
+        }
+        case 0x0E:
+            PadAreas().erase(u64(At(request, 4)) << 32 | At(request, 8));
+            Put(answer, 0xC, 1);
+            return answer;
+        default: {
+            char text[96];
+            std::snprintf(text, sizeof text, "PAD: padman command 0x%X (answered done)", unsigned(command));
+            Note("padman " + std::to_string(command), text);
+            Put(answer, 0xC, 1);
+            return answer;
+        }
+    }
+}
+
+void PadmanFrame() {
+    Memory& m = GuestMemory();
+    for (auto& [key, p] : PadAreas()) {
+        const u32 f = p.area + 0x80 * ((p.frame + 1) & 1);
+        ++p.frame;
+        const bool present = Present(p.port) && p.slot == 0;
+        for (u32 i = 0; i < 0x80; i += 4) m.Write(f + i, 0, 4);
+        m.Write(f + 0x58, p.frame, 4);
+        m.Write(f + 0x70, present ? 6 : 0, 1);           // stable, or disconnected
+        m.Write(f + 0x71, 0, 1);
+        if (!present) continue;
+        u8 data[kDataBytes];
+        PadData(data);
+        const u32 length = 2 + 2 * (kPadmanMode & 0xF);
+        m.Write(f + 0, 0, 1);
+        m.Write(f + 1, kPadmanMode, 1);
+        for (u32 i = 0; i + 2 < length; ++i) m.Write(f + 2 + i, data[i], 1);
+        m.Write(f + 0x60, length, 4);
+        m.Write(f + 0x50, 4, 2);                         // digital,
+        m.Write(f + 0x52, 7, 2);                         // DualShock
+        m.Write(f + 0x64, 2, 1);
+        m.Write(f + 0x65, kPadmanMode, 1);
+        m.Write(f + 0x68, 2, 1);
+        m.Write(f + 0x69, 1, 1);
+        m.Write(f + 0x6A, 2, 1);
+        m.Write(f + 0x72, 1, 1);
+    }
+}
+
 }  // namespace
 
 bool ScriptPress(const std::string& button, u64 from, u64 to) {
@@ -226,6 +330,7 @@ bool ScriptPress(const std::string& button, u64 from, u64 to) {
 // Each frame: every socket's device writes its state into the next block.
 void DbcFrame() {
     ++g_frame;
+    PadmanFrame();
     Dbc& d = D();
     Memory& m = GuestMemory();
     for (auto& [id, s] : d.sockets) {
@@ -259,6 +364,8 @@ void InstallDbc() {
     // their servers' ids are the procedures', and dbcman answers them alike.
     RegisterRpcServer(0x8000131Bu, Server);
     RegisterRpcServer(0x8000131Cu, Server);
+    RegisterRpcServer(0x80000100u, Padman);
+    RegisterRpcServer(0x80000101u, Padman);
 }
 
 u16 PadButtonsHeld() { return g_held; }

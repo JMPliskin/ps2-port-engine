@@ -105,9 +105,55 @@ std::vector<u8> SCommand(u32 procedure, const std::vector<u8>& /*data*/) {
         }
         case 0x22:                                      // sceCdMmode: the media mode is set
             return Word(1);
+        case 0x04:                                      // sceCdGetError: SCECdErNO
+            // SDK 2.3's library reads one word, the error (Mister Mosquito,
+            // 0x0010D9E0); every read here succeeds.
+            return Word(0);
         default:
             Note("cd scmd " + std::to_string(procedure),
                  "CD: S-command " + std::to_string(procedure) + " (answered with zeros)");
+            return {};
+    }
+}
+
+// sceCdInit (server 0x80000592, procedure 0): sent the init mode; the drive is
+// ready at once.
+std::vector<u8> CdInit(u32 /*procedure*/, const std::vector<u8>& /*data*/) { return Word(1); }
+
+// N-commands (server 0x80000595): the procedure is the command. Reads finish at
+// once - the sectors are in EE memory when the call's end arrives.
+//   1  sceCdRead: { u32 lsn, sectors, EE buffer, mode (trycount, spindlctrl,
+//      datapattern, -), u32 EE address of the library's unaligned-ends record,
+//      - }. cdvdfsv sends a buffer's 64-byte-aligned middle by DMA and its
+//      ragged ends through that record { u32 length1, length2, dest1, dest2,
+//      u8 bytes1[64], bytes2[64] }, which the library's completion copies out:
+//      here every byte goes straight to the buffer and the record says none.
+//  14  sceCdDiskReady (N): 2, SCECdComplete.
+std::vector<u8> NCommand(u32 procedure, const std::vector<u8>& data) {
+    Memory& m = GuestMemory();
+    switch (procedure) {
+        case 1: {
+            if (data.size() < 20) return Word(0);
+            const u32 lsn = At(data, 0), sectors = At(data, 4), buffer = At(data, 8);
+            const u32 pattern = (At(data, 12) >> 16) & 0xFF, ends = At(data, 16);
+            std::vector<u8> bytes(std::size_t(sectors) * Disc::PatternSize(pattern));
+            const bool ok = GuestDisc().IsOpen() &&
+                            GuestDisc().ReadPattern(lsn, sectors, pattern, bytes.data());
+            char text[160];
+            std::snprintf(text, sizeof text, "CD: read %u sectors at %u to 0x%08X (pattern %u, ends 0x%08X)%s",
+                          sectors, lsn, buffer, pattern, ends, ok ? "" : " - past the disc's end");
+            Note("cd read", text);
+            if (!ok) return Word(0);
+            for (std::size_t i = 0; i < bytes.size(); ++i) m.Write(buffer + u32(i), bytes[i], 1);
+            if (ends)
+                for (u32 k = 0; k < 16; ++k) m.Write(ends + k, 0, 1);
+            return Word(1);
+        }
+        case 14:
+            return Word(2);
+        default:
+            Note("cd ncmd " + std::to_string(procedure),
+                 "CD: N-command " + std::to_string(procedure) + " (answered with zeros)");
             return {};
     }
 }
@@ -120,6 +166,9 @@ void InstallIopServers() {
     InstallDbc();
     InstallIopHeap();
     RegisterRpcServer(0x8000059Cu, DiskReady);
+    RegisterRpcServer(0x8000059Au, DiskReady);      // the same, as SDK 2.3's libcdvd binds it
+    RegisterRpcServer(0x80000592u, CdInit);
+    RegisterRpcServer(0x80000595u, NCommand);
     RegisterRpcServer(0x80000597u, SearchFile);
     RegisterRpcServer(0x80000593u, SCommand);
 }

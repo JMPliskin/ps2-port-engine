@@ -73,6 +73,24 @@ std::vector<u32>& CurrentCalls();
 /* The sampler's (profile.cpp): the guest call stack now, innermost first, up
    to max entries, read while the EE's host thread is suspended. */
 int GuestCallsNow(u32* out, int max);
+/* Guest coroutines: code that switches guest stacks itself - a game's own task
+   system, saving a task's registers and jumping into another's - cannot run
+   as nested native calls. Each guest stack runs on a host fiber of the EE
+   thread running it instead, and the port's overrides of the game's switch
+   routines switch fibers where the game switched stacks. The thread keeps its
+   own fiber (null below); blocking in the kernel inside a coroutine resumes it
+   there. Never in an interrupt handler. */
+struct Coroutine;
+/* A coroutine of the running thread that runs `body` once first switched to;
+   when body returns, it is finished and the thread's own fiber resumes. */
+Coroutine* CreateCoroutine(std::function<void()> body);
+/* Run `to` (null: the thread's own fiber) until something switches back. */
+void SwitchCoroutine(Coroutine* to);
+/* The coroutine running now; null on the thread's own fiber. */
+Coroutine* CurrentCoroutine();
+bool CoroutineFinished(const Coroutine* co);
+/* Free a coroutine that is not running; native frames left on it are dropped. */
+void DeleteCoroutine(Coroutine* co);
 /* In an interrupt handler: the call stack of the thread it interrupted. */
 std::vector<u32> InterruptedCalls();
 /* Every guest register context: the threads' and the interrupt handlers'. */
@@ -100,6 +118,9 @@ void QueueRpcEnd(const std::vector<u8>& request, u32 server, u32 buffer, u32 cbu
 void InstallIopServers();
 void InstallFileIo();
 void InstallLoadFile();
+/* The IOP rebooted with a replacement image from the disc (IOPRPnnn.IMG):
+   the releases of its modules - loadfile's answers its version check. */
+void UseIopImage(const std::string& path);
 void InstallDbc();
 void InstallIopHeap();
 /* Signal an EE semaphore from the host (the IOP finishing a request); the

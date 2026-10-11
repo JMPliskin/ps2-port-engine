@@ -80,8 +80,24 @@ struct Thread {
     u64 runs = 0;                   // times the scheduler switched to it, for the report
     lifted::Context context = NewContext();
     std::vector<u32> calls;         // the guest call stack, for the report
-    LPVOID fiber = nullptr;
+    LPVOID fiber = nullptr;         // the fiber it runs on now (a coroutine's, while one runs)
+    // Guest coroutines (run.h): the thread's own fiber while one of them runs,
+    // which runs, and the thread's own call stack meanwhile.
+    LPVOID home = nullptr;
+    Coroutine* coroutine = nullptr;
+    std::vector<u32> home_calls;
 };
+
+}  // namespace
+
+struct Coroutine {
+    LPVOID fiber = nullptr;
+    std::function<void()> body;
+    std::vector<u32> calls;         // its guest call stack, while it is not running
+    bool finished = false;
+};
+
+namespace {
 
 struct Semaphore {
     s32 count = 0, max = 0;
@@ -642,6 +658,59 @@ std::vector<u32>& CurrentCalls() {
     return s.current->calls;
 }
 
+namespace {
+
+void CALLBACK CoroutineMain(void* parameter) {
+    Coroutine& co = *static_cast<Coroutine*>(parameter);
+    try {
+        co.body();
+    } catch (...) {
+        S().stop = std::current_exception();
+        SwitchToFiber(S().host_fiber);          // never resumed
+    }
+    co.finished = true;
+    SwitchCoroutine(nullptr);                   // never resumed
+}
+
+}  // namespace
+
+Coroutine* CreateCoroutine(std::function<void()> body) {
+    if (!S().current || S().in_interrupt) throw Unimplemented{"a guest coroutine outside a thread"};
+    auto* co = new Coroutine;
+    co->body = std::move(body);
+    co->fiber = CreateFiber(1 << 20, CoroutineMain, co);
+    return co;
+}
+
+void SwitchCoroutine(Coroutine* to) {
+    Scheduler& s = S();
+    Thread* t = s.current;
+    if (!t || s.in_interrupt) throw Unimplemented{"a guest coroutine switch outside a thread"};
+    Coroutine* from = t->coroutine;
+    if (from == to) return;
+    if (!from) t->home = t->fiber;
+    // The call stack the report and the sampler show goes with the fiber.
+    (from ? from->calls : t->home_calls) = std::move(t->calls);
+    t->calls = std::move(to ? to->calls : t->home_calls);
+    t->coroutine = to;
+    t->fiber = to ? to->fiber : t->home;
+    SwitchToFiber(t->fiber);
+}
+
+Coroutine* CurrentCoroutine() {
+    const Scheduler& s = S();
+    return s.current && !s.in_interrupt ? s.current->coroutine : nullptr;
+}
+
+bool CoroutineFinished(const Coroutine* co) { return co->finished; }
+
+void DeleteCoroutine(Coroutine* co) {
+    if (!co) return;
+    if (co == CurrentCoroutine()) throw Unimplemented{"a guest coroutine deleted while it runs"};
+    DeleteFiber(co->fiber);
+    delete co;
+}
+
 std::vector<u32> InterruptedCalls() {
     Scheduler& s = S();
     return s.in_interrupt && s.current ? s.current->calls : std::vector<u32>();
@@ -870,6 +939,9 @@ bool ThreadSyscall(lifted::Context& c, s32 number, u64& result) {
             t->context.r[29] = t->stack + t->stack_size - 0x2A0;
             t->context.budget = s.virtual_time ? kSliceIterations : s.loop_budget;
             t->calls.clear();
+            if (t->home) t->fiber = t->home;    // a coroutine's fiber stays its owner's
+            t->home = nullptr;
+            t->coroutine = nullptr;
             if (t->fiber) DeleteFiber(t->fiber);
             t->fiber = CreateFiber(1 << 20, ThreadMain, t);
             MakeReady(*t);

@@ -34,7 +34,7 @@ namespace ps2host {
 
 namespace {
 
-constexpr u32 kChangeSaddr = 0x80000000u, kSetSreg = 0x80000001u;
+constexpr u32 kChangeSaddr = 0x80000000u, kSetSreg = 0x80000001u, kReset = 0x80000003u;
 constexpr u32 kRpcEnd = 0x80000008u, kRpcBind = 0x80000009u, kRpcCall = 0x8000000Au;
 constexpr u32 kSif0Channel = 5;
 // Where the host pretends each bound server lives in IOP memory: never read by
@@ -112,6 +112,21 @@ void Command(const std::vector<u8>& packet, const std::vector<u8>& data) {
         case kSetSreg:
             iop.sregs[Word(packet, 16)] = Word(packet, 20);
             return;
+        case kReset: {
+            // sceSifRebootIop: { header, s32 size, s32 flag, char arg[80] }, the
+            // argument "rom0:UDNL cdrom0:\\IRX\\IOPRP234.IMG" - reboot the IOP with
+            // the modules of that replacement image. Nothing runs on an IOP here,
+            // but the image says which releases the game's modules will find.
+            const u32 size = Word(packet, 16);
+            std::string arg;
+            for (u32 i = 0; i < size && i < 80 && 24 + i < packet.size() && packet[24 + i]; ++i)
+                arg += char(packet[24 + i]);
+            const std::size_t space = arg.find(' ');
+            const std::string image = space == std::string::npos ? "" : arg.substr(space + 1);
+            Note("sif reset", "SIF: IOP reboot: " + (arg.empty() ? std::string("(the ROM's modules)") : arg));
+            if (!image.empty()) UseIopImage(image);
+            return;
+        }
         case kRpcBind: {
             const u32 sid = Word(packet, 32);
             u32 vm_server = 0, buffer = 0, cbuffer = 0;

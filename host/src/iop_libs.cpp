@@ -679,6 +679,10 @@ struct Sound {
     Spu2 spu;
     struct Handler { u32 function = 0, arg = 0; };
     Handler transfer[2], spu2;
+    // The older API (libsd 2.x): a callback per transfer channel and one for
+    // the SPU2's interrupt, each called with 0 - when no handler of the newer
+    // kind (sceSdSetTransIntrHandler, sceSdSetSpu2IntrHandler) is set.
+    u32 transfer_callback[2] = {0, 0}, irq_callback = 0;
     struct Block {
         bool active = false;
         u32 address = 0, size = 0, half = 0;
@@ -818,6 +822,22 @@ Outcome SdSetTransIntrHandler(Vm&, Context& c) {
     return Ret(c, previous);
 }
 
+// sceSdSetTransCallback(channel, function), sceSdSetIRQCallback(function):
+// the previous one back.
+Outcome SdSetTransCallback(Vm&, Context& c) {
+    u32& f = S().transfer_callback[c.r[4] & 1];
+    const u32 previous = f;
+    f = u32(c.r[5]);
+    return Ret(c, previous);
+}
+
+Outcome SdSetIrqCallback(Vm&, Context& c) {
+    u32& f = S().irq_callback;
+    const u32 previous = f;
+    f = u32(c.r[4]);
+    return Ret(c, previous);
+}
+
 Outcome SdSetSpu2IntrHandler(Vm&, Context& c) {
     const u32 previous = S().spu2.function;
     S().spu2 = {c.r[4], c.r[5]};
@@ -910,7 +930,7 @@ const Map& Table() {
         {{"libsd", 15}, SdProcBatch}, {{"libsd", 16}, SdProcBatchEx},
         {{"libsd", 17}, SdVoiceTrans}, {{"libsd", 18}, SdBlockTrans},
         {{"libsd", 19}, SdVoiceTransStatus}, {{"libsd", 20}, SdBlockTransStatus},
-        {{"libsd", 21}, SdReturnsPrevious}, {{"libsd", 22}, SdReturnsPrevious},
+        {{"libsd", 21}, SdSetTransCallback}, {{"libsd", 22}, SdSetIrqCallback},
         {{"libsd", 23}, SdSetEffectAttr}, {{"libsd", 24}, SdGetEffectAttr},
         {{"libsd", 25}, Succeed}, {{"libsd", 26}, SdSetTransIntrHandler},
         {{"libsd", 27}, SdSetSpu2IntrHandler}, {{"libsd", 28}, SdGetTransIntrHandlerArgument},
@@ -973,12 +993,15 @@ void SoundInterrupts(Vm& vm) {
             due.push_back(ch);
         }
     }
-    for (u32 ch : due)
+    for (u32 ch : due) {
         if (s.transfer[ch].function) vm.Call(s.transfer[ch].function, {ch, s.transfer[ch].arg});
+        else if (s.transfer_callback[ch]) vm.Call(s.transfer_callback[ch], {0});
+    }
     // The SPU2's own interrupt: playback (or a transfer) reached IRQA.
     Timed timed(Section::Spu2);
     s.spu.Advance(now, [&](u32 core) {
         if (s.spu2.function) vm.Call(s.spu2.function, {1u << core, s.spu2.arg});
+        else if (s.irq_callback) vm.Call(s.irq_callback, {0});
     });
 }
 
