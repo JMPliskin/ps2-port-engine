@@ -320,7 +320,10 @@ void Gs::Draw() {
                      v.x, v.y, w.x, w.y, v.u, v.v, w.u, w.v, v.s, v.t, w.s, w.t, v.q, w.q, w.r, w.g, w.b, w.a, v.z, w.z,
                      rgba_source_, xyz_source_);
         if (queued_ == 3)
-            std::fprintf(trace_out, "[gs]   middle vertex (%.1f,%.1f)\n", queue_[1].x, queue_[1].y);
+            std::fprintf(trace_out, "[gs]   middle vertex (%.1f,%.1f) st (%.4f,%.4f) q %.4f\n", queue_[1].x,
+                         queue_[1].y, queue_[1].s, queue_[1].t, queue_[1].q);
+        std::fprintf(trace_out, "[gs]   tex1 %llX clamp %llX texa %llX tfx %u tcc %u\n", (unsigned long long)c.tex1,
+                     (unsigned long long)c.clamp, (unsigned long long)texa_, Bits(c.tex0, 35, 2), Bits(c.tex0, 34, 1));
         std::fprintf(trace_out, "[gs]   frame fbp %X fbw %u psm %02X fbmsk %08X; zbuf zbp %X psm %02X zmsk %u; test %llX alpha %llX\n",
                      Bits(c.frame, 0, 9), Bits(c.frame, 16, 6), Bits(c.frame, 24, 6), Bits(c.frame, 32, 32),
                      Bits(c.zbuf, 0, 9), Bits(c.zbuf, 24, 4), Bits(c.zbuf, 32, 1),

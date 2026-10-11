@@ -22,6 +22,7 @@
 #include "ps2host/memory.h"
 #include "ps2host/vif.h"
 #include "ps2host/path3.h"
+#include "ps2host/texture_pack.h"
 #include "ps2host/vu.h"
 #include "ps2host/vu_core.h"
 #include "ps2rt/generated.h"
@@ -362,6 +363,38 @@ void GsKeepsAFlatDepthExact() {
 // to the transfer together) stores what it stores a word at a time, for
 // every format, 24-bit pixels across quadwords and a transfer that ends
 // inside the packet included.
+/* PCSX2's names for a texture pack: a 64x64 PSMT4 texture's blocks hashed as
+   PCSX2 hashes them (the reference from xxhash's own XXH3 over the same
+   blocks, in PCSX2's order), its CLUT's 16 entries from CSA's; and file
+   names of every form read back. */
+void TexturePackNamesAsPcsx2() {
+    namespace texture_pack = ps2host::texture_pack;
+    ps2host::gs::Memory memory;
+    for (std::size_t i = 0; i < (4u << 20); ++i) memory.data()[i] = std::uint8_t((i * 7) % 251);
+    std::uint32_t clut[256];
+    for (std::uint32_t i = 0; i < 256; ++i) clut[i] = i * 0x01020304u + 5;
+    const std::uint64_t tex0 = 0x100 | 2ull << 14 | 0x14ull << 20 | 6ull << 26 | 6ull << 30 | 3ull << 56;
+    const texture_pack::Name name = texture_pack::NameOf(memory, tex0, 0, 0, clut);
+    Check(name.Text() == "c7671cbbc91ae787-c31b5682050eba5e-00001994", "a 4-bit texture's PCSX2 name");
+    // A pack's files by name, in a folder of their own: the forms PCSX2 reads.
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "ps2host_texture_pack_test";
+    fs::remove_all(dir);
+    fs::create_directories(dir / "sub");
+    for (const char* file : {"c7671cbbc91ae787-c31b5682050eba5e-00005994.dds", "sub/1a2b-00001980.png",
+                             "3c4d-r64x32-00001980.png", "5e6f-7a8b-r0x16-00001993.dds", "not-a-texture.png",
+                             "1234-5678.txt"}) {
+        std::FILE* f = std::fopen((dir / file).string().c_str(), "wb");
+        if (f) std::fclose(f);
+    }
+    Check(texture_pack::Open(dir.string()) == 4, "a pack's files of every form, in folders too");
+    bool pending = false;
+    texture_pack::Find(name, &pending);
+    Check(pending, "a texture the pack has (TCC's bit ignored): its file read in the background");
+    fs::remove_all(dir);
+    texture_pack::Open("");
+}
+
 void GsTakesImagesInBlocks() {
     using namespace ps2host::gs;
     const u32 psms[] = {PSMCT32, PSMCT24, PSMCT16, PSMCT16S, PSMT8, PSMT4, PSMT8H, PSMT4HL, PSMT4HH,
@@ -1215,6 +1248,7 @@ int main() {
     GsKeepsAFlatDepthExact();
     GsFillsTopLeft();
     GsTakesImagesInBlocks();
+    TexturePackNamesAsPcsx2();
 #if PS2HOST_VULKAN
     GpuMemorySwizzlesAsTheGs();
     GpuDecodesTexturesAsTheGs();

@@ -478,6 +478,12 @@ void StartCapture(u64 frame) {
     g_capture_frame = (long long)frame + 2;
     GpuCaptureBegin(frame + 1, (dir / "passes").string());
     gs::Gs& g = gs::TheGs();
+    // The frames' GS stream (replay.bin), for --gs-replay: memory as it is
+    // now, the GPU's drawing in it, the registers, then what comes.
+    SyncGs();
+    g.Finish();
+    if (g.on_memory) g.on_memory(0, 16384, false);
+    g.BeginRecord(std::fopen((dir / "replay.bin").string().c_str(), "wb"));
     if (std::FILE* f = std::fopen((dir / "trace.txt").string().c_str(), "w")) {
         g.trace_out = f;
         g.trace = true;
@@ -489,12 +495,13 @@ void StartCapture(u64 frame) {
 
 void FinishCapture(u64 frame) {
     gs::Gs& g = gs::TheGs();
+    SyncGs();
+    g.EndRecord();
     if (g.trace_out != stderr) {
         g.trace = false;
         std::fclose(g.trace_out);
         g.trace_out = stderr;
     }
-    SyncGs();
     const std::string screen = GpuCaptureScreen(g_capture_dir);
     g.Finish();
     if (g.on_memory) g.on_memory(0, 16384, false);      // the GPU's drawing, back in memory
@@ -508,7 +515,8 @@ void FinishCapture(u64 frame) {
         std::fprintf(f, "files: screen.bmp (as drawn, at the internal resolution), screen_1x.bmp (the PS2's "
                         "640x448), passes/ (each target as a pass left it, at 1x), gsmem.bin (GS local memory "
                         "after the frame: engine/tools/gsmem.py), trace.txt (the frame's GS packets and "
-                        "primitives)\n");
+                        "primitives), replay.bin (the frames' GS stream: --gs-replay, PS2HOST_REPLAY_GPU, "
+                        "PS2HOST_REPLAY_SCALE, PS2HOST_REPLAY_STOP_PRIM)\n");
         std::fclose(f);
     }
     std::fprintf(stderr, "[capture] saved %s\n", g_capture_dir.c_str());

@@ -75,6 +75,7 @@ struct Image {
     VkImageView view = VK_NULL_HANDLE;
     std::uint32_t width = 0, height = 0;    // in GS pixels
     std::uint32_t scale = 1;                // the image's pixels to a GS pixel, each way (targets, depth)
+    std::uint32_t levels = 1;               // mipmap levels (a texture pack's replacements)
     std::uint32_t pw() const { return width * scale; }
     std::uint32_t ph() const { return height * scale; }
     VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -91,6 +92,14 @@ constexpr VkFormat kDepthFormat = VK_FORMAT_D32_SFLOAT_S8_UINT;
 struct Texture {
     Image image;
     VkDescriptorSet sets[8] = {};       /* by sampler */
+    /* A texture drawn as a texture pack's replacement (UseReplacement): its
+       id, 0 for none. A replacement itself (replacements_): gs.frag's
+       tex_format for it - bit 8, levels - 1 in bits 9-11 - when it was last
+       drawn (frames, Kick's), its size in memory. */
+    std::uint64_t replacement = 0;
+    std::uint32_t replaced = 0;
+    std::uint64_t last_used = 0;
+    VkDeviceSize bytes = 0;
 };
 
 // What the frames' command buffers hold (RendererCounters, PS2HOST_GPU_LOG).
@@ -107,7 +116,7 @@ void Transition(VkCommandBuffer cmd, Image& t, VkImageLayout to, VkAccessFlags d
     b.dstAccessMask = dst_access;
     b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     b.image = t.image;
-    b.subresourceRange = {t.aspect, 0, 1, 0, 1};
+    b.subresourceRange = {t.aspect, 0, t.levels, 0, 1};
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, dst_stage, 0, 0, nullptr, 0, nullptr, 1, &b);
     t.layout = to;
 }
@@ -277,6 +286,11 @@ public:
     bool Init(std::string* error);
     void UploadTexture(std::uint64_t key, const std::uint32_t* pixels, std::uint32_t width,
                        std::uint32_t height) override;
+    bool UploadReplacement(std::uint64_t id, std::uint32_t format, std::uint32_t width, std::uint32_t height,
+                           std::uint32_t levels, const std::uint8_t* data, std::size_t bytes) override;
+    bool HasReplacement(std::uint64_t id) const override { return replacements_.count(id) != 0; }
+    void UseReplacement(std::uint64_t key, std::uint64_t id) override { textures_[key].replacement = id; }
+    bool BlockCompression() const override { return g_.bc; }
     void UploadDepth(std::uint32_t zbp, std::uint32_t width, std::uint32_t height, const std::uint32_t* z) override;
     void UploadTarget(std::uint32_t fbp, std::uint32_t fbw, std::uint32_t psm, const std::uint32_t* pixels,
                       std::uint32_t width, std::uint32_t height) override;
@@ -289,6 +303,8 @@ public:
     void Kick() override {
         Flush();
         g_.Flush();
+        ++frame_;
+        EvictReplacements();
     }
     void TargetRowsFromMemory(std::uint32_t fbp, std::uint32_t fbw, std::uint32_t psm, std::uint32_t width,
                               std::uint32_t height, std::uint32_t first_row, std::uint32_t rows) override;
@@ -340,7 +356,7 @@ private:
        nothing (dynamic rendering wants one attachment layout throughout). */
     Image* DepthFor(std::uint32_t key, std::uint32_t width, std::uint32_t height);
     bool MakeImage(Image& image, std::uint32_t width, std::uint32_t height, VkImageUsageFlags usage,
-                   VkFormat format = VK_FORMAT_R8G8B8A8_UNORM, std::uint32_t scale = 1);
+                   VkFormat format = VK_FORMAT_R8G8B8A8_UNORM, std::uint32_t scale = 1, std::uint32_t levels = 1);
     void DestroyImage(Image& image);
     /* Device-local memory for images: pieces of 64 MB blocks, a power of two
        (64 KB to 16 MB) each, kept for reuse once freed - the textures that
@@ -458,6 +474,14 @@ private:
     std::map<Key, Image> targets_;
     std::map<Key, Image> depths_;   /* by (ZBP or a target's own, width, height) */
     std::map<std::uint64_t, Texture> textures_;
+    /* A texture pack's replacements, by id (UploadReplacement); those not
+       drawn for the longest go when they come to over kReplacementBudget. */
+    std::unordered_map<std::uint64_t, Texture> replacements_;
+    VkDeviceSize replacement_bytes_ = 0;
+    std::uint64_t frame_ = 0;
+    static constexpr VkDeviceSize kReplacementBudget = VkDeviceSize(1536) << 20;
+    void EvictReplacements();
+    void DestroyTexture(Texture texture);
     Texture blank_;                 /* bound when nothing is textured */
     GsDrawState state_;
     std::vector<PackedVertex> pending_;
@@ -682,17 +706,18 @@ bool VulkanGsRenderer::Buffer(VkDeviceSize bytes, VkBufferUsageFlags usage, VkBu
 }
 
 bool VulkanGsRenderer::MakeImage(Image& t, std::uint32_t width, std::uint32_t height, VkImageUsageFlags usage,
-                                 VkFormat format, std::uint32_t scale) {
+                                 VkFormat format, std::uint32_t scale, std::uint32_t levels) {
     t.width = width;
     t.height = height;
     t.scale = std::max(1u, scale);
+    t.levels = std::max(1u, levels);
     t.aspect = format == kDepthFormat ? VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT
                                       : VK_IMAGE_ASPECT_COLOR_BIT;
     VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     ici.imageType = VK_IMAGE_TYPE_2D;
     ici.format = format;
     ici.extent = {t.pw(), t.ph(), 1};
-    ici.mipLevels = 1;
+    ici.mipLevels = t.levels;
     ici.arrayLayers = 1;
     ici.samples = VK_SAMPLE_COUNT_1_BIT;
     ici.tiling = VK_IMAGE_TILING_OPTIMAL;
@@ -706,7 +731,7 @@ bool VulkanGsRenderer::MakeImage(Image& t, std::uint32_t width, std::uint32_t he
     vci.image = t.image;
     vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
     vci.format = format;
-    vci.subresourceRange = {t.aspect, 0, 1, 0, 1};
+    vci.subresourceRange = {t.aspect, 0, t.levels, 0, 1};
     if (vkCreateImageView(g_.device, &vci, nullptr, &t.view) != VK_SUCCESS) return false;
     if (format == kDepthFormat && (usage & VK_IMAGE_USAGE_SAMPLED_BIT)) {
         vci.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
@@ -1646,7 +1671,104 @@ void VulkanGsRenderer::UploadTexture(std::uint64_t key, const std::uint32_t* pix
                                      std::uint32_t height) {
     Flush();                        // what is pending may sample the old contents
     Texture* texture = TextureImage(key, width, height);
-    if (texture) Fill(*texture, pixels);
+    if (!texture) return;
+    texture->replacement = 0;
+    Fill(*texture, pixels);
+}
+
+bool VulkanGsRenderer::UploadReplacement(std::uint64_t id, std::uint32_t format, std::uint32_t width,
+                                         std::uint32_t height, std::uint32_t levels, const std::uint8_t* data,
+                                         std::size_t bytes) {
+    static const VkFormat kFormats[] = {VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_BC1_RGBA_UNORM_BLOCK,
+                                        VK_FORMAT_BC2_UNORM_BLOCK, VK_FORMAT_BC3_UNORM_BLOCK,
+                                        VK_FORMAT_BC7_UNORM_BLOCK};
+    if (format > 4 || (format != 0 && !g_.bc) || width == 0 || height == 0) return false;
+    levels = std::min(8u, std::max(1u, levels));
+    // Each level's place in `data`.
+    std::vector<VkBufferImageCopy> copies;
+    VkDeviceSize at = 0;
+    for (std::uint32_t n = 0; n < levels; ++n) {
+        const std::uint32_t w = std::max(1u, width >> n), h = std::max(1u, height >> n);
+        const VkDeviceSize size = format == 0 ? VkDeviceSize(w) * h * 4
+                                              : VkDeviceSize((w + 3) / 4) * ((h + 3) / 4) * (format == 1 ? 8 : 16);
+        if (at + size > bytes) break;
+        VkBufferImageCopy copy{};
+        copy.bufferOffset = at;
+        copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, n, 0, 1};
+        copy.imageExtent = {w, h, 1};
+        copies.push_back(copy);
+        at += size;
+    }
+    if (copies.empty()) return false;
+    Flush();
+    auto old = replacements_.find(id);
+    if (old != replacements_.end()) {
+        replacement_bytes_ -= old->second.bytes;
+        DestroyTexture(old->second);
+        replacements_.erase(old);
+    }
+    Texture texture;
+    if (!MakeImage(texture.image, width, height, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                   kFormats[format], 1, std::uint32_t(copies.size()))) {
+        DestroyTexture(texture);
+        return false;
+    }
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VkDeviceSize offset = 0;
+    void* mapped = Staging(at, &buffer, &offset);
+    if (!mapped) {
+        DestroyTexture(texture);
+        return false;
+    }
+    std::memcpy(mapped, data, std::size_t(at));
+    for (VkBufferImageCopy& copy : copies) copy.bufferOffset += offset;
+    Image& t = texture.image;
+    g_.Record([&](VkCommandBuffer cmd) {
+        Transition(cmd, t, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
+                   VK_PIPELINE_STAGE_TRANSFER_BIT);
+        vkCmdCopyBufferToImage(cmd, buffer, t.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                               std::uint32_t(copies.size()), copies.data());
+        g_.Mark(cmd, kProfUpload);
+        Transition(cmd, t, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_SHADER_READ_BIT,
+                   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    });
+    texture.replaced = 0x100u | (std::uint32_t(copies.size()) - 1) << 9;
+    texture.last_used = frame_;
+    texture.bytes = at;
+    replacement_bytes_ += at;
+    replacements_[id] = texture;
+    return true;
+}
+
+void VulkanGsRenderer::EvictReplacements() {
+    if (replacement_bytes_ <= kReplacementBudget) return;
+    // The longest undrawn first, down to three quarters of the budget; none
+    // drawn this frame or the one before.
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> by_age;     // last_used, id
+    for (const auto& [id, texture] : replacements_) by_age.emplace_back(texture.last_used, id);
+    std::sort(by_age.begin(), by_age.end());
+    for (const auto& [used, id] : by_age) {
+        if (replacement_bytes_ <= kReplacementBudget / 4 * 3 || used + 2 > frame_) break;
+        auto found = replacements_.find(id);
+        replacement_bytes_ -= found->second.bytes;
+        DestroyTexture(found->second);
+        replacements_.erase(found);
+    }
+}
+
+void VulkanGsRenderer::DestroyTexture(Texture texture) {
+    // Recorded draws may still sample it: it goes after they have run.
+    VkDevice device = g_.device;
+    VkDescriptorPool pool = pool_;
+    g_.AfterSubmit([this, device, pool, texture]() mutable {
+        for (VkDescriptorSet& set : texture.sets)
+            if (set) vkFreeDescriptorSets(device, pool, 1, &set);
+        if (texture.image.view) vkDestroyImageView(device, texture.image.view, nullptr);
+        if (texture.image.image) vkDestroyImage(device, texture.image.image, nullptr);
+        if (texture.image.memory)
+            FreeImageMemory(texture.image.memory, texture.image.offset, texture.image.piece_class,
+                            texture.image.memory_type);
+    });
 }
 
 Texture* VulkanGsRenderer::TextureImage(std::uint64_t key, std::uint32_t width, std::uint32_t height) {
@@ -1681,6 +1803,7 @@ void VulkanGsRenderer::TextureFromMemory(std::uint64_t key, const GsTextureDecod
     for (std::uint32_t n = 0; n < levels; ++n) height += std::max(1u, d.th >> n);
     Texture* texture = TextureImage(key, d.tw, height);
     if (!texture) return;
+    texture->replacement = 0;
     Image& t = texture->image;
     g_.Record([&](VkCommandBuffer cmd) {
         MemoryBarrier(cmd);
@@ -1795,6 +1918,7 @@ void VulkanGsRenderer::ReleaseTexture(std::uint64_t key) {
     Flush();
     Texture texture = found->second;
     textures_.erase(found);
+    texture.replacement = 0;
     // Recorded draws may still sample it: it goes after they have run - into
     // the pool, or away.
     if (texture.image.image && pooled_textures_ < kPooledTextures) {
@@ -1885,8 +2009,19 @@ void VulkanGsRenderer::DrawTriangles(const GsDrawState& state, const GsVertex* v
     const bool feedback = state.textured && state.texture_target && state.tex_fbp == state.fbp &&
                           state.tex_fbw == state.fbw && count >= 3;
     const bool shader_blend = ShaderBlend(state) && count >= 3;
+    // An alpha test whose failing pixels still write (AFAIL FB_ONLY or
+    // ZB_ONLY with depth written, RGB_ONLY) is drawn in two passes over the
+    // batch - the passing pixels of all its primitives, then the failing
+    // ones: a primitive over one drawn before it in the batch begins a batch
+    // of its own, or the earlier one's failing pixels land on top of it
+    // (Burnout 3's crash titles: the black outline drawn four times, the
+    // letters' fill over them - the outline's soft edges came out on top, as
+    // dark streaks through the letters).
+    const bool depth_written = state.depth && state.depth_write;
+    const bool two_pass = state.alpha_test && state.atst != 1 && count >= 3 &&
+                          (((state.afail == 1 || state.afail == 2) && depth_written) || state.afail == 3);
     int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
-    if (feedback || shader_blend) {
+    if (feedback || shader_blend || two_pass) {
         float fx0 = 1e30f, fy0 = 1e30f, fx1 = -1e30f, fy1 = -1e30f;
         float u0 = 1e30f, v0 = 1e30f, u1 = -1e30f, v1 = -1e30f;
         const float tw = float(state.tw ? state.tw : 2048), th = float(state.th ? state.th : 2048);
@@ -1914,7 +2049,8 @@ void VulkanGsRenderer::DrawTriangles(const GsDrawState& state, const GsVertex* v
         const auto overlaps = [&](int l, int t, int r, int bottom) {
             return drawn_any_ && r >= drawn_x0_ && l <= drawn_x1_ && bottom >= drawn_y0_ && t <= drawn_y1_;
         };
-        if ((feedback && overlaps(tu0, tv0, tu1, tv1)) || (shader_blend && overlaps(x0, y0, x1, y1))) Flush();
+        if ((feedback && overlaps(tu0, tv0, tu1, tv1)) || ((shader_blend || two_pass) && overlaps(x0, y0, x1, y1)))
+            Flush();
         // What the copy must hold: the texels as CLAMP leaves them.
         if (feedback) {
             const int w = int(tw), h = int(th);
@@ -1937,7 +2073,7 @@ void VulkanGsRenderer::DrawTriangles(const GsDrawState& state, const GsVertex* v
         if (shader_blend) Reads(x0, y0, x1, y1);
     }
     state_ = state;
-    if (feedback || shader_blend) {
+    if (feedback || shader_blend || two_pass) {
         if (!drawn_any_) {
             drawn_x0_ = x0;
             drawn_y0_ = y0;
@@ -2153,6 +2289,14 @@ void VulkanGsRenderer::Flush() {
     if (state_.textured) {
         auto found = textures_.find(state_.texture);
         if (found != textures_.end()) texture = &found->second;
+        // Drawn as a texture pack's replacement.
+        if (texture->replacement) {
+            auto replacement = replacements_.find(texture->replacement);
+            if (replacement != replacements_.end()) {
+                texture = &replacement->second;
+                texture->last_used = frame_;
+            }
+        }
     }
     // The shader addresses and filters texels itself (texelFetch), as the GS does.
     const int sampler = 3;
@@ -2243,7 +2387,7 @@ void VulkanGsRenderer::Flush() {
     params.maxv = state_.maxv;
     params.tw = state_.tw;
     params.th = state_.th;
-    params.tex_format = source ? state_.tex_format : 0;
+    params.tex_format = source ? state_.tex_format : texture->replaced;     // gs.frag's Replaced
     params.ta0 = state_.ta0;
     params.ta1 = state_.ta1;
     params.aem = state_.aem;

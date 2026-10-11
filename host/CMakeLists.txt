@@ -66,6 +66,25 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${PS2_ENGINE_DIR}
 target_include_directories(ps2host PUBLIC ${CMAKE_CURRENT_LIST_DIR}/include)
 target_link_libraries(ps2host PUBLIC ps2rt)
 
+# Texture packs (texture_pack.cpp): single headers, pinned by hash - xxHash
+# (BSD-2-Clause; PCSX2's names are XXH3 hashes), bcdec (MIT or Unlicense; DDS
+# BC1-BC7) and stb_image (MIT or public domain; PNG).
+set(third_party_dir ${CMAKE_CURRENT_BINARY_DIR}/third_party)
+foreach(entry
+        "xxhash.h|https://raw.githubusercontent.com/Cyan4973/xxHash/v0.8.3/xxhash.h|17973c0dc49d9854ca26caa191f0e12f7a424b68858d9a78de3860d959d85e4b"
+        "bcdec.h|https://raw.githubusercontent.com/iOrange/bcdec/80859ed3b7afb1c527a2a99d70c61457bea72d0c/bcdec.h|134520764d96f70a27db814173616c89ad85db95fbd3328417c7a8c77e7ca189"
+        "stb_image.h|https://raw.githubusercontent.com/nothings/stb/2c980bb59875b0d32144a71867fbdebb2f77cd20/stb_image.h|594c2fe35d49488b4382dbfaec8f98366defca819d916ac95becf3e75f4200b3")
+    string(REPLACE "|" ";" parts "${entry}")
+    list(GET parts 0 name)
+    list(GET parts 1 url)
+    list(GET parts 2 sha)
+    if(NOT EXISTS ${third_party_dir}/${name})
+        file(DOWNLOAD ${url} ${third_party_dir}/${name} EXPECTED_HASH SHA256=${sha} TLS_VERIFY ON)
+    endif()
+endforeach()
+target_include_directories(ps2host PRIVATE ${third_party_dir})
+target_sources(ps2host PRIVATE ${CMAKE_CURRENT_LIST_DIR}/src/texture_pack.cpp)
+
 # The window through SDL3 and Vulkan (engine/gpu), with GDI as the fallback.
 option(PS2HOST_VULKAN "Present the picture through SDL3 and Vulkan" ON)
 if(PS2HOST_VULKAN)

@@ -12,6 +12,7 @@
 #define NOMINMAX
 #include <windows.h>
 
+#include <chrono>
 #include <cstdio>
 #include <memory>
 #include <string>
@@ -22,6 +23,7 @@
 #include "ps2host/timeline.h"
 #include "ps2host/run.h"
 #include "ps2host/settings.h"
+#include "ps2host/texture_pack.h"
 
 #ifdef PS2HOST_VULKAN
 #include <SDL3/SDL_scancode.h>
@@ -304,6 +306,21 @@ bool PumpWindow() {
         if (!g_display->Pump()) g_closed = true;
         KeepFullscreenSetting();
         if (g_display->TakeCapture()) RequestCapture();
+        // Tab: the texture pack on or off, said on the screen for two seconds.
+        static std::chrono::steady_clock::time_point notice_until{};
+        static bool notice = false;
+        if (g_display->TakeTexturePackToggle() && texture_pack::Count()) {
+            const bool on = !texture_pack::Enabled();
+            texture_pack::SetEnabled(on);
+            SetSettingOn("texture_pack", on);
+            SetWindowOverlay({on ? "TEXTURE PACK ON  (Tab)" : "TEXTURE PACK OFF  (Tab)"});
+            notice = true;
+            notice_until = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        }
+        if (notice && std::chrono::steady_clock::now() >= notice_until) {
+            notice = false;
+            SetWindowOverlay({});
+        }
         return !g_closed;
     }
 #endif

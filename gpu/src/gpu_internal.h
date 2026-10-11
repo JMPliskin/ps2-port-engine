@@ -110,6 +110,7 @@ public:
     VkFence fences[kSlots] = {};
     bool dual_source = false;       /* dualSrcBlend: the GS's blending */
     bool logic_op = false;          /* logicOp: FBMSK's partly masked channels */
+    bool bc = false;                /* textureCompressionBC: texture packs' DDS uploaded as they are */
     bool owns_device = true;
 
 private:
