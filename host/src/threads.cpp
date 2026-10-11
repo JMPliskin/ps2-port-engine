@@ -281,10 +281,17 @@ s64 NanosToNextAlarm() {
 void StartRealTime();
 u64 g_real_time_from = 0;               // SetRealTimeFrom
 
+// INTC_STAT (0x1000F000): the causes raised since the game last cleared them
+// (writing 1 clears). libgraph's sceGsSyncV clears VBLANK_START and polls for
+// it - read as plain memory, the 1 it wrote, it never waited: Mister Mosquito's
+// main loop ran five times a frame, its clocks with it.
+std::atomic<u32> g_intc_stat{0};
+
 // One frame's interrupts, delivered to the handlers registered for them.
 bool DeliverFrame() {
     Scheduler& s = S();
     ++s.frames;
+    g_intc_stat.fetch_or((1u << kVblankStart) | (1u << kVblankEnd), std::memory_order_relaxed);
     if (s.virtual_time && g_real_time_from && s.frames >= g_real_time_from) StartRealTime();
     {
         Timed timed(Section::Iop);
@@ -612,8 +619,12 @@ void RaiseDmac(u32 channel) {
 
 void RaiseIntc(u32 cause) {
     Scheduler& s = S();
+    g_intc_stat.fetch_or(1u << cause, std::memory_order_relaxed);
     if (s.intc_mask & (1u << cause)) RunHandlers(s.handlers, cause);
 }
+
+u32 IntcStat() { return g_intc_stat.load(std::memory_order_relaxed); }
+void ClearIntcStat(u32 bits) { g_intc_stat.fetch_and(~bits, std::memory_order_relaxed); }
 
 void PostDmac(u32 channel) {
     S().pending_dmac |= 1u << channel;

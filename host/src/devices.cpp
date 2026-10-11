@@ -736,6 +736,8 @@ void InstallDevices() {
         field ^= 1u << 13;                          // FIELD alternates each frame
         return (stored & ~u64(1u << 13)) | field | (1u << 3);   // VSINT pending
     });
+    m.OnRead(0x1000F000u, [](u32, u64) { return u64(IntcStat()); });     // INTC_STAT
+    m.OnWrite(0x1000F000u, [](u32, u64 value) { ClearIntcStat(u32(value) & 0x7FFFu); });
     InstallTimers();
     InstallIpu();
 }

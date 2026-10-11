@@ -390,6 +390,10 @@ bool VirtualClock();
 void AdvanceClock(u64 ns);
 /* Run the INTC handlers for `cause`, if it is enabled (threads.cpp). */
 void RaiseIntc(u32 cause);
+/* INTC_STAT: the causes raised (a frame's vertical blanks, RaiseIntc's), and
+   clearing those written as 1 (threads.cpp). */
+u32 IntcStat();
+void ClearIntcStat(u32 bits);
 /* Sound (audio.cpp): opened with --audio; the SPU2 hands it 16-bit stereo
    frames at 48 kHz. */
 bool OpenAudio();

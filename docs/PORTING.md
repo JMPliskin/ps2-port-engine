@@ -379,7 +379,10 @@ so a new game gets them as soon as its routines are named.
 3. **Interrupts** (vertical blank and DMA done): handlers run at a safe point,
    which is the running thread's next loop head (`lifted::loop_head_hook`) or
    between threads. Vertical blank comes 60 times a second in real time, or at
-   once when every thread waits. DMA completion is posted by the transfer and
+   once when every thread waits. INTC_STAT (0x1000F000) holds the causes
+   raised since the game cleared them (writing 1 clears): libgraph's
+   sceGsSyncV clears VBLANK_START and polls it; a port names that poll an
+   idle loop (`AddIdleLoop`) so it is waited for asleep. DMA completion is posted by the transfer and
    delivered after the store that started it. Alarms (SetAlarm) run their
    callbacks at the first frame at or past their time.
 4. **IOP services** (begun): the host answers the SDK's SIF commands as the
