@@ -39,6 +39,7 @@
  */
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <filesystem>
@@ -340,6 +341,19 @@ std::vector<u8> Server(u32 procedure, const std::vector<u8>& data) {
 
 }  // namespace
 
-void InstallMcserv() { RegisterRpcServer(0x80000400u, Server); }
+// PS2HOST_MC_LOG=1: every call and its result.
+std::vector<u8> Logged(u32 procedure, const std::vector<u8>& data) {
+    std::vector<u8> answer = Server(procedure, data);
+    if (std::getenv("PS2HOST_MC_LOG")) {
+        s32 result = 0;
+        if (answer.size() >= 4) std::memcpy(&result, answer.data(), 4);
+        std::fprintf(stderr, "[mc] procedure 0x%X: %08X %08X %08X %08X \"%s\" -> %d\n", unsigned(procedure),
+                     unsigned(At(data, 0)), unsigned(At(data, 4)), unsigned(At(data, 8)), unsigned(At(data, 0xC)),
+                     PathAt(data, 0x14).c_str(), int(result));
+    }
+    return answer;
+}
+
+void InstallMcserv() { RegisterRpcServer(0x80000400u, Logged); }
 
 }  // namespace ps2host

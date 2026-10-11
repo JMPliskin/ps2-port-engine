@@ -19,6 +19,7 @@
  */
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <map>
@@ -225,6 +226,10 @@ void SifDma(u32 transfers, u32 count) {
             // for their pretended addresses, above any module's memory.
             if (dest < kServerBase)
                 for (u32 k = 0; k < size; ++k) m.Write(kIopRamBase + dest + k, bytes[k], 1);
+            if (std::getenv("PS2HOST_SIF_LOG"))
+                std::fprintf(stderr, "[sif] data %u bytes from 0x%08X to IOP 0x%08X: %08X %08X %08X %08X\n",
+                             unsigned(size), unsigned(src), unsigned(dest), unsigned(Word(bytes, 0)),
+                             unsigned(Word(bytes, 4)), unsigned(Word(bytes, 8)), unsigned(Word(bytes, 12)));
             data = std::move(bytes);
         }
     }

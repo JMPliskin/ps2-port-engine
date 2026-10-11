@@ -515,6 +515,9 @@ public:
                 for (int i = 0; i < n; ++i) std::fprintf(stderr, " 0x%08X", unsigned(calls[i]));
                 std::fprintf(stderr, "\n");
                 std::fflush(nullptr);
+                // The IOP's threads too (read while it runs: a diagnostic, last).
+                std::fprintf(stderr, "%s", iop::Report().c_str());
+                std::fflush(nullptr);
                 std::_Exit(3);
             }
         }

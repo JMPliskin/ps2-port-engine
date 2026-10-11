@@ -384,12 +384,19 @@ def update_status(path: str, verified, outcomes, names=None, unverified=None) ->
 _WORKER = None
 
 
+def _other_sections(elf, code) -> list:
+    """The ELF's other loaded sections with contents, for lift.use_sections."""
+    return [(elf.section_data(s), s.addr) for s in elf.sections
+            if s.is_alloc and s.size and s is not code and s.type != 8]       # 8: NOBITS
+
+
 def _start_worker(game_directory, seeds, dll):
     global _WORKER
     game = game_config.load(game_directory)
     database = game.load_database()
     elf = game.load_elf()
     section = elf.exec_sections[0]
+    lift.use_sections(_other_sections(elf, section))
     machine = Machine.from_elf(elf)
     testplan.prepare_test_memory(machine, database, elf.section_data(section), section.addr,
                                [], seeds=seeds)
@@ -449,6 +456,7 @@ def main(argv=None) -> int:
     elf = game.load_elf()
     section = elf.exec_sections[0]
     image = elf.section_data(section)
+    lift.use_sections(_other_sections(elf, section))
     machine = Machine.from_elf(elf)
     # Every function, including those with no return of their own - thunks that
     # end in a jump: a port reaches them like any other, and the original runs to

@@ -82,6 +82,10 @@ def discovered_functions(game, path: str) -> dict:
     elf = game.load_elf()
     section = elf.exec_sections[0]
     image = elf.section_data(section)
+    # A run is lifted from a slice of the image; its jump tables lie elsewhere
+    # in it (Burnout 3's 0x00242AA0 reaches 0x00242BD0 through one).
+    lift.use_sections([(image, section.addr)] + [(elf.section_data(s), s.addr) for s in elf.sections
+                                                  if s.is_alloc and s.size and s is not section and s.type != 8])
     found = {}
     with open(path, encoding="utf-8") as handle:
         pairs = {(int(run, 16), int(source, 16)) for run, source in

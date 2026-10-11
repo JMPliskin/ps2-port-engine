@@ -382,16 +382,28 @@ _CONDITIONS = {
 
 
 _POINTER_WORDS = {}
+_SECTIONS = []          # (bytes, base): the program's other loaded sections
+
+
+def use_sections(sections) -> None:
+    """The program's loaded sections besides the code being lifted, as
+    (bytes, address): its jump tables are read there too. Burnout 3's sit in
+    .data, apart from .text; a jr to a case no table named stopped the run."""
+    _SECTIONS[:] = [(bytes(data), base) for data, base in sections]
+    _POINTER_WORDS.clear()
 
 
 def _pointer_words(image: bytes, base: int) -> list:
-    """Every aligned word of the image that holds an address inside it, sorted."""
-    key = (id(image), len(image), base)
+    """Every aligned word of the image and the program's other sections that
+    holds an address inside the image, sorted."""
+    key = (id(image), len(image), base, len(_SECTIONS))
     if key not in _POINTER_WORDS:
-        words = struct.unpack_from("<%dI" % (len(image) // 4), image)
+        found = set()
+        for data in [image] + [d for d, _ in _SECTIONS]:
+            words = struct.unpack_from("<%dI" % (len(data) // 4), data)
+            found.update(w for w in words if w & 3 == 0 and base <= w < base + len(image))
         _POINTER_WORDS.clear()
-        _POINTER_WORDS[key] = sorted({w for w in words
-                                      if w & 3 == 0 and base <= w < base + len(image)})
+        _POINTER_WORDS[key] = sorted(found)
     return _POINTER_WORDS[key]
 
 
