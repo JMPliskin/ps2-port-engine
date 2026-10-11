@@ -115,19 +115,21 @@ vec4 Texel(int u, int v, int n) {
 }
 
 // The texel at (u, v) in level 0's texels, in level n: the nearest, or the
-// four around (u - 0.5, v - 0.5) mixed and rounded per channel.
+// four around (u - 0.5, v - 0.5) mixed per channel as the GS mixes them: in
+// sixteenths (its coordinates' 4 fractional bits), each step truncated - a
+// game that filters its last frame back in relies on the loss (the software
+// GS's Texel).
 vec4 Sample(vec2 uv, int n, bool linear) {
     if (Fine()) uv *= float(p.scale);               // in the target's own pixels
     uv /= float(1 << n);
     if (!linear) return Texel(int(floor(uv.x)), int(floor(uv.y)), n);
-    vec2 xy = uv - 0.5;
-    ivec2 i0 = ivec2(floor(xy));
-    vec2 f = xy - vec2(i0);
-    // In the software GS's order of operations, so the two round alike.
-    vec4 c00 = Texel(i0.x, i0.y, n), c10 = Texel(i0.x + 1, i0.y, n);
-    vec4 c01 = Texel(i0.x, i0.y + 1, n), c11 = Texel(i0.x + 1, i0.y + 1, n);
-    vec4 top = c00 + (c10 - c00) * f.x, bottom = c01 + (c11 - c01) * f.x;
-    return floor(top + (bottom - top) * f.y + 0.5);
+    const ivec2 xy = ivec2(floor((uv - 0.5) * 16.0));
+    const ivec2 i0 = xy >> 4;
+    const vec4 f = vec4(xy & 15, 0, 0);
+    const vec4 c00 = Texel(i0.x, i0.y, n), c10 = Texel(i0.x + 1, i0.y, n);
+    const vec4 c01 = Texel(i0.x, i0.y + 1, n), c11 = Texel(i0.x + 1, i0.y + 1, n);
+    const vec4 top = c00 + floor((c10 - c00) * f.x / 16.0), bottom = c01 + floor((c11 - c01) * f.x / 16.0);
+    return top + floor((bottom - top) * f.y / 16.0);
 }
 
 // A texture pack's replacement (GsRenderer::UploadReplacement): finer than

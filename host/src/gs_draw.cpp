@@ -625,17 +625,21 @@ u32 Gs::Texel(const Setup& st, float fu, float fv, int n, bool linear) const {
         fv /= float(1 << n);
     }
     if (!linear) return TexelAt(st, int(std::floor(fu)), int(std::floor(fv)), n);
-    const float x = fu - 0.5f, y = fv - 0.5f;
-    const int u0 = int(std::floor(x)), v0 = int(std::floor(y));
-    const float a = x - float(u0), b = y - float(v0);
+    // The GS's coordinates have 4 fractional bits: the weights are sixteenths,
+    // and each blend truncates. A game that filters its own last frame back
+    // in, over and over, relies on that: Mister Mosquito's cutscene blur lets
+    // an old picture fade only because each pass loses a little (rounded to
+    // the nearest, a blurred picture stood for good).
+    const int x = int(std::floor((fu - 0.5f) * 16.0f)), y = int(std::floor((fv - 0.5f) * 16.0f));
+    const int u0 = x >> 4, v0 = y >> 4, a = x & 15, b = y & 15;
     const u32 t00 = TexelAt(st, u0, v0, n), t10 = TexelAt(st, u0 + 1, v0, n);
     const u32 t01 = TexelAt(st, u0, v0 + 1, n), t11 = TexelAt(st, u0 + 1, v0 + 1, n);
     u32 out = 0;
     for (int shift = 0; shift < 32; shift += 8) {
-        const float c00 = float((t00 >> shift) & 0xFF), c10 = float((t10 >> shift) & 0xFF);
-        const float c01 = float((t01 >> shift) & 0xFF), c11 = float((t11 >> shift) & 0xFF);
-        const float top = c00 + (c10 - c00) * a, bottom = c01 + (c11 - c01) * a;
-        out |= u32(std::lround(top + (bottom - top) * b)) << shift;
+        const int c00 = int((t00 >> shift) & 0xFF), c10 = int((t10 >> shift) & 0xFF);
+        const int c01 = int((t01 >> shift) & 0xFF), c11 = int((t11 >> shift) & 0xFF);
+        const int top = c00 + (((c10 - c00) * a) >> 4), bottom = c01 + (((c11 - c01) * a) >> 4);
+        out |= u32(top + (((bottom - top) * b) >> 4)) << shift;
     }
     return out;
 }
