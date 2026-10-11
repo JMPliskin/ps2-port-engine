@@ -319,6 +319,12 @@ void SetWindowStatus(const std::string& status);
 /* A panel of text over the picture (a game's tool, its menu): the lines,
    the first a heading, one starting with '>' picked out; none when empty. */
 void SetWindowOverlay(const std::vector<std::string>& lines);
+/* The PC settings panel (pc_menu.cpp): F1, or L3 + R3 on a controller, over
+   any game - resolution, aspect, fullscreen, v-sync, frame pacing, the
+   texture pack. UpdatePcMenu reads its keys (PumpWindow calls it); while it
+   is open the game gets no input (PcMenuOpen). */
+void UpdatePcMenu();
+bool PcMenuOpen();
 /* The window's display, null when there is none (or no Vulkan one). */
 ps2gpu::Display* WindowDisplay();
 /* What the window shows instead of the software GS's picture (BGRA, as

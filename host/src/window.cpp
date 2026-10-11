@@ -46,6 +46,7 @@ int Scancode(int key) {
     switch (key) {
         case VK_BACK: return SDL_SCANCODE_BACKSPACE;
         case VK_RETURN: return SDL_SCANCODE_RETURN;
+        case VK_ESCAPE: return SDL_SCANCODE_ESCAPE;      // the PC settings panel's
         case VK_UP: return SDL_SCANCODE_UP;
         case VK_DOWN: return SDL_SCANCODE_DOWN;
         case VK_LEFT: return SDL_SCANCODE_LEFT;
@@ -340,6 +341,7 @@ bool PumpWindow() {
         if (!g_display->Pump()) g_closed = true;
         KeepFullscreenSetting();
         if (g_display->TakeCapture()) RequestCapture();
+        UpdatePcMenu();                     // F1: the PC settings panel (pc_menu.cpp)
         // Tab: the texture pack on or off, said on the screen for two seconds.
         static std::chrono::steady_clock::time_point notice_until{};
         static bool notice = false;
@@ -353,7 +355,7 @@ bool PumpWindow() {
         }
         if (notice && std::chrono::steady_clock::now() >= notice_until) {
             notice = false;
-            SetWindowOverlay({});
+            if (!PcMenuOpen()) SetWindowOverlay({});
         }
         return !g_closed;
     }
