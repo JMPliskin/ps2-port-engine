@@ -9,6 +9,11 @@ and summary.txt. The GS model, given the console's own commands, either
 draws what PCSX2 does or not: a fault in the GS model, or one before it (the
 EE, VU1, DMA) told apart.
 
+Take the dump with PCSX2's software renderer (F9): the hardware renderers keep
+frame buffers on the GPU, and the dump's GS memory then has stale ones -
+a game that draws its last frame back (a motion blur, Mister Mosquito's
+cutscenes) replays black.
+
 The dump (PCSX2's GSDump.cpp, GSState::Freeze, state version 9): 0xFFFFFFFF,
 the header's size, the header (state version, state size, serial and
 screenshot offsets), serial, screenshot (RGBA); the GS state - registers,
