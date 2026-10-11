@@ -174,6 +174,25 @@ public:
        top-down. Replaces what the key named. */
     virtual void UploadTexture(std::uint64_t key, const std::uint32_t* pixels, std::uint32_t width,
                                std::uint32_t height) = 0;
+    /* A texture pack's replacement: an image of its own under `id`, shared by
+       every texture it replaces. `format` 0 RGBA8 (alpha as the GS's: 0x80
+       is 1.0), 1-4 BC1, BC2, BC3, BC7 as a DDS stores them; `levels` (mipmap
+       levels) largest first, one after another in `data`. False if the GPU
+       cannot take it (block compression it lacks). Replacements the draws
+       have not used for a while go when they take more than a budget of
+       GPU memory: HasReplacement says whether one is still there. */
+    virtual bool UploadReplacement(std::uint64_t id, std::uint32_t format, std::uint32_t width, std::uint32_t height,
+                                   std::uint32_t levels, const std::uint8_t* data, std::size_t bytes) {
+        (void)id, (void)format, (void)width, (void)height, (void)levels, (void)data, (void)bytes;
+        return false;
+    }
+    virtual bool HasReplacement(std::uint64_t id) const { (void)id; return false; }
+    /* The texture under `key` drawn as replacement `id`: finer than the GS's
+       TW x TH (the draw's tw, th), sampled in its own texels at the same
+       places. Until the key is uploaded or decoded again. */
+    virtual void UseReplacement(std::uint64_t key, std::uint64_t id) { (void)key, (void)id; }
+    /* Whether block-compressed replacements can be uploaded as they are. */
+    virtual bool BlockCompression() const { return false; }
     /* A depth buffer's contents, one Z per pixel, rows top-down: what local
        memory holds there (the GS's Z, unsigned). */
     virtual void UploadDepth(std::uint32_t zbp, std::uint32_t width, std::uint32_t height,

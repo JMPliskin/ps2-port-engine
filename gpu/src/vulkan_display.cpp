@@ -57,6 +57,12 @@ public:
         return asked;
     }
     bool capture_ = false;
+    bool TakeTexturePackToggle() override {
+        const bool asked = texture_pack_;
+        texture_pack_ = false;
+        return asked;
+    }
+    bool texture_pack_ = false;
     void SetAspect(float aspect) override { aspect_.store(aspect); }
     void SetOverlay(std::vector<std::uint32_t> pixels, std::uint32_t width, std::uint32_t height) override {
         std::lock_guard<std::mutex> hold(overlay_lock_);
@@ -369,6 +375,7 @@ bool VulkanDisplay::Init(const char* title, int width, int height) {
     VkPhysicalDeviceFeatures2 features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
     features.features.dualSrcBlend = supported.dualSrcBlend;
     features.features.logicOp = supported.logicOp;
+    features.features.textureCompressionBC = supported.textureCompressionBC;     // texture packs' DDS
     features.pNext = &v13;
     VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
     dci.pNext = &features;
@@ -1070,6 +1077,7 @@ bool VulkanDisplay::Pump() {
             (e.key.mod & SDL_KMOD_ALT))
             SetFullscreen(!Fullscreen());
         if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && e.key.scancode == SDL_SCANCODE_F12) capture_ = true;
+        if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && e.key.scancode == SDL_SCANCODE_TAB) texture_pack_ = true;
         if (e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN && gamepad_ &&
             (e.gbutton.button == SDL_GAMEPAD_BUTTON_LEFT_STICK || e.gbutton.button == SDL_GAMEPAD_BUTTON_RIGHT_STICK) &&
             SDL_GetGamepadButton(gamepad_, SDL_GAMEPAD_BUTTON_LEFT_STICK) &&

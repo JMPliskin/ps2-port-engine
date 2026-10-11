@@ -48,6 +48,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <list>
 #include <map>
 #include <memory>
@@ -63,6 +64,7 @@
 #include "ps2host/run.h"
 #include "ps2host/timeline.h"
 #include "ps2host/settings.h"
+#include "ps2host/texture_pack.h"
 
 #if PS2HOST_VULKAN
 #include "ps2gpu/display.h"
@@ -162,6 +164,13 @@ struct Owned {
 /* A texture decoded into the renderer (--gpu). */
 struct Cached {
     u64 renderer_key = 0;
+    // A texture pack's replacement (texture_pack.h): drawn instead, or its
+    // file still being read (looked for again each time it is drawn); as of
+    // the pack's generation (Tab turns it on and off).
+    bool replaced = false, pack_pending = false;
+    texture_pack::Name pack_name;
+    u64 replacement = 0;            // the renderer's image for it (texture_pack::Image::id)
+    u64 pack_generation = 0;
     u32 begin = 0, end = 0;
     bool valid = false;
     u64 decoded_serial = 0;         // Bridge::serial when decoded
@@ -250,6 +259,7 @@ struct Bridge {
     u64 write_backs = 0, reloads = 0, decodes = 0;
     u64 unchanged = 0;              // textures invalidated whose texels proved the same
     u64 gpu_decodes = 0;            // textures decoded on the GPU from its copy of local memory
+    u64 replacements = 0;           // a texture pack's in their place (texture_pack.h)
     // The CLUT, in rows of 16 entries (bit r for row r): which the GS model
     // holds as loaded (a load from blocks the CPU has), which the GPU's copy
     // holds (loaded from GPU memory, where the GPU drew them, or sent over).
@@ -829,6 +839,29 @@ bool GpuHolds(const Bridge& b, u32 begin, u32 end) {
    the texture's blocks newer (the race reads its own targets' alpha as
    PSMT8H textures, its depth buffer as PSMZ16) - by the GPU from its own,
    rather than wait for them to come back. */
+void WriteBmp(const std::string& path, const std::vector<u32>& rgba, u32 stride, u32 w, u32 h);
+
+// A texture pack's replacement for the texture, uploaded in its place if its
+// file has been read (texture_pack::Find); false if not (yet).
+bool Replace(Bridge& b, Cached& t) {
+    bool pending = false;
+    const std::shared_ptr<const texture_pack::Image> image = texture_pack::Find(t.pack_name, &pending);
+    t.pack_pending = pending;
+    if (!image) return false;
+    // One image on the GPU for every texture it replaces.
+    if (!b.renderer->HasReplacement(image->id) &&
+        !b.renderer->UploadReplacement(image->id, image->format, image->width, image->height, image->levels,
+                                       image->data.data(), image->data.size()))
+        return false;
+    ++g_mutations;
+    b.renderer->UseReplacement(t.renderer_key, image->id);
+    t.replaced = true;
+    t.replacement = image->id;
+    t.decoded_serial = b.serial;
+    ++b.replacements;
+    return true;
+}
+
 u64 CachedTexture(Bridge& b, const gs::Context& c, u64 texa, u32 tw, u32 th) {
     const u32 tbp = Bits(c.tex0, 0, 14), tbw = Bits(c.tex0, 14, 6), psm = Bits(c.tex0, 20, 6);
     // What decides the decoded texels: where and how it is stored (TBP0, TBW,
@@ -871,8 +904,20 @@ u64 CachedTexture(Bridge& b, const gs::Context& c, u64 texa, u32 tw, u32 th) {
     }
     for (const Owned* o : t.over)
         if (o->drawn_serial > t.decoded_serial && o->begin < t.end && t.begin < o->drawn_end) t.valid = false;
+    // A texture pack (texture_pack.h), for textures from memory - not ones the
+    // GPU drew, as PCSX2 replaces none of those. Turned on or off (Tab):
+    // every texture comes back once, replaced or as the game has it.
+    const bool pack = texture_pack::Count() != 0 && texture_pack::Enabled();
+    if (t.pack_generation != texture_pack::Generation()) {
+        t.pack_generation = texture_pack::Generation();
+        if (pack || t.replaced) t.valid = t.decoded = false;
+    }
+    if (t.valid && t.pack_pending && pack) Replace(b, t);       // its file read since
+    // Its replacement gone from the GPU (not drawn for a while): again.
+    if (t.replaced && !b.renderer->HasReplacement(t.replacement)) t.valid = t.decoded = false;
     // Decoded on the GPU, from its copy of local memory and its CLUT, the
     // CPU's newer blocks and CLUT rows sent over first.
+    bool gpu_holds_now = false;
     auto gpu_decode = [&] {
         for (auto& [okey, o] : b.owned)
             if (o.gpu_newer && o.dirty_begin < t.end && t.begin < o.dirty_end) WriteBack(b, o);
@@ -905,6 +950,23 @@ u64 CachedTexture(Bridge& b, const gs::Context& c, u64 texa, u32 tw, u32 th) {
         }
         ++g_mutations;
         b.renderer->TextureFromMemory(t.renderer_key, d);
+        // PS2HOST_GPU_TEXDUMP=TBP (hex): each decode of a texture there, as the
+        // GPU has it, to gpu_tex_<n>_<primitive>.bmp (the CPU's beside it as
+        // cpu_tex_<n>.bmp) - what a draw sampled, against the GS model.
+        if (const char* want = std::getenv("PS2HOST_GPU_TEXDUMP")) {
+            static int dumped = 0;
+            if (tbp == u32(std::strtoul(want, nullptr, 16)) && dumped < 64) {
+                std::vector<u32> pixels;
+                u32 w = 0, h = 0;
+                if (b.renderer->ReadTexture(t.renderer_key, &pixels, &w, &h)) {
+                    const std::string n = std::to_string(dumped) + "_" + std::to_string(gs::TheGs().primitives());
+                    if (std::FILE* raw = std::fopen(("gpu_tex_" + n + ".rgba").c_str(), "wb")) { std::fwrite(pixels.data(), 4, pixels.size(), raw); std::fclose(raw); }
+                    std::fprintf(stderr, "[texdump] %s: %ux%u psm %02X, %s\n", n.c_str(), unsigned(w), unsigned(h),
+                                 unsigned(psm), gpu_holds_now ? "from the GPU's memory" : "from the CPU's");
+                }
+                ++dumped;
+            }
+        }
         if (std::getenv("PS2HOST_GPU_COUNT")) {
             char key[96];
             std::snprintf(key, sizeof key, "psm %02X tbp %04X tbw %u %ux%u clutrows %d", unsigned(psm), unsigned(tbp),
@@ -919,7 +981,9 @@ u64 CachedTexture(Bridge& b, const gs::Context& c, u64 texa, u32 tw, u32 th) {
     if (!t.valid && (GpuHolds(b, t.begin, t.end) || (clut_rows & ~b.clut_cpu))) {
         Timed timed(Section::GpuSync);
         const TimelineStep step("sync: a texture decoded on the GPU");
+        gpu_holds_now = true;
         gpu_decode();
+        t.replaced = t.pack_pending = false;
         t.valid = true;
         t.decoded = false;              // the CPU's copy was not read: no hash to compare
     }
@@ -939,7 +1003,11 @@ u64 CachedTexture(Bridge& b, const gs::Context& c, u64 texa, u32 tw, u32 th) {
         // the CPU, the race's streamed textures were a twelfth of the GS
         // thread), the hash kept to compare the next time.
         if (!t.decoded || content != t.content) {
-            gpu_decode();
+            t.replaced = t.pack_pending = false;
+            if (pack)
+                t.pack_name = texture_pack::NameOf(gs::TheGs().memory, c.tex0, c.clamp, texa,
+                                                   gs::TheGs().Clut().data());
+            if (!pack || !Replace(b, t)) gpu_decode();
             t.content = content;
             ++b.decodes;
         } else {
@@ -1493,6 +1561,26 @@ void PresentGpuPicture(ps2gpu::Display& display, u64 due_ns) {
     if (gs::TheGs().Picture(&pixels, &w, &h)) display.Present(pixels.data(), w, h);
 }
 
+/* The texture pack (texture_pack.h): the "texture pack" folder beside the PC
+   settings - the release's own folder - or the "texture_pack_dir" setting's,
+   or PS2HOST_TEXTURE_PACK's; on unless "texture_pack" is off (Tab). Not for a
+   scripted run (no PC settings): it draws the game's own textures. */
+void OpenTexturePack() {
+    namespace fs = std::filesystem;
+    std::string dir = std::getenv("PS2HOST_TEXTURE_PACK") ? std::getenv("PS2HOST_TEXTURE_PACK") : "";
+    if (dir.empty() && !SettingsPath().empty()) {
+        dir = Setting("texture_pack_dir");
+        if (dir.empty()) dir = (fs::path(SettingsPath()).parent_path() / "texture pack").u8string();
+    }
+    if (dir.empty()) return;
+    texture_pack::SetEnabled(SettingOn("texture_pack", true));
+    texture_pack::SetBlockCompression(g_bridge->renderer->BlockCompression());
+    const std::size_t files = texture_pack::Open(dir);
+    if (files)
+        std::fprintf(stderr, "[texture pack] %zu textures in %s (%s; Tab turns it on and off)\n", files, dir.c_str(),
+                     texture_pack::Enabled() ? "on" : "off");
+}
+
 bool StartGpuRenderer(std::string* error, GpuMode mode, bool show) {
     static Bridge bridge;
     // On the window's device when there is a window: one Vulkan device for both.
@@ -1505,6 +1593,7 @@ bool StartGpuRenderer(std::string* error, GpuMode mode, bool show) {
     bridge.renderer = ps2gpu::CreateGsRenderer(*device, error);
     if (!bridge.renderer) return false;
     g_bridge = &bridge;
+    OpenTexturePack();
     bridge.primary = mode == GpuMode::Primary;
     // The CPU's waits for the GPU, on the profiler's timeline, by why.
     ps2gpu::SetGpuWaitObserver([](const char* why, std::uint64_t from_ns, std::uint64_t to_ns) {
@@ -1726,7 +1815,11 @@ std::string GpuShadowSummary() {
                       static_cast<unsigned long long>(g_bridge->unchanged),
                       static_cast<unsigned long long>(g_bridge->gpu_decodes),
                       static_cast<unsigned long long>(g_bridge->gpu_clut_loads));
-        return std::string(text) + "\ngpu: " + ps2gpu::SubmitStats();
+        std::string summary = std::string(text) + "\ngpu: " + ps2gpu::SubmitStats();
+        if (texture_pack::Count())
+            summary += "\ngpu: texture pack of " + std::to_string(texture_pack::Count()) + " files, " +
+                       std::to_string(g_bridge->replacements) + " textures replaced";
+        return summary;
     }
     if (!g_bridge->frames) return "";
     std::snprintf(text, sizeof text, "gpu-shadow: %llu frames compared, %.1f%% of pixels agree on average",

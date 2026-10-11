@@ -68,7 +68,82 @@ void Gs::Word(int path, u32 word) {
     Qword(path, u64(p.pending[0]) | u64(p.pending[1]) << 32, u64(p.pending[2]) | u64(p.pending[3]) << 32);
 }
 
+void Gs::BeginRecord(std::FILE* out) {
+    record_ = nullptr;
+    if (!out) return;
+    std::fwrite("GSRP1", 1, 5, out);
+    std::fwrite(memory.data(), 1, 4u << 20, out);
+    auto reg = [&](u32 address, u64 value) {
+        std::fputc('R', out);
+        std::fwrite(&address, 4, 1, out);
+        std::fwrite(&value, 8, 1, out);
+    };
+    for (u32 c = 0; c < 2; ++c) {
+        const Context& x = ctx_[c];
+        // TEX0 with CLD 1: the CLUT loaded again from where it was.
+        reg(0x06 + c, (x.tex0 & ~(7ull << 61)) | 1ull << 61);
+        reg(0x08 + c, x.clamp);
+        reg(0x14 + c, x.tex1);
+        reg(0x18 + c, x.xyoffset);
+        reg(0x34 + c, x.miptbp1);
+        reg(0x36 + c, x.miptbp2);
+        reg(0x40 + c, x.scissor);
+        reg(0x42 + c, x.alpha);
+        reg(0x47 + c, x.test);
+        reg(0x4A + c, x.fba);
+        reg(0x4C + c, x.frame);
+        reg(0x4E + c, x.zbuf);
+    }
+    reg(0x1A, prmodecont_);
+    reg(0x1B, prmode_);
+    reg(0x1C, texclut_);
+    reg(0x3B, texa_);
+    reg(0x3D, fogcol_);
+    reg(0x45, dthe_);
+    reg(0x46, colclamp_);
+    reg(0x49, pabe_);
+    reg(0x50, bitbltbuf_);
+    reg(0x51, trxpos_);
+    reg(0x52, trxreg_);
+    reg(0x0A, u64(fog_) << 56);
+    reg(0x00, prim_);                                   // PRIM last: it starts no primitive
+    reg(0x01, rgbaq_);
+    reg(0x02, st_);
+    reg(0x03, uv_);
+    auto privileged = [&](u32 offset, u64 value) {
+        std::fputc('P', out);
+        const u32 address = 0x12000000u + offset;
+        std::fwrite(&address, 4, 1, out);
+        std::fwrite(&value, 8, 1, out);
+    };
+    privileged(0x0000, pmode_);
+    privileged(0x0070, dispfb_[0]);
+    privileged(0x0080, display_[0]);
+    privileged(0x0090, dispfb_[1]);
+    privileged(0x00A0, display_[1]);
+    privileged(0x00E0, bgcolor_);
+    record_ = out;
+}
+
+void Gs::RecordBlank() {
+    if (record_) std::fputc('V', record_);
+}
+
+void Gs::EndRecord() {
+    if (!record_) return;
+    std::fputc('V', record_);
+    std::fclose(record_);
+    record_ = nullptr;
+}
+
 void Gs::Words(int path, const u32* words, u32 count, u32 from) {
+    if (record_ && count) {
+        std::fputc('W', record_);
+        std::fputc(path, record_);
+        const u32 bytes = count * 4;
+        std::fwrite(&bytes, 4, 1, record_);
+        std::fwrite(words, 4, count, record_);
+    }
     Path& p = paths_[path];
     for (u32 i = 0; i < count;) {
         if (p.pending_count == 0 && p.loops && p.format >= 2 && count - i >= 4) {     // IMAGE
@@ -408,6 +483,11 @@ void Gs::LoadClut(u64 tex0) {
 // ---------------------------------------------------------------- display
 
 void Gs::SetPrivileged(u32 address, u64 value) {
+    if (record_) {
+        std::fputc('P', record_);
+        std::fwrite(&address, 4, 1, record_);
+        std::fwrite(&value, 8, 1, record_);
+    }
     switch (address & 0xFFFF) {
         case 0x0000: pmode_ = value; break;
         case 0x0020: smode2_ = value; break;

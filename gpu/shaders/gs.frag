@@ -130,6 +130,58 @@ vec4 Sample(vec2 uv, int n, bool linear) {
     return floor(top + (bottom - top) * f.y + 0.5);
 }
 
+// A texture pack's replacement (GsRenderer::UploadReplacement): finer than
+// the GS's TW x TH, with mipmap levels of its own (levels - 1 in tex_format's
+// bits 9-11), its texels RGBA as they are (alpha 0x80 is 1.0, as the GS's). Placed
+// over the GS's texels: CLAMP's modes and region in them, k replacement
+// texels to one; filtered as the game filters, with the level the pixel's
+// footprint in the replacement's texels asks for (the GS's LOD knows only its
+// own texels).
+bool Replaced() { return (p.tex_format & 0x100u) != 0u; }
+
+ivec2 ReplacedSize(int n) { return textureSize(texture_image, n); }
+
+int ReplacedWrap(int i, int size, uint mode, uint lo, uint hi, float k) {
+    if (mode == 0u) return ((i % size) + size) % size;
+    if (mode == 1u) return clamp(i, 0, size - 1);
+    if (mode == 2u) return clamp(i, int(floor(float(lo) * k)), int(ceil(float(hi + 1u) * k)) - 1);
+    // REGION_REPEAT: the GS's texel masked, the replacement's texels within it kept.
+    const int g = int(floor(float(i) / k));
+    return int(float((g & int(lo)) | int(hi)) * k) + (i - int(float(g) * k));
+}
+
+vec4 ReplacedTexel(int u, int v, int n, vec2 k) {
+    const ivec2 size = ReplacedSize(n);
+    ivec2 at = ivec2(ReplacedWrap(u, size.x, p.wms, p.minu, p.maxu, k.x),
+                     ReplacedWrap(v, size.y, p.wmt, p.minv, p.maxv, k.y));
+    at = clamp(at, ivec2(0), size - 1);
+    return floor(texelFetch(texture_image, at, n) * 255.0 + 0.5);
+}
+
+vec4 ReplacedLevel(vec2 r, int n, bool linear) {
+    const vec2 k = vec2(ReplacedSize(n)) / vec2(TextureSize());      // its texels to a GS texel, at this level
+    r /= float(1 << n);
+    if (!linear) return ReplacedTexel(int(floor(r.x)), int(floor(r.y)), n, k);
+    const vec2 xy = r - 0.5;
+    const ivec2 i0 = ivec2(floor(xy));
+    const vec2 f = xy - vec2(i0);
+    const vec4 c00 = ReplacedTexel(i0.x, i0.y, n, k), c10 = ReplacedTexel(i0.x + 1, i0.y, n, k);
+    const vec4 c01 = ReplacedTexel(i0.x, i0.y + 1, n, k), c11 = ReplacedTexel(i0.x + 1, i0.y + 1, n, k);
+    return mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
+}
+
+// `r`: where in level 0's texels; `footprint`: its derivatives' larger length.
+vec4 ReplacedSample(vec2 r, float footprint) {
+    const uint m = p.bilinear;
+    const bool linear = (m & 2u) == 0u ? (m & 1u) != 0u : ((m >> 8) & 1u) != 0u || ((m >> 5) & 7u) >= 4u;
+    const int last = int((p.tex_format >> 9) & 7u);
+    const float lod = clamp(log2(max(footprint, 1e-6)), 0.0, float(last));
+    const int n = int(floor(lod));
+    const vec4 c0 = ReplacedLevel(r, n, linear);
+    if (!linear || n >= last || lod == float(n)) return floor(c0 + 0.5);
+    return floor(mix(c0, ReplacedLevel(r, n + 1, linear), lod - float(n)) + 0.5);
+}
+
 // TEX1's mipmapping (GsDrawState::mip, in p.bilinear): the GS's LOD from the
 // pixel's Q - (log2(1/|Q|) << L) + K, or K alone (LCM) - magnifies (MMAG,
 // level 0) up to 0, else minifies by MMIN: 2 and 4 the nearest level, 3 and 5
@@ -182,7 +234,17 @@ void main() {
             if (p.wms == 0u && lo.x >= 0.0 && hi.x <= 1.0) uv.x = clamp(uv.x, inset, size.x - inset);
             if (p.wmt == 0u && lo.y >= 0.0 && hi.y <= 1.0) uv.y = clamp(uv.y, inset, size.y - inset);
         }
-        vec4 t = Sample(uv);
+        // The footprint in a replacement's texels, from the coordinates before
+        // the sprite's clamp above (whose edges would read as a large one).
+        vec4 t;
+        if (Replaced()) {
+            const vec2 k = vec2(ReplacedSize(0)) / vec2(TextureSize());
+            const vec2 r = coordinate.xy / coordinate.z * vec2(TextureSize()) * k;
+            const vec2 dx = dFdx(r), dy = dFdy(r);
+            t = ReplacedSample(uv * k, sqrt(max(dot(dx, dx), dot(dy, dy))));
+        } else {
+            t = Sample(uv);
+        }
         vec3 product = floor(t.rgb * v.rgb / 128.0);
         if (p.tfx == 0u) {
             c.rgb = product;

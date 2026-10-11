@@ -96,6 +96,20 @@ for widescreen or the mouse. Find the function with the tools, not guesses:
 Write what was learned in the game's `docs/FINDINGS.md`. Override as little
 as possible: the game's own code, sounds and behaviour are the point.
 
+## A player's capture, replayed
+
+F12 in a playing port (or `PS2HOST_CAPTURE_FRAME=n`) writes a capture folder
+beside the settings, and with it `replay.bin`: the frames' GS stream (memory,
+registers, every GIF packet). Replay it through the software GS at 1x and
+the GPU at any scale (`PS2HOST_REPLAY_GPU=1`, `PS2HOST_REPLAY_SCALE=n`): if
+the software GS draws it right and the GPU not, bisect with
+`PS2HOST_REPLAY_STOP_PRIM=n`, comparing a buffer's rectangle in the two
+`gsmem.bin` (engine/tools/gsmem.py's `pixel`) - mind which buffer the bad
+pixels are drawn into before being copied to the one shown.
+`PS2HOST_GPU_TEXDUMP=TBP` writes each GPU decode of a texture there. Found
+so: alpha-tested batches drawn in two passes (AFAIL FB_ONLY) reordered
+overlapping primitives (Burnout 3's crash titles, dark streaks).
+
 ## Ground truth: PCSX2
 
 When the port and the software GS agree but the picture still looks wrong,
@@ -142,7 +156,11 @@ The host gives every game: the window and fullscreen (Alt+Enter; fullscreen
 picks a refresh that is a multiple of 60), vsync and frame pacing, the
 internal resolution, settings kept in `pc_settings.ini` (`ps2host/settings.h`),
 the disc picker on first start, a memory card folder, rumble, the mouse
-(`TakeHostMouse`, `SetHostCursor`, `SetPadHook`), a log beside the executable.
+(`TakeHostMouse`, `SetHostCursor`, `SetPadHook`), a log beside the executable,
+PCSX2 texture packs (`ps2host/texture_pack.h`: the "texture pack" folder
+beside the settings, PCSX2's XXH3 names, DDS kept block-compressed on the GPU,
+Tab toggles; scripted runs never load one - test with `PS2HOST_TEXTURE_PACK`
+and `--real-time-from`).
 Per game: a settings menu inside the game's own menus where one can be hooked,
 widescreen (the game's camera and its 2D, with per-element anchors - Burnout
 3's `port/widescreen.cpp`: RenderWare's RwCameraSetViewWindow), the mouse's

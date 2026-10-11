@@ -80,6 +80,8 @@ bool VulkanGpu::Init(std::string* error) {
     features.features.dualSrcBlend = supported.dualSrcBlend;
     features.features.logicOp = supported.logicOp;      // FBMSK's partly masked channels
     logic_op = supported.logicOp == VK_TRUE;
+    features.features.textureCompressionBC = supported.textureCompressionBC;     // texture packs' DDS
+    bc = supported.textureCompressionBC == VK_TRUE;
     features.pNext = &v13;
     VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
     dci.pNext = &features;
@@ -149,6 +151,7 @@ bool VulkanGpu::InitShared(VkInstance shared_instance, VkPhysicalDevice shared_g
     VkPhysicalDeviceFeatures supported;                 // the Display enables logicOp where there is one
     vkGetPhysicalDeviceFeatures(shared_gpu, &supported);
     logic_op = supported.logicOp == VK_TRUE;
+    bc = supported.textureCompressionBC == VK_TRUE;     // (the Display enables it too)
     describe_ = describe;
     VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
     pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;

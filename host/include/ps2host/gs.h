@@ -125,6 +125,13 @@ public:
        whole quadwords go to the transfer together. */
     static constexpr u32 kNoSource = ~0u;
     void Words(int path, const u32* words, u32 count, u32 from = kNoSource);
+    /* Recording a GS stream as --gs-replay reads it (GSRP1): local memory and
+       the registers now, then every GIF word and privileged register write,
+       and Blank's vertical blanks, until EndRecord. Memory must be current
+       (Finish, the GPU's drawing brought back). */
+    void BeginRecord(std::FILE* out);
+    void RecordBlank();
+    void EndRecord();
 
     /* Privileged registers (the 0x12000000 window): what is displayed. */
     void SetPrivileged(u32 address, u64 value);
@@ -266,6 +273,7 @@ public:
 private:
     void LocalToLocal();
 
+    std::FILE* record_ = nullptr;               // BeginRecord's stream
     Context ctx_[2];
     u64 prim_ = 0, prmode_ = 0, prmodecont_ = 1, rgbaq_ = 0, st_ = 0, uv_ = 0;
     u8 fog_ = 0;                                // FOG: F for XYZ2/XYZ3 vertices
