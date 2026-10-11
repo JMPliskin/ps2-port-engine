@@ -142,7 +142,7 @@ std::vector<u8> NCommand(u32 procedure, const std::vector<u8>& data) {
             char text[160];
             std::snprintf(text, sizeof text, "CD: read %u sectors at %u to 0x%08X (pattern %u, ends 0x%08X)%s",
                           sectors, lsn, buffer, pattern, ends, ok ? "" : " - past the disc's end");
-            Note("cd read", text);
+            Note("cd read " + std::to_string(lsn) + " " + std::to_string(buffer), text);
             if (!ok) return Word(0);
             for (std::size_t i = 0; i < bytes.size(); ++i) m.Write(buffer + u32(i), bytes[i], 1);
             if (ends)
@@ -162,7 +162,7 @@ std::vector<u8> NCommand(u32 procedure, const std::vector<u8>& data) {
             char text[160];
             std::snprintf(text, sizeof text, "CD: read %u sectors at %u into IOP memory at 0x%06X%s",
                           sectors, lsn, buffer, ok ? "" : " - failed");
-            Note("cd read iop", text);
+            Note("cd read iop " + std::to_string(lsn), text);
             if (!ok) return Word(0);
             for (u32 i = 0; i < size; ++i) m.Write(kIopRamBase + buffer + i, bytes[i], 1);
             return Word(1);

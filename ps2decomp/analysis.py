@@ -353,9 +353,19 @@ class ImageAnalyzer:
     # -- stage 2b: pointer-table targets -------------------------------
 
     def _is_prologue(self, addr: int) -> bool:
-        """True when `addr` holds `addiu $sp, $sp, -N`."""
+        """True when `addr` holds `addiu $sp, $sp, -N`, or the large frame's
+        `lui $at, 0xFFFF; ori $at, $at, lo; addu $sp, $sp, $at` (CodeWarrior's,
+        past 32 KB: Mister Mosquito's task entries)."""
         word = self.word_at(addr)
-        return (word & self._PROLOGUE_MASK) == self._PROLOGUE_MATCH and bool(word & 0x8000)
+        if (word & self._PROLOGUE_MASK) == self._PROLOGUE_MATCH and bool(word & 0x8000):
+            return True
+        return self._is_large_prologue(addr)
+
+    def _is_large_prologue(self, addr: int) -> bool:
+        if not (self.contains(addr) and self.contains(addr + 8)):
+            return False
+        return (self.word_at(addr) == 0x3C01FFFF and (self.word_at(addr + 4) >> 16) == 0x3421
+                and self.word_at(addr + 8) in (0x03A1E821, 0x03A1E82D))
 
     def _follows_terminator(self, addr: int) -> bool:
         """True when the instruction two slots back ends a function.
@@ -460,9 +470,12 @@ class ImageAnalyzer:
             return index >= 0 and extents[index][0] <= addr < extents[index][1]
 
         for i, word in enumerate(self.words):
-            if (word & self._PROLOGUE_MASK) != self._PROLOGUE_MATCH:
+            if word == 0x3C01FFFF:              # lui $at, 0xFFFF: perhaps a large frame
+                if not self._is_large_prologue(self.base + i * 4):
+                    continue
+            elif (word & self._PROLOGUE_MASK) != self._PROLOGUE_MATCH:
                 continue
-            if not (word & 0x8000):  # immediate must be negative
+            elif not (word & 0x8000):  # immediate must be negative
                 continue
             addr = self.base + i * 4
             if inside_function(addr):
@@ -513,7 +526,9 @@ class ImageAnalyzer:
             # read as instructions on $zero, or pointer arrays pointing at
             # themselves. Requiring a return discards those without needing a
             # hand-maintained list of data ranges.
-            if not func.has_return:
+            # One that opens a stack frame is code all the same: a task's entry
+            # never returns (it kills itself, or loops forever).
+            if not func.has_return and not self._is_prologue(addr):
                 self.stats["pointer_rejected_no_return"] += 1
                 continue
             self.functions[addr] = func
