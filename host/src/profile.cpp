@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <map>
 #include <mutex>
 #include <string>
@@ -449,7 +450,11 @@ LONG WINAPI CrashFilter(EXCEPTION_POINTERS* info) {
     std::fprintf(stderr, "\n");
     HANDLE process = GetCurrentProcess();
     SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES);
-    SymInitialize(process, nullptr, TRUE);
+    // Symbols beside the executable, wherever the run was started from.
+    char exe_dir[MAX_PATH] = "";
+    GetModuleFileNameA(nullptr, exe_dir, MAX_PATH);
+    if (char* slash = std::strrchr(exe_dir, '\\')) *slash = 0;
+    SymInitialize(process, exe_dir, TRUE);
     CONTEXT context = *info->ContextRecord;
     STACKFRAME64 frame{};
     frame.AddrPC.Offset = context.Rip;
@@ -472,8 +477,16 @@ LONG WINAPI CrashFilter(EXCEPTION_POINTERS* info) {
         DWORD line_displacement = 0;
         const bool named = SymFromAddr(process, frame.AddrPC.Offset, &displacement, symbol);
         const bool lined = SymGetLineFromAddr64(process, frame.AddrPC.Offset, &line_displacement, &line);
-        std::fprintf(stderr, "[crash]   %s%s%s:%lu\n", named ? symbol->Name : "?", lined ? "  " : "",
-                     lined ? line.FileName : "", lined ? line.LineNumber : 0ul);
+        // The module and the offset in it, for a frame no symbol names.
+        const DWORD64 base = SymGetModuleBase64(process, frame.AddrPC.Offset);
+        char module[MAX_PATH] = "?";
+        if (base) {
+            GetModuleFileNameA(reinterpret_cast<HMODULE>(base), module, MAX_PATH);
+            if (const char* slash = std::strrchr(module, '\\')) std::memmove(module, slash + 1, std::strlen(slash));
+        }
+        std::fprintf(stderr, "[crash]   %s+0x%llX %s%s%s:%lu\n", module,
+                     static_cast<unsigned long long>(frame.AddrPC.Offset - base), named ? symbol->Name : "?",
+                     lined ? "  " : "", lined ? line.FileName : "", lined ? line.LineNumber : 0ul);
     }
     std::fflush(stderr);
     return EXCEPTION_CONTINUE_SEARCH;
