@@ -405,7 +405,18 @@ class TestLiftRefusals(unittest.TestCase):
         words = [lui(T1, 0x0010), addiu(T1, T1, 0x18), r_type(0x08, rs=A0), NOP,
                  addiu(V0, 0, 1), addiu(V0, 0, 2), addiu(V0, 0, 3), JR_RA, NOP] + [NOP] * 7 + [BASE + 0x10]
         image = struct.pack("<%dI" % len(words), *words)
+        # A function of ordinary size: every instruction is a target, through
+        # one switch (a table may be built at run time).
         text = lift.lift_function(image, BASE, BASE, BASE + 0x24)
+        self.assertEqual(text.count("switch (jump)"), 1)
+        self.assertIn("case 0x%08Xu:" % (BASE + 0x14), text)
+        # A very large one: only what can be known.
+        saved = lift.DISPATCH_ALL
+        lift.DISPATCH_ALL = 4
+        try:
+            text = lift.lift_function(image, BASE, BASE, BASE + 0x24)
+        finally:
+            lift.DISPATCH_ALL = saved
         self.assertEqual(text.count("switch (jump)"), 1)
         for target in (BASE, BASE + 0x10, BASE + 0x18):
             self.assertIn("case 0x%08Xu: goto L_%08X;" % (target, target), text)

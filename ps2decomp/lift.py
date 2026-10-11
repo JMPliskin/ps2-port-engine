@@ -383,6 +383,16 @@ _CONDITIONS = {
 
 _POINTER_WORDS = {}
 _SECTIONS = []          # (bytes, base): the program's other loaded sections
+_FUNCTION_STARTS = set()
+# Functions up to this many instructions dispatch a jr to any of them.
+DISPATCH_ALL = 3000
+
+
+def use_function_starts(addresses) -> None:
+    """Where the analysis found functions: a large function's jr dispatch keeps
+    those inside it as targets (see lift_function)."""
+    _FUNCTION_STARTS.clear()
+    _FUNCTION_STARTS.update(addresses)
 
 
 def use_sections(sections) -> None:
@@ -481,13 +491,21 @@ def lift_function(image: bytes, base: int, start: int, end: int, chunks=()) -> s
                 if ins.target <= ins.addr:
                     loop_heads.add(ins.target)
     if dispatch:
-        # Where a jr through a register can land in this function: what a jump
-        # table or an address constant names, and the return points of its calls.
-        # Any of them can begin a loop. A target outside the set leaves through
-        # the dispatch's default, a tail transfer the host reports - never a
-        # silent wrong turn. (Every instruction a target made one compiler take
-        # twelve minutes over a function of thirteen thousand.)
-        dispatched = sorted(a for a in jump_targets(image, base, code) if a in by_address)
+        # Where a jr through a register can land in this function: any of its
+        # instructions - a table can be built at run time (Burnout 3's at
+        # 0x001BD7FC is, in BSS) - and any of them can begin a loop. Only past
+        # DISPATCH_ALL instructions, where every one a target made one compiler
+        # take twelve minutes over a function of thirteen thousand, the targets
+        # are what can be known: what a table or an address constant names, its
+        # calls' return points, and the function starts the analysis found
+        # inside it (where a tail transfer would run another function's way).
+        # A target outside that set leaves through the default, which the host
+        # reports when no function starts there - loud, never a wrong turn.
+        if len(code) <= DISPATCH_ALL:
+            dispatched = sorted(by_address)
+        else:
+            known = jump_targets(image, base, code) | {a for a in _FUNCTION_STARTS if a in by_address}
+            dispatched = sorted(a for a in known if a in by_address)
         labels.update(dispatched)
         loop_heads.update(dispatched)
     for _first, last in ranges[:-1]:

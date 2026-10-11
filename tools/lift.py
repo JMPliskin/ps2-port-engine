@@ -397,6 +397,7 @@ def _start_worker(game_directory, seeds, dll):
     elf = game.load_elf()
     section = elf.exec_sections[0]
     lift.use_sections(_other_sections(elf, section))
+    lift.use_function_starts(f["addr"] for f in database["functions"])
     machine = Machine.from_elf(elf)
     testplan.prepare_test_memory(machine, database, elf.section_data(section), section.addr,
                                [], seeds=seeds)
@@ -457,6 +458,7 @@ def main(argv=None) -> int:
     section = elf.exec_sections[0]
     image = elf.section_data(section)
     lift.use_sections(_other_sections(elf, section))
+    lift.use_function_starts(f["addr"] for f in database["functions"])
     machine = Machine.from_elf(elf)
     # Every function, including those with no return of their own - thunks that
     # end in a jump: a port reaches them like any other, and the original runs to
