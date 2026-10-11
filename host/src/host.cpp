@@ -504,6 +504,19 @@ public:
             ForEachContext([](lifted::Context& each) {
                 reinterpret_cast<std::atomic<s64>*>(&each.budget)->store(-1);
             });
+            // A run that does not stop is stuck in host code (no guest loop
+            // head comes): say where the guest was, rather than be killed
+            // without a word.
+            if (!done_.wait_for(lock, std::chrono::seconds(20), [this] { return finished_; })) {
+                u32 calls[32];
+                const int n = GuestCallsNow(calls, 32);
+                std::fprintf(stderr, "\n=== host report ===\nstuck: the run did not stop 20 s after its time "
+                                     "limit - the host is in a loop of its own\nguest call stack (innermost first):");
+                for (int i = 0; i < n; ++i) std::fprintf(stderr, " 0x%08X", unsigned(calls[i]));
+                std::fprintf(stderr, "\n");
+                std::fflush(nullptr);
+                std::_Exit(3);
+            }
         }
     }) {}
     ~Watchdog() {
