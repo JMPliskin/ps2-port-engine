@@ -515,6 +515,14 @@ public:
                 for (int i = 0; i < n; ++i) std::fprintf(stderr, " 0x%08X", unsigned(calls[i]));
                 std::fprintf(stderr, "\n");
                 std::fflush(nullptr);
+                // PS2HOST_STUCK_RAM=file: EE RAM as it stands, to look into.
+                if (const char* path = std::getenv("PS2HOST_STUCK_RAM")) {
+                    if (std::FILE* f = std::fopen(path, "wb")) {
+                        std::fwrite(GuestMemory().Translate(0, 32u << 20), 1, 32u << 20, f);
+                        std::fclose(f);
+                        std::fprintf(stderr, "EE RAM written to %s\n", path);
+                    }
+                }
                 // The IOP's threads too (read while it runs: a diagnostic, last).
                 std::fprintf(stderr, "%s", iop::Report().c_str());
                 std::fflush(nullptr);
