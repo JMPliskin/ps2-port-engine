@@ -325,6 +325,10 @@ void SetWindowOverlay(const std::vector<std::string>& lines);
    is open the game gets no input (PcMenuOpen). */
 void UpdatePcMenu();
 bool PcMenuOpen();
+/* The panel opened from a game's own menu (a port's PC SETTINGS entry). */
+void OpenPcMenu();
+/* A port's EXIT GAME: the run ends as when the window is closed. */
+void QuitGame();
 /* The window's display, null when there is none (or no Vulkan one). */
 ps2gpu::Display* WindowDisplay();
 /* What the window shows instead of the software GS's picture (BGRA, as

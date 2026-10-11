@@ -156,6 +156,13 @@ std::array<bool, kInputs> Held() {
 
 bool PcMenuOpen() { return g_open || g_releasing; }
 
+void OpenPcMenu() {
+    if (g_open) return;
+    g_open = true;
+    g_row = 0;
+    Draw(true);
+}
+
 void UpdatePcMenu() {
     static std::array<bool, kInputs> before{};
     const std::array<bool, kInputs> now = Held();

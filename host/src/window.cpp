@@ -207,6 +207,9 @@ bool WindowFocused() {
 
 bool WindowClosed() { return g_closed; }
 
+// A game's own EXIT GAME: as if the window had been closed.
+void QuitGame() { g_closed = true; }
+
 bool HostKeyDown(int key) {
 #ifdef PS2HOST_VULKAN
     if (g_display) return g_display->KeyDown(Scancode(key));
@@ -361,7 +364,7 @@ bool PumpWindow() {
     }
 #endif
     if (g_window) PresentGdi();
-    return true;
+    return !g_closed;                  // a game's EXIT GAME (QuitGame) with no window too
 }
 
 void SetWindowFullscreen(bool on) {
