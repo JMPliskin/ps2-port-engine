@@ -347,8 +347,9 @@ void PartlyMaskedChannels(ps2gpu::GsRenderer& renderer) {
     Rect(renderer, state, 0, 0, 8, 16, 0xFFFFFFFFu);
     Check(Pixel(renderer, 0x94, 2, 2) == 0xF2F4F6F8u, "a partly masked channel keeps its masked bits");
     Check(Pixel(renderer, 0x94, 12, 2) == 0x12345678u, "...and nothing outside the draw changes");
-    // A 16-bit target: FBMSK in its own bits (0x3FFF keeps R, G and B's low
-    // four; B's top bit and A are written).
+    // A 16-bit target: FBMSK in RGBA32 bit positions all the same, as the GS
+    // masks the colour before making it 16-bit (KeptBits): 0x3FFF keeps R and
+    // G's low six bits; G's top two, B and A are written.
     ps2gpu::GsDrawState sixteen = Target(0x95);
     sixteen.psm = 0x02;
     Rect(renderer, sixteen, 0, 0, 16, 16, 0x00102030u);        // A 0, B 0x10, G 0x20, R 0x30
@@ -357,7 +358,7 @@ void PartlyMaskedChannels(ps2gpu::GsRenderer& renderer) {
     std::vector<std::uint32_t> pixels;
     std::uint32_t w = 0, h = 0;
     renderer.ReadTarget(0x95, 1, 0x02, &pixels, &w, &h);
-    Check(!pixels.empty() && pixels[0] == 0x80902030u, "a 16-bit target's FBMSK in its own bits");
+    Check(!pixels.empty() && pixels[0] == 0x80F8E030u, "a 16-bit target's FBMSK in RGBA32 bit positions");
 }
 
 void TargetFromMemory(ps2gpu::GsRenderer& renderer) {
