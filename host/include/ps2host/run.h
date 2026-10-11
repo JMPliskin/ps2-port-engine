@@ -123,6 +123,8 @@ void InstallLoadFile();
 void UseIopImage(const std::string& path);
 void InstallDbc();
 void InstallIopHeap();
+/* libmc's memory card server (mcserv.cpp) over --memcard's directory. */
+void InstallMcserv();
 /* Signal an EE semaphore from the host (the IOP finishing a request); the
    running thread is not preempted. */
 void SignalSemaphore(u32 id);

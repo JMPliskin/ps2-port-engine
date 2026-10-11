@@ -183,6 +183,7 @@ void InstallIopServers() {
     InstallLoadFile();
     InstallDbc();
     InstallIopHeap();
+    InstallMcserv();
     RegisterRpcServer(0x8000059Cu, DiskReady);
     RegisterRpcServer(0x8000059Au, DiskReady);      // the same, as SDK 2.3's libcdvd binds it
     RegisterRpcServer(0x80000592u, CdInit);
