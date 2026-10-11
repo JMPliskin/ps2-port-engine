@@ -129,8 +129,12 @@ public:
     /* Privileged registers (the 0x12000000 window): what is displayed. */
     void SetPrivileged(u32 address, u64 value);
 
-    /* The displayed picture, 32-bit BGRA, and its size. False if nothing is. */
+    /* The displayed picture, 32-bit BGRA, and its size. False if nothing is.
+       In field mode (SMODE2 INT and FFMD) each field shows every line of the
+       frame buffer, half the display's height: those lines, each twice. */
     bool Picture(std::vector<u32>* pixels, u32* width, u32* height) const;
+    /* How many lines of the frame buffer the display shows. */
+    u32 ShownLines() const;
     bool WriteBmp(const std::string& path) const;
 
     /* Every primitive as it is drawn, for a second renderer (the GPU's, which
@@ -279,7 +283,7 @@ private:
     u32 trx_partial_ = 0, trx_partial_bytes_ = 0;    // 24-bit pixels across quadwords
     u32 cbp0_ = 0, cbp1_ = 0;                       // CLUT bases CLD compares with
     // Privileged.
-    u64 pmode_ = 0, dispfb_[2] = {}, display_[2] = {}, bgcolor_ = 0;
+    u64 pmode_ = 0, smode2_ = 0, dispfb_[2] = {}, display_[2] = {}, bgcolor_ = 0;
     u64 primitives_ = 0, uploads_ = 0;
     std::atomic<u64> pixels_{0};               // written by the row workers too
     u64 tags_[4] = {}, image_qwords_ = 0;

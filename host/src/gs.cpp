@@ -393,6 +393,7 @@ void Gs::LoadClut(u64 tex0) {
 void Gs::SetPrivileged(u32 address, u64 value) {
     switch (address & 0xFFFF) {
         case 0x0000: pmode_ = value; break;
+        case 0x0020: smode2_ = value; break;
         case 0x0070: dispfb_[0] = value; break;
         case 0x0080: display_[0] = value; break;
         case 0x0090: dispfb_[1] = value; break;
@@ -462,11 +463,12 @@ bool Gs::Picture(std::vector<u32>* pixels, u32* width, u32* height) const {
     if (!w || w > 1024) w = 640;
     if (!h || h > 1024) h = 448;
     if (!fbw) return false;
-    Touch(fbp, fbw, psm, dbx, dby, w, h, false);
+    const u32 lines = ShownLines(), repeat = h / std::max(lines, 1u);
+    Touch(fbp, fbw, psm, dbx, dby, w, lines, false);
     pixels->assign(std::size_t(w) * h, 0);
     for (u32 y = 0; y < h; ++y)
         for (u32 x = 0; x < w; ++x) {
-            u32 c = memory.Read(fbp, fbw, dbx + x, dby + y, psm);
+            u32 c = memory.Read(fbp, fbw, dbx + x, dby + y / std::max(repeat, 1u), psm);
             if (psm == PSMCT16 || psm == PSMCT16S) c = From16(c, 0);
             // RGBA in memory, BGRA in the picture.
             (*pixels)[std::size_t(y) * w + x] = (c & 0xFF00FF00u) | ((c & 0xFF) << 16) | ((c >> 16) & 0xFF);
@@ -474,6 +476,15 @@ bool Gs::Picture(std::vector<u32>* pixels, u32* width, u32* height) const {
     *width = w;
     *height = h;
     return true;
+}
+
+u32 Gs::ShownLines() const {
+    const int circuit = Bits(pmode_, 1, 1) || (!Bits(pmode_, 0, 1) && dispfb_[1]) ? 1 : 0;
+    const u64 disp = display_[circuit];
+    u32 h = (Bits(disp, 44, 11) + 1) / (Bits(disp, 27, 2) + 1);
+    if (!h || h > 1024) h = 448;
+    const bool field = Bits(smode2_, 0, 1) && Bits(smode2_, 1, 1);    // interlaced, FFMD
+    return field ? h / 2 : h;
 }
 
 bool Gs::WriteBmp(const std::string& path) const {

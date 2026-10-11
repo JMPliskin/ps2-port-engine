@@ -1478,8 +1478,9 @@ void PresentGpuPicture(ps2gpu::Display& display, u64 due_ns) {
             // The target's own pixels, as many as the picture's 640x448 at the
             // internal resolution.
             const u32 k = g_bridge->renderer->Scale();
-            if (due_ns) display.PresentImageAt(image, layout, std::min(w, 640u * k), std::min(h, 448u * k), due_ns);
-            else display.PresentImage(image, layout, std::min(w, 640u * k), std::min(h, 448u * k));
+            const u32 lines = std::min(gs::TheGs().ShownLines(), 448u);    // 224 in field mode
+            if (due_ns) display.PresentImageAt(image, layout, std::min(w, 640u * k), std::min(h, lines * k), due_ns);
+            else display.PresentImage(image, layout, std::min(w, 640u * k), std::min(h, lines * k));
             return;
         }
     }
