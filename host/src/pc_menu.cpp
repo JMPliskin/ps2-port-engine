@@ -37,6 +37,9 @@ struct Choice {
     std::vector<std::string> shown;         // as the panel says them
     std::string (*get)();
     void (*set)(const std::string&);
+    const char* game_label;                 // short and in capitals, for a game's own menu (PcSettings)
+    std::vector<std::string> game_values;
+    const char* help;
 };
 
 std::string OnOff(bool on) { return on ? "on" : "off"; }
@@ -46,25 +49,31 @@ const std::vector<Choice>& Choices() {
         {"Resolution", {"original", "2x", "3x", "4x", "display"},
          {"Original (640x448)", "2x", "3x", "4x", "The screen's"},
          [] { return Setting("resolution", "original"); },
-         [](const std::string& v) { SetSetting("resolution", v); }},
+         [](const std::string& v) { SetSetting("resolution", v); },
+         "RESOLUTION", {"1X", "2X", "3X", "4X", "AUTO"}, "The resolution the game is drawn at."},
         {"Aspect ratio", {"4:3", "16:9", "auto"}, {"4:3", "16:9", "Fill the window"},
          [] { return Setting("aspect", "4:3"); },
-         [](const std::string& v) { SetWindowAspect(v); }},
+         [](const std::string& v) { SetWindowAspect(v); },
+         "ASPECT", {"4:3", "16:9", "FILL"}, "The picture's shape: 4:3, 16:9 or the window's."},
         {"Fullscreen", {"off", "on"}, {"Off", "On"},
          [] { return OnOff(WindowFullscreen()); },
-         [](const std::string& v) { SetWindowFullscreen(v == "on"); }},
+         [](const std::string& v) { SetWindowFullscreen(v == "on"); },
+         "FULLSCREEN", {"OFF", "ON"}, "Play in a window or on the whole screen."},
         {"V-sync", {"off", "on"}, {"Off", "On"},
          [] { return OnOff(WindowVsync()); },
-         [](const std::string& v) { SetWindowVsync(v == "on"); }},
+         [](const std::string& v) { SetWindowVsync(v == "on"); },
+         "V-SYNC", {"OFF", "ON"}, "Wait for the screen's refresh: no tearing."},
         {"Frame pacing", {"on", "off"}, {"On", "Off"},
          [] { return OnOff(SettingOn("frame_pacing", true)); },
-         [](const std::string& v) { SetSettingOn("frame_pacing", v == "on"); }},
+         [](const std::string& v) { SetSettingOn("frame_pacing", v == "on"); },
+         "PACING", {"ON", "OFF"}, "Frame pacing: pictures shown at an even pace."},
         {"Texture pack", {"on", "off"}, {"On", "Off"},
          [] { return OnOff(texture_pack::Enabled()); },
          [](const std::string& v) {
              texture_pack::SetEnabled(v == "on");
              SetSettingOn("texture_pack", v == "on");
-         }},
+         },
+         "TEXTURES", {"ON", "OFF"}, "The texture pack's textures, or the game's own."},
     };
     return choices;
 }
@@ -153,6 +162,36 @@ std::array<bool, kInputs> Held() {
 }
 
 }  // namespace
+
+std::vector<PcSetting> PcSettings() {
+    std::vector<PcSetting> settings;
+    for (int i : Rows()) {
+        if (i < 0) continue;
+        const Choice& c = Choices()[std::size_t(i)];
+        const std::string now = c.get();
+        std::string value = now;
+        for (std::size_t v = 0; v < c.values.size(); ++v)
+            if (c.values[v] == now) value = c.game_values[v];
+        settings.push_back({c.game_label, value, c.help});
+    }
+    return settings;
+}
+
+void StepPcSetting(int index, int step) {
+    int n = 0;
+    for (int i : Rows()) {
+        if (i < 0) continue;
+        if (n++ != index) continue;
+        const Choice& c = Choices()[std::size_t(i)];
+        const std::string now = c.get();
+        int at = 0;
+        for (int v = 0; v < int(c.values.size()); ++v)
+            if (c.values[std::size_t(v)] == now) at = v;
+        const int count = int(c.values.size());
+        c.set(c.values[std::size_t(((at + step) % count + count) % count)]);
+        return;
+    }
+}
 
 bool PcMenuOpen() { return g_open || g_releasing; }
 

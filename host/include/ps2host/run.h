@@ -325,6 +325,13 @@ void SetWindowOverlay(const std::vector<std::string>& lines);
    is open the game gets no input (PcMenuOpen). */
 void UpdatePcMenu();
 bool PcMenuOpen();
+/* The PC settings for a game's own menu (a port's PC SETTINGS screen): each
+   one's short name and value in capitals (RESOLUTION, 2X) and a line of help;
+   a texture pack's only when one is loaded. StepPcSetting changes the n-th to
+   its next value (step 1) or the one before (-1), applied and saved. */
+struct PcSetting { std::string label, value, help; };
+std::vector<PcSetting> PcSettings();
+void StepPcSetting(int index, int step);
 /* The panel opened from a game's own menu (a port's PC SETTINGS entry). */
 void OpenPcMenu();
 /* A port's EXIT GAME: the run ends as when the window is closed. */
