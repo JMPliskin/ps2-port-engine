@@ -275,7 +275,10 @@ class ImageAnalyzer:
                 if index is None and m in ("addu", "daddu") and ins.rd == register_of_sum:
                     index = (ins.rs, ins.rt)
                 elif index and low is None and m == "addiu" and ins.rt in index:
-                    low = (ins.rt, ins.imm)
+                    # The lui is the addiu's source: GCC adds in place
+                    # (`addiu $t, $t, lo`), CodeWarrior into another register
+                    # (`lui $v0, hi; addiu $v1, $v0, lo; sll $v0, $i, 2`).
+                    low = (ins.rs, ins.imm)
                 elif m == "lui" and ((low and ins.rt == low[0]) or (index and not low and ins.rt in index)):
                     # The table's low half is in the addiu, or else in the load's
                     # own offset: `lui $t, hi; addu $t, $t, $i; lw $r, lo($t)`.

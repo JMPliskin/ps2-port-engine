@@ -88,6 +88,15 @@ class TestSwitches(unittest.TestCase):
         a = ImageAnalyzer(struct.pack("<%dI" % len(words), *words), BASE, BASE)
         self.assertEqual(a.jump_table(BASE + 0x20, 3), [BASE + 0x28, BASE + 0x34])
 
+    def test_the_table_may_be_summed_into_another_register(self):
+        # CodeWarrior: lui $v0, 0x0010; addiu $v1, $v0, 0x0100; sll $v0, $a0, 2;
+        # addu $v0, $v0, $v1; lw $v0, 0($v0); jr $v0
+        code = list(self.CODE)
+        code[3:9] = [0x3C020010, 0x24430100, 0x00041080, 0x00431021, 0x8C420000, 0x00400008]
+        words = code + [NOP] * (0x40 - len(code)) + [BASE + 0x28, BASE + 0x34] + [NOP] * 32
+        a = ImageAnalyzer(struct.pack("<%dI" % len(words), *words), BASE, BASE)
+        self.assertEqual(a.jump_table(BASE + 0x20, 2), [BASE + 0x28, BASE + 0x34])
+
     def test_cases_are_labels_of_the_switch(self):
         a = self.image()
         a.run()
