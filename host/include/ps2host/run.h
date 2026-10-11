@@ -109,6 +109,10 @@ bool IopReplyPending();
 /* A packet from the IOP to the EE (a module's sceSifSendCmd): queued, and
    delivered as the SIF0 interrupt at the next safe point. */
 void QueueIopPacket(std::vector<u8> packet);
+/* A host RPC server's: its answer (the RPC end) reaches the EE `ns` later, on
+   the host clock (virtual under --virtual-time) - a device's time, such as a
+   CD read's. */
+void DelayRpcReply(u64 ns);
 /* Ask for interrupts to be delivered at the running thread's next loop head. */
 void RequestDelivery();
 /* The RPC-end packet answering an RPC request packet, for a server at

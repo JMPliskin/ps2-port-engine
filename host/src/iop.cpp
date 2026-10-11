@@ -42,11 +42,17 @@ constexpr u32 kSif0Channel = 5;
 // the EE, only compared with zero (bound or not) and handed back on calls.
 constexpr u32 kServerBase = 0x00180000u;
 
+struct Reply {
+    std::vector<u8> packet;
+    u64 due_ns = 0;                      // not before (ClockNs); 0: at once
+};
+
 struct Iop {
     u32 receive_buffer = 0;              // the EE's, from command 0x80000000
     std::map<u32, u32> sregs;            // software registers, command 0x80000001
     std::map<u32, u32> servers;          // server id -> pretended IOP address
-    std::deque<std::vector<u8>> replies; // packets for the EE, not yet delivered
+    std::deque<Reply> replies;           // packets for the EE, not yet delivered
+    u64 next_delay_ns = 0;               // DelayRpcReply's, for the next RPC end
 };
 
 Iop& I() {
@@ -92,7 +98,10 @@ void QueueEnd(const std::vector<u8>& request, u32 answered, u32 server,
     PutWord(packet, 36, server);
     PutWord(packet, 40, buffer);                // the server's receive buffer
     PutWord(packet, 44, cbuffer);               // and its command buffer
-    I().replies.push_back(std::move(packet));
+    Iop& iop = I();
+    const u64 due = iop.next_delay_ns ? ClockNs() + iop.next_delay_ns : 0;
+    iop.next_delay_ns = 0;
+    iop.replies.push_back({std::move(packet), due});
     RequestDelivery();
 }
 
@@ -240,21 +249,24 @@ void QueueRpcEnd(const std::vector<u8>& request, u32 server, u32 buffer, u32 cbu
 }
 
 void QueueIopPacket(std::vector<u8> packet) {
-    I().replies.push_back(std::move(packet));
+    I().replies.push_back({std::move(packet), 0});
     RequestDelivery();
 }
 
+void DelayRpcReply(u64 ns) { I().next_delay_ns = ns; }
+
 // Deliver one queued answer: into the EE's receive buffer, then the SIF0 DMA
-// interrupt. False when none is waiting.
+// interrupt. False when none is waiting - or the first is not due yet (the
+// IOP answers in order: nothing overtakes it).
 bool IopReplyPending() {
     const Iop& iop = I();
-    return !iop.replies.empty() && iop.receive_buffer;
+    return !iop.replies.empty() && iop.receive_buffer && iop.replies.front().due_ns <= ClockNs();
 }
 
 bool DeliverIopReply() {
     Iop& iop = I();
-    if (iop.replies.empty() || !iop.receive_buffer) return false;
-    std::vector<u8> packet = std::move(iop.replies.front());
+    if (!IopReplyPending()) return false;
+    std::vector<u8> packet = std::move(iop.replies.front().packet);
     iop.replies.pop_front();
     Memory& m = GuestMemory();
     for (std::size_t i = 0; i < packet.size(); ++i) m.Write(iop.receive_buffer + u32(i), packet[i], 1);

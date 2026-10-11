@@ -129,6 +129,14 @@ std::vector<u8> CdInit(u32 /*procedure*/, const std::vector<u8>& /*data*/) { ret
 //      u8 bytes1[64], bytes2[64] }, which the library's completion copies out:
 //      here every byte goes straight to the buffer and the record says none.
 //  14  sceCdDiskReady (N): 2, SCECdComplete.
+// How long a read takes the drive: a 24x CD's 3.6 MB/s, after a seek. Games
+// time things by it - Mister Mosquito's stage loader moves a sound bank a
+// jingle still plays from, which the seconds its reads take let end first.
+u64 ReadTimeNs(std::size_t bytes) {
+    constexpr u64 kSeekNs = 2000000, kBytesPerSecond = 3686400;
+    return kSeekNs + u64(bytes) * 1000000000ull / kBytesPerSecond;
+}
+
 std::vector<u8> NCommand(u32 procedure, const std::vector<u8>& data) {
     Memory& m = GuestMemory();
     switch (procedure) {
@@ -147,6 +155,7 @@ std::vector<u8> NCommand(u32 procedure, const std::vector<u8>& data) {
             for (std::size_t i = 0; i < bytes.size(); ++i) m.Write(buffer + u32(i), bytes[i], 1);
             if (ends)
                 for (u32 k = 0; k < 16; ++k) m.Write(ends + k, 0, 1);
+            DelayRpcReply(ReadTimeNs(bytes.size()));
             return Word(1);
         }
         case 13: {
@@ -165,6 +174,7 @@ std::vector<u8> NCommand(u32 procedure, const std::vector<u8>& data) {
             Note("cd read iop " + std::to_string(lsn), text);
             if (!ok) return Word(0);
             for (u32 i = 0; i < size; ++i) m.Write(kIopRamBase + buffer + i, bytes[i], 1);
+            DelayRpcReply(ReadTimeNs(size));
             return Word(1);
         }
         case 14:
