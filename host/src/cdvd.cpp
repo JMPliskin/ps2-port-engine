@@ -149,6 +149,24 @@ std::vector<u8> NCommand(u32 procedure, const std::vector<u8>& data) {
                 for (u32 k = 0; k < 16; ++k) m.Write(ends + k, 0, 1);
             return Word(1);
         }
+        case 13: {
+            // sceCdReadIOPMem: { lsn, sectors, IOP buffer, mode }: the sectors
+            // into IOP memory, for a module there.
+            if (data.size() < 12) return Word(0);
+            const u32 lsn = At(data, 0), sectors = At(data, 4), buffer = At(data, 8) & 0x1FFFFF;
+            const u32 pattern = data.size() >= 16 ? (At(data, 12) >> 16) & 0xFF : 0;
+            const u32 size = sectors * Disc::PatternSize(pattern);
+            std::vector<u8> bytes(size);
+            const bool ok = buffer + size <= kIopRamSize && GuestDisc().IsOpen() &&
+                            GuestDisc().ReadPattern(lsn, sectors, pattern, bytes.data());
+            char text[160];
+            std::snprintf(text, sizeof text, "CD: read %u sectors at %u into IOP memory at 0x%06X%s",
+                          sectors, lsn, buffer, ok ? "" : " - failed");
+            Note("cd read iop", text);
+            if (!ok) return Word(0);
+            for (u32 i = 0; i < size; ++i) m.Write(kIopRamBase + buffer + i, bytes[i], 1);
+            return Word(1);
+        }
         case 14:
             return Word(2);
         default:

@@ -211,8 +211,11 @@ void SifDma(u32 transfers, u32 count) {
         std::vector<u8> bytes = ReadGuest(src, size);
         const u32 command = Word(bytes, 8);
         // A command packet's header gives its own size; user commands (below
-        // 0x80000000) are a module's, system ones the SIF library's.
-        const bool user = command < 0x100u;
+        // 0x80000000) are a module's, system ones the SIF library's. A user
+        // command no module handles is not one: data that only looks like a
+        // header (its first byte the transfer's size, its third word small) -
+        // Mister Mosquito's music stream control, 16 bytes - goes to memory.
+        const bool user = command < 0x100u && iop::HasCommandHandler(command);
         if (size >= 16 && (command & 0x80000000u || user) && (Word(bytes, 0) & 0xFF) == size) {
             Command(bytes, data);
             data.clear();

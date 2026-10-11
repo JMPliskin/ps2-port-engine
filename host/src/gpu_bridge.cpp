@@ -779,9 +779,13 @@ u64 ClutHash(const Bridge& b, u32 psm, u32 csa) {
    left to the GS model. */
 bool LoadClut(Bridge& b, u64 tex0, u64 texa) {
     ++g_mutations;
-    const u32 psm = Bits(tex0, 20, 6), cbp = Bits(tex0, 37, 14), cpsm = Bits(tex0, 51, 4), csa = Bits(tex0, 56, 5);
+    const u32 psm = Bits(tex0, 20, 6), cbp = Bits(tex0, 37, 14), cpsm = Bits(tex0, 51, 4);
+    // CSM2 (bit 55) loads from TEXCLUT's row, at entry 0 whatever CSA: the GS
+    // model's load does it (the GPU's knows CSM1 only).
+    const bool csm2 = Bits(tex0, 55, 1);
+    const u32 csa = csm2 ? 0 : Bits(tex0, 56, 5);
     const u32 rows = ClutRowsOf(psm, csa);
-    if (!GpuHolds(b, cbp, cbp + 8)) {
+    if (csm2 || !GpuHolds(b, cbp, cbp + 8)) {
         b.clut_cpu |= rows;
         b.clut_gpu &= ~rows;
         return false;

@@ -309,6 +309,20 @@ void GsDrawsASprite() {
 
 // PATH3 held by MSKPATH3: an unmask lets one EOP-ended group of packets go,
 // as Burnout 3's texture uploads need (one group per window, five a picture).
+void GsLoadsACsm2Clut() {
+    using namespace ps2host::gs;
+    Gs gs;
+    // CSM2: 16 CT16 entries in a row, at (32..47, 3) of a 64-wide buffer at
+    // block 0x40 - TEXCLUT CBW 1, COU 2, COV 3 - loaded in order, CSA aside.
+    for (u32 i = 0; i < 16; ++i) gs.memory.Write(0x40, 1, 32 + i, 3, PSMCT16, 0x8000u | (i * 0x0421u));
+    gs.WriteRegister(0x1C, 1 | (2u << 6) | (3u << 12));
+    gs.WriteRegister(0x06, (u64(PSMT4) << 20) | (u64(0x40) << 37) | (u64(PSMCT16) << 51) | (u64(1) << 55) |
+                               (u64(5) << 56) | (u64(1) << 61));
+    bool ok = true;
+    for (u32 i = 0; i < 16; ++i) ok = ok && (gs.Clut()[i] & 0xFFFFFF) == (i << 3) * 0x010101u;
+    Check(ok, "a CSM2 CLUT loads from TEXCLUT's row, in order");
+}
+
 void Path3GoesOneGroupPerWindow() {
     ps2host::Path3Queue queue;
     auto tag = [&](u32 nloop, bool eop, u32 flg, u32 nreg) {
@@ -1236,6 +1250,7 @@ int main() {
     GsLayoutsArePermutations();
     GsDrawsASprite();
     GsFogsTowardsFogcol();
+    GsLoadsACsm2Clut();
     Path3GoesOneGroupPerWindow();
     GsKeepsAFlatDepthExact();
     GsFillsTopLeft();

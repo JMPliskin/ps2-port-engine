@@ -369,11 +369,18 @@ void Gs::LoadClut(u64 tex0) {
     auto clut = std::make_shared<std::array<u32, 256>>(*clut_);
     const bool eight = psm == PSMT8 || psm == PSMT8H;
     const u32 count = eight ? 256 : 16;
+    // CSM2 (TEX0 bit 55): the CLUT is one row of a CT16 buffer, entry i at
+    // (TEXCLUT COU * 16 + i, COV) in a buffer CBW wide - no swizzle, no CSA.
+    const bool csm2 = Bits(tex0, 55, 1);
+    const u32 cbw = csm2 ? std::max<u32>(1, Bits(texclut_, 0, 6)) : 1;
     for (u32 i = 0; i < count; ++i) {
         // CSM1: an 8-bit CLUT is a 16x16 image with index bits 3 and 4 swapped;
         // a 4-bit one an 8x2 image.
         u32 x, y;
-        if (eight) {
+        if (csm2) {
+            x = Bits(texclut_, 6, 6) * 16 + i;
+            y = Bits(texclut_, 12, 10);
+        } else if (eight) {
             const u32 p = (i & 0xE7) | ((i & 0x08) << 1) | ((i & 0x10) >> 1);
             x = p % 16;
             y = p / 16;
@@ -381,9 +388,9 @@ void Gs::LoadClut(u64 tex0) {
             x = i % 8;
             y = i / 8;
         }
-        const u32 raw = memory.Read(cbp, 1, x, y, cpsm == 0 ? PSMCT32 : cpsm);
+        const u32 raw = memory.Read(cbp, cbw, x, y, cpsm == 0 ? PSMCT32 : cpsm);
         const u32 color = cpsm == 0 ? raw : From16(raw, texa_);
-        (*clut)[eight ? i : (csa * 16 + i) % 256] = color;
+        (*clut)[eight || csm2 ? i : (csa * 16 + i) % 256] = color;
     }
     clut_ = clut;
 }
