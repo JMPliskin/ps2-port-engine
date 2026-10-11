@@ -336,6 +336,11 @@ void StepPcSetting(int index, int step);
 void OpenPcMenu();
 /* A port's EXIT GAME: the run ends as when the window is closed. */
 void QuitGame();
+/* A port's look at the 2D on its way to the GS (VIF1 DIRECT, PATH2): each
+   block of words, `from` the guest address of the first, before the GS takes
+   it. A copy - the guest's packets stay as the game wrote them - on the EE
+   thread, in order. Widescreen: a port places its HUD in a wider picture. */
+void SetPath2Filter(std::function<void(u32* words, u32 count, u32 from)> filter);
 /* The window's display, null when there is none (or no Vulkan one). */
 ps2gpu::Display* WindowDisplay();
 /* What the window shows instead of the software GS's picture (BGRA, as
