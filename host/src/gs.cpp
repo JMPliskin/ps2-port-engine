@@ -389,7 +389,17 @@ void Gs::LoadClut(u64 tex0) {
             y = i / 8;
         }
         const u32 raw = memory.Read(cbp, cbw, x, y, cpsm == 0 ? PSMCT32 : cpsm);
-        const u32 color = cpsm == 0 ? raw : From16(raw, texa_);
+        u32 color;
+        if (cpsm == PSMCT32) {
+            color = raw;
+        } else if (cpsm == PSMCT24) {
+            // A 24-bit CLUT (Mister Mosquito's 8-bit textures): its colour,
+            // and TEXA's alpha as for a 24-bit texel - as the GPU's load does.
+            const u32 rgb = raw & 0xFFFFFF;
+            color = rgb | ((Bits(texa_, 15, 1) && !rgb) ? 0 : Bits(texa_, 0, 8)) << 24;
+        } else {
+            color = From16(raw, texa_);
+        }
         (*clut)[eight || csm2 ? i : (csa * 16 + i) % 256] = color;
     }
     clut_ = clut;
