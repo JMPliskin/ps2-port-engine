@@ -54,7 +54,8 @@ Code finds the skills in `engine/.claude/skills`.
 * Windows 10/11 x64, Python 3.10+ (standard library; Pillow for the art
   scripts), Visual Studio 2022 with C++ (MSVC, its CMake and Ninja)
 * For a port: a Vulkan 1.3 GPU, a processor with AVX2
-* A disc image you own, for each game
+* A disc image you own, for each game: an .iso, or a CD's raw .bin with its
+  .cue (Mode 1 or Mode 2 sectors)
 
 ## Starting a port of a new game
 
