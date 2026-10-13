@@ -15,6 +15,8 @@
 #include "ps2host/disc.h"
 #include "ps2host/dma.h"
 #include "ps2host/gs.h"
+#include "ps2host/host.h"
+#include "ps2host/run.h"
 #include "ps2host/ipu.h"
 #include "iop_vm_internal.h"
 #include "spu2.h"
@@ -1269,7 +1271,46 @@ void SpuDecodesAdpcmAndPlaysAVoice() {
     Check(wet.SetEffectAttr(0, 10, 0, 0, 0, 0) == -1, "SPU2: no eleventh preset");
 }
 
+// Two overlays loaded at the same address: a call runs the function of the one
+// whose code is in memory, and FlushCache makes a call look again.
+int g_overlay_ran = 0;
+void OverlayA(lifted::Context&) { g_overlay_ran = 1; }
+void OverlayB(lifted::Context&) { g_overlay_ran = 2; }
+
+void OverlaysRunWhatIsLoaded() {
+    static const ps2host::FunctionEntry a[] = {{0x00500000u, OverlayA, "a", 16u}};
+    static const ps2host::FunctionEntry b[] = {{0x00500000u, OverlayB, "b", 16u}};
+    static const u32 a_checks[] = {0x11111111u, 0x22222222u, 0x33333333u, 0x44444444u};
+    static const u32 b_checks[] = {0x55555555u, 0x66666666u, 0x77777777u, 0x88888888u};
+    static const ps2host::OverlayEntry overlays[] = {
+        {"a", 0x00500000u, 0x00500100u, a, 1, a_checks},
+        {"b", 0x00500000u, 0x00500100u, b, 1, b_checks},
+    };
+    ps2host::RegisterOverlays(overlays, 2);
+    ps2host::Memory& m = ps2host::GuestMemory();
+    lifted::Context c{};
+    for (int i = 0; i < 4; ++i) m.Write(0x00500000u + 4 * i, b_checks[i], 4);
+    ps2host::CodeChanged();
+    ps2host::Dispatch(c, 0x00500000u);
+    Check(g_overlay_ran == 2, "overlays: the loaded one's function runs");
+    for (int i = 0; i < 4; ++i) m.Write(0x00500000u + 4 * i, a_checks[i], 4);
+    ps2host::CodeChanged();
+    ps2host::Dispatch(c, 0x00500000u);
+    Check(g_overlay_ran == 1, "overlays: another loaded over it, and flushed: its function runs");
+    m.Write(0x00500000u, 0u, 4);
+    ps2host::CodeChanged();
+    bool refused = false;
+    try {
+        ps2host::Dispatch(c, 0x00500000u);
+    } catch (const ps2host::Unimplemented&) {
+        refused = true;
+    }
+    Check(refused, "overlays: code neither overlay's is not run as either");
+    ps2host::RegisterOverlays(nullptr, 0);
+}
+
 int main() {
+    OverlaysRunWhatIsLoaded();
     MirrorsReachTheSameRam();
     LoadsExtendAsTheEeDoes();
     OutsideMemoryFaults();

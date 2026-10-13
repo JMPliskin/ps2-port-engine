@@ -124,6 +124,11 @@ void KernelSyscall(lifted::Context& c) {
         case 0x06: case 0x07:                        // LoadExecPS2 / ExecPS2
             throw Unimplemented{std::string("the kernel service ") + SyscallName(service) +
                                 ", which starts another program"};
+        case 0x64:                                   // FlushCache(which)
+            // The program wrote code it is about to run - an overlay loaded.
+            CodeChanged();
+            Return(c, 0);
+            return;
         case 0x3C: {                                 // SetupThread(gp, stack, size, args, root)
             const u32 stack = Arg(c, 1), size = Arg(c, 2);
             // A stack of -1 means "at the top of RAM"; the thread's stack pointer

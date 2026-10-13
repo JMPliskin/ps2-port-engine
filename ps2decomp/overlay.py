@@ -107,6 +107,13 @@ def build(base_elf: str, images, target: str) -> None:
         handle.write(description)
 
 
+def namespace(directory: str) -> str:
+    """The C++ namespace an overlay's translations are compiled in: overlays
+    loaded at the same address have functions of the same names."""
+    name = os.path.basename(os.path.normpath(directory))
+    return "overlay_" + "".join(ch if ch.isalnum() else "_" for ch in name)
+
+
 def in_code(ranges, address: int) -> bool:
     """Whether a function at `address` belongs to the overlay (no ranges: all do)."""
     return not ranges or any(low <= address < high for low, high in ranges)

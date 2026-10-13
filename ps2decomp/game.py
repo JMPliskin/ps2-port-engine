@@ -40,6 +40,7 @@ DEFAULTS = {
     "layout": {},
     "vu_regions": [],
     "overlay": None,
+    "overlays": [],
 }
 
 
@@ -60,6 +61,8 @@ class Game:
     code_ranges: list = dataclasses.field(default_factory=list)
     # An overlay's: the game it is loaded by; None for a game.
     base: "Game | None" = None
+    # A game's: the directories of its overlays, relative to its own.
+    overlays: list = dataclasses.field(default_factory=list)
 
     def path(self, relative: str) -> str:
         return os.path.normpath(os.path.join(self.directory, relative))
@@ -112,7 +115,7 @@ def load(directory: str) -> Game:
                 vu_regions=[tuple(_number(v) for v in pair) for pair in values["vu_regions"]],
                 code_ranges=[tuple(_number(v) for v in pair)
                              for pair in (values["overlay"] or {}).get("code", [])],
-                base=base)
+                base=base, overlays=list(values["overlays"]))
     configure_layout(game)
     return game
 

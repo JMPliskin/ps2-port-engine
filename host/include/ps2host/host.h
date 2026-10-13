@@ -42,6 +42,24 @@ struct FunctionEntry {
 /* The game's translated functions, sorted by address (port.py generates this). */
 void RegisterFunctions(const FunctionEntry* table, std::size_t count);
 
+/* Code the game loads from its disc over memory the executable leaves free
+   (engine/ps2decomp/overlay.py): each overlay's translated functions, sorted by
+   address, with the first 16 bytes of each one's original code (`checks`, four
+   words a function). Overlays may share addresses; a call into one runs the
+   function of whichever overlay's code is in memory there. */
+struct OverlayEntry {
+    const char* name;
+    u32 start, end;                 // its code
+    const FunctionEntry* table;
+    std::size_t count;
+    const u32* checks;
+};
+void RegisterOverlays(const OverlayEntry* overlays, std::size_t count);
+
+/* The program changed its code (FlushCache): calls are looked up afresh, so a
+   call into an overlay finds the one now loaded. */
+void CodeChanged();
+
 /* A host implementation that runs instead of the guest function at `address`.
    Overrides take precedence over translated functions; registering twice
    replaces the earlier one. */

@@ -168,9 +168,36 @@ struct CachedCall {
 constexpr std::size_t kCallCache = 1u << 14;
 CachedCall g_call_cache[kCallCache];
 
+const OverlayEntry* g_overlays = nullptr;
+std::size_t g_overlay_count = 0;
+
+// The function of the overlay whose code is in memory at `address`, if the
+// address is in an overlay and one is: its first bytes there are the original's.
+const FunctionEntry* FindInOverlay(u32 address, bool* in_overlay) {
+    for (std::size_t i = 0; i < g_overlay_count; ++i) {
+        const OverlayEntry& o = g_overlays[i];
+        if (address < o.start || address >= o.end) continue;
+        *in_overlay = true;
+        const FunctionEntry* end = o.table + o.count;
+        const FunctionEntry* at = std::lower_bound(
+            o.table, end, address, [](const FunctionEntry& e, u32 a) { return e.address < a; });
+        if (at == end || at->address != address) continue;
+        const u32* check = o.checks + 4 * (at - o.table);
+        const u32 length = at->size && at->size < 16 ? at->size : 16;
+        const u8* here = GuestMemory().Translate(address, length);
+        if (here && std::memcmp(here, check, length) == 0) return at;
+    }
+    return nullptr;
+}
+
 const FunctionEntry* Find(u32 address) {
     auto found = g_overrides.find(address);
     if (found != g_overrides.end()) return &found->second;
+    if (g_overlay_count) {
+        bool in_overlay = false;
+        const FunctionEntry* entry = FindInOverlay(address, &in_overlay);
+        if (entry || in_overlay) return entry;
+    }
     const FunctionEntry* end = g_table + g_count;
     const FunctionEntry* at = std::lower_bound(
         g_table, end, address, [](const FunctionEntry& e, u32 a) { return e.address < a; });
@@ -256,6 +283,17 @@ void RegisterFunctions(const FunctionEntry* table, std::size_t count) {
     g_count = count;
     // Before the game's own overrides, which may replace these in turn.
     ApplySdkOverrides(table, count);
+}
+
+void RegisterOverlays(const OverlayEntry* overlays, std::size_t count) {
+    g_overlays = overlays;
+    g_overlay_count = count;
+    CodeChanged();
+}
+
+void CodeChanged() {
+    if (!g_overlay_count) return;           // the executable's code never moves
+    for (CachedCall& line : g_call_cache) line = CachedCall{};
 }
 
 void Override(u32 address, GuestFunction function, const char* name) {
