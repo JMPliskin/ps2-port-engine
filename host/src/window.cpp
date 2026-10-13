@@ -126,6 +126,15 @@ void PresentGdi() {
     ReleaseDC(g_window, dc);
 }
 
+#ifdef PS2HOST_VULKAN
+/* The "antialiasing" setting as the display takes it: supersampling's
+   pictures (drawn larger, SupersamplingFactor) averaged down. */
+ps2gpu::Display::AntiAliasing DisplayAntiAliasing(const std::string& mode) {
+    using AA = ps2gpu::Display::AntiAliasing;
+    return mode == "fxaa" ? AA::kFxaa : mode == "ssaa2" || mode == "ssaa4" ? AA::kDownsample : AA::kOff;
+}
+#endif
+
 /* The "aspect" setting as the display takes it: "4:3" (the default), "16:9",
    or "auto" (0, the window's own shape). */
 float SettingAspect() {
@@ -173,6 +182,7 @@ bool OpenWindow(const wchar_t* title, int width, int height) {
         });
         if (SettingOn("vsync")) g_display->SetVsync(true);
         g_display->SetAspect(SettingAspect());
+        g_display->SetAntiAliasing(DisplayAntiAliasing(Setting("antialiasing", "off")));
         return true;
     }
     Note("window", "window: no Vulkan display (" + error + "); drawing with GDI");
@@ -409,6 +419,18 @@ void SetWindowAspect(const std::string& aspect) {
 #ifdef PS2HOST_VULKAN
     if (g_display) g_display->SetAspect(SettingAspect());
 #endif
+}
+
+void SetWindowAntiAliasing(const std::string& mode) {
+    SetSetting("antialiasing", mode);
+#ifdef PS2HOST_VULKAN
+    if (g_display) g_display->SetAntiAliasing(DisplayAntiAliasing(mode));
+#endif
+}
+
+u32 SupersamplingFactor() {
+    const std::string mode = Setting("antialiasing", "off");
+    return mode == "ssaa2" ? 2 : mode == "ssaa4" ? 4 : 1;
 }
 
 float PictureAspect() {

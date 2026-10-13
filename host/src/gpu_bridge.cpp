@@ -1499,8 +1499,9 @@ void WriteBmp(const std::string& path, const std::vector<u32>& rgba, u32 stride,
    picture where the GPU has none), on the thread the GS runs on. */
 /* The internal resolution the "resolution" setting asks for (PC SETTINGS):
    original 1, 2x 2, display as many times the PS2's 448 lines as the window
-   has (at most 4). */
-u32 WantedScale(const ps2gpu::Display* display) {
+   has (at most 4) - times supersampling's factor (ANTI-ALIASING), at most 8
+   in all. */
+u32 ResolutionScale(const ps2gpu::Display* display) {
     const std::string wanted = Setting("resolution", "original");
     // "2x" (the menu's), or 3x and 4x written into the file by hand.
     if (wanted.size() == 2 && wanted[1] == 'x' && wanted[0] >= '2' && wanted[0] <= '4') return u32(wanted[0] - '0');
@@ -1509,6 +1510,9 @@ u32 WantedScale(const ps2gpu::Display* display) {
         return std::min(4u, std::max(1u, lines / 448u));
     }
     return 1;
+}
+u32 WantedScale(const ps2gpu::Display* display) {
+    return std::min(8u, ResolutionScale(display) * SupersamplingFactor());
 }
 
 /* A new internal resolution: what the GPU drew goes to its local memory

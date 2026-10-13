@@ -76,6 +76,12 @@ public:
        television showed it (the default), 16:9, or 0 - the window's own
        shape, filled. Letterboxed or pillarboxed in the window otherwise. */
     virtual void SetAspect(float aspect) { (void)aspect; }
+    /* Anti-aliasing: the picture shown as drawn (the default); its edges
+       smoothed (FXAA) before it is scaled to the window; or, drawn larger
+       than shown (supersampling), averaged down to the shown size rather
+       than scaled. */
+    enum class AntiAliasing { kOff, kFxaa, kDownsample };
+    virtual void SetAntiAliasing(AntiAliasing mode) { (void)mode; }
     /* The window's shape in the screen's pixels, width over height (0 when
        not known). */
     virtual float WindowAspect() const { return 0.0f; }
