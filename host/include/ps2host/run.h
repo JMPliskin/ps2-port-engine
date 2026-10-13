@@ -122,6 +122,9 @@ void QueueRpcEnd(const std::vector<u8>& request, u32 server, u32 buffer, u32 cbu
 void InstallIopServers();
 void InstallFileIo();
 void InstallLoadFile();
+/* The release of the IOP's SDK modules ("2800"): the ROM's, or the replacement
+   image's the IOP was rebooted with. Four characters, not terminated. */
+const char* IopRelease();
 /* The IOP rebooted with a replacement image from the disc (IOPRPnnn.IMG):
    the releases of its modules - loadfile's answers its version check. */
 void UseIopImage(const std::string& path);

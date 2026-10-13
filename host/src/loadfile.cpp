@@ -114,4 +114,6 @@ void UseIopImage(const std::string& path) {
     Note("iop image " + path, "IOP: reboot image " + path + " has no loadfile tag");
 }
 
+const char* IopRelease() { return g_version; }
+
 }  // namespace ps2host
