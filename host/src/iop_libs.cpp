@@ -185,6 +185,19 @@ Outcome CancelWakeupThread(Vm& vm, Context& c) {
     return Ret(c, u32(count));
 }
 
+// WaitVblankStart / WaitVblankEnd (vblank): the thread waits until the next
+// field starts or ends - here, until the next 1/59.94 s boundary of the IOP's
+// clock, which is when the host delivers the vertical blank.
+Outcome WaitVblank(Vm& vm, Context& c) {
+    Thread* t = vm.Current();
+    if (!t) return Ret(c, u32(KE_CAN_NOT_WAIT));
+    constexpr u64 kFieldUs = 16683;
+    t->until_us = (vm.NowUs() / kFieldUs + 1) * kFieldUs;
+    Return(c, KE_OK);
+    vm.Block(c, Wait::Delay, 0);
+    return Outcome::Block;
+}
+
 Outcome DelayThread(Vm& vm, Context& c) {
     Thread* t = vm.Current();
     if (!t) return Ret(c, u32(KE_CAN_NOT_WAIT));
@@ -230,6 +243,170 @@ Outcome SetAlarm(Vm& vm, Context& c) {
 Outcome CancelAlarm(Vm& vm, Context& c) {
     vm.alarms.erase(A(vm, c, 0));
     return Ret(c, KE_OK);
+}
+
+// look_ctype_table() (sysclib): the character classes, a byte a character as
+// the C library's ctype macros index them: upper 0x01, lower 0x02, digit 0x04,
+// space 0x08, punctuation 0x10, control 0x20, hex digit 0x40, blank 0x80. Kept
+// in IOP memory, made the first time it is asked for.
+Outcome LookCtypeTable(Vm& vm, Context& c) {
+    static u32 table = 0;
+    if (!table) {
+        table = vm.Allocate(256);
+        if (!table) return Ret(c, 0);
+        for (u32 ch = 0; ch < 256; ++ch) {
+            u32 flags = 0;
+            if (ch >= 'A' && ch <= 'Z') flags |= 0x01;
+            if (ch >= 'a' && ch <= 'z') flags |= 0x02;
+            if (ch >= '0' && ch <= '9') flags |= 0x04;
+            if (ch == ' ' || (ch >= '\t' && ch <= '\r')) flags |= 0x08;
+            if (ch > ' ' && ch < 0x7F && !(flags & 0x07)) flags |= 0x10;
+            if (ch < ' ' || ch == 0x7F) flags |= 0x20;
+            if ((ch >= '0' && ch <= '9') || (ch >= 'A' && ch <= 'F') || (ch >= 'a' && ch <= 'f'))
+                flags |= 0x40;
+            if (ch == ' ') flags |= 0x80;
+            vm.Write(table + ch, flags, 1);
+        }
+    }
+    return Ret(c, table);
+}
+
+// ---------------------------------------------------------------- message boxes
+
+constexpr s32 KE_UNKNOWN_MBXID = -410, KE_MBOX_NOMSG = -424, KE_WAIT_DELETE = -425;
+
+Outcome CreateMbx(Vm& vm, Context& c) {
+    MessageBox box;
+    box.attr = vm.Read(A(vm, c, 0), 4);          // iop_mbx_t: attr, option
+    const u32 id = vm.next_id++;
+    vm.mailboxes[id] = box;
+    return Ret(c, id);
+}
+
+Outcome DeleteMbx(Vm& vm, Context& c) {
+    auto found = vm.mailboxes.find(A(vm, c, 0));
+    if (found == vm.mailboxes.end()) return Ret(c, u32(KE_UNKNOWN_MBXID));
+    for (const auto& waiter : found->second.waiting) {
+        Thread& t = vm.threads[waiter.first];
+        t.c.r[2] = u32(KE_WAIT_DELETE);
+        vm.MakeReady(t);
+    }
+    vm.mailboxes.erase(found);
+    return Ret(c, KE_OK);
+}
+
+// SendMbx / iSendMbx(id, message): to the first thread waiting, or queued.
+Outcome SendMbx(Vm& vm, Context& c) {
+    auto found = vm.mailboxes.find(A(vm, c, 0));
+    if (found == vm.mailboxes.end()) return Ret(c, u32(KE_UNKNOWN_MBXID));
+    MessageBox& box = found->second;
+    const u32 message = A(vm, c, 1);
+    if (!box.waiting.empty()) {
+        const std::pair<u32, u32> waiter = box.waiting.front();
+        box.waiting.pop_front();
+        Thread& t = vm.threads[waiter.first];
+        vm.Write(waiter.second, message, 4);
+        t.c.r[2] = KE_OK;
+        vm.MakeReady(t);
+    } else {
+        box.messages.push_back(message);
+    }
+    Return(c, KE_OK);
+    return vm.reschedule && !vm.in_interrupt ? Outcome::Yield : Outcome::Return;
+}
+
+// ReceiveMbx(&message, id): waits for one; PollMbx: KE_MBOX_NOMSG if none.
+Outcome ReceiveMbx(Vm& vm, Context& c) {
+    const u32 where = A(vm, c, 0);
+    auto found = vm.mailboxes.find(A(vm, c, 1));
+    if (found == vm.mailboxes.end()) return Ret(c, u32(KE_UNKNOWN_MBXID));
+    MessageBox& box = found->second;
+    if (!box.messages.empty()) {
+        vm.Write(where, box.messages.front(), 4);
+        box.messages.pop_front();
+        return Ret(c, KE_OK);
+    }
+    if (!vm.Block(c, Wait::Mbx, found->first)) return Ret(c, u32(KE_CAN_NOT_WAIT));
+    box.waiting.push_back({vm.current, where});
+    return Outcome::Block;
+}
+
+Outcome PollMbx(Vm& vm, Context& c) {
+    const u32 where = A(vm, c, 0);
+    auto found = vm.mailboxes.find(A(vm, c, 1));
+    if (found == vm.mailboxes.end()) return Ret(c, u32(KE_UNKNOWN_MBXID));
+    MessageBox& box = found->second;
+    if (box.messages.empty()) return Ret(c, u32(KE_MBOX_NOMSG));
+    vm.Write(where, box.messages.front(), 4);
+    box.messages.pop_front();
+    return Ret(c, KE_OK);
+}
+
+// ---------------------------------------------------------------- hardware timers
+
+constexpr s32 KE_ILLEGAL_TIMERID = -150, KE_NO_TIMER = -151;
+
+// AllocHardTimer(source, size, prescale): an id for a timer of that clock.
+Outcome AllocHardTimer(Vm& vm, Context& c) {
+    if (vm.hard_timers.size() >= 4) return Ret(c, u32(KE_NO_TIMER));
+    HardTimer t;
+    t.source = A(vm, c, 0);
+    t.prescale = std::max(1u, A(vm, c, 2));
+    const u32 id = 0x100 + u32(vm.hard_timers.size());
+    vm.hard_timers[id] = t;
+    return Ret(c, id);
+}
+
+HardTimer* TimerOf(Vm& vm, Context& c) {
+    auto found = vm.hard_timers.find(A(vm, c, 0));
+    return found == vm.hard_timers.end() ? nullptr : &found->second;
+}
+
+Outcome FreeHardTimer(Vm& vm, Context& c) {
+    return Ret(c, vm.hard_timers.erase(A(vm, c, 0)) ? u32(KE_OK) : u32(KE_ILLEGAL_TIMERID));
+}
+
+// SetTimerHandler(id, compare, handler, common)
+Outcome SetTimerHandler(Vm& vm, Context& c) {
+    HardTimer* t = TimerOf(vm, c);
+    if (!t) return Ret(c, u32(KE_ILLEGAL_TIMERID));
+    t->compare = A(vm, c, 1);
+    t->handler = A(vm, c, 2);
+    t->common = A(vm, c, 3);
+    return Ret(c, KE_OK);
+}
+
+// SetupHardTimer(id, source, mode, prescale)
+Outcome SetupHardTimer(Vm& vm, Context& c) {
+    HardTimer* t = TimerOf(vm, c);
+    if (!t) return Ret(c, u32(KE_ILLEGAL_TIMERID));
+    t->source = A(vm, c, 1);
+    t->prescale = std::max(1u, A(vm, c, 3));
+    return Ret(c, KE_OK);
+}
+
+Outcome StartHardTimer(Vm& vm, Context& c) {
+    HardTimer* t = TimerOf(vm, c);
+    if (!t) return Ret(c, u32(KE_ILLEGAL_TIMERID));
+    t->running = true;
+    t->due_us = vm.NowUs() + HardTimerPeriodUs(*t);
+    return Ret(c, KE_OK);
+}
+
+Outcome StopHardTimer(Vm& vm, Context& c) {
+    HardTimer* t = TimerOf(vm, c);
+    if (!t) return Ret(c, u32(KE_ILLEGAL_TIMERID));
+    t->running = false;
+    return Ret(c, KE_OK);
+}
+
+// sceSifGetOtherData(receive data, EE source, IOP destination, size, mode):
+// EE memory read into IOP memory; done at once.
+Outcome SifGetOtherData(Vm& vm, Context& c) {
+    const u32 source = A(vm, c, 1), dest = A(vm, c, 2), size = A(vm, c, 3);
+    Memory& ee = GuestMemory();
+    for (u32 i = 0; i < size; ++i) vm.Write(dest + i, u32(ee.Read(source + i, 1)), 1);
+    return Ret(c, 0);
 }
 
 // ---------------------------------------------------------------- semaphores
@@ -670,6 +847,15 @@ Outcome CdGetDiskType(Vm&, Context& c) {                          // SCECdPS2CD,
 Outcome CdDiskReady(Vm&, Context& c) { return Ret(c, 2); }         // SCECdComplete
 
 Outcome FlushDcache(Vm&, Context& c) { return Ret(c, 0); }
+// RegisterLibraryEntries(table): a module offers its functions to the modules
+// loaded after it (iop_vm.cpp links their imports to them).
+Outcome RegisterLibraryEntries(Vm& vm, Context& c) {
+    const u32 table = Arg(vm, c, 0);
+    const std::string name = vm.String(table + 12, 8);
+    vm.exports[name] = table;
+    Note("iop exports " + name, "IOP: a module exports the library " + name);
+    return Ret(c, 0);
+}
 Outcome CheckInit(Vm&, Context& c) { return Ret(c, 1); }
 Outcome GetSreg(Vm&, Context& c) { return Ret(c, 0); }
 
@@ -920,7 +1106,16 @@ const Map& Table() {
         {{"sifman", 32}, SetDmaIntr},
         {{"cdvdman", 4}, Succeed}, {{"cdvdman", 6}, CdRead}, {{"cdvdman", 8}, CdGetError},
         {{"cdvdman", 11}, CdSync}, {{"cdvdman", 12}, CdGetDiskType}, {{"cdvdman", 13}, CdDiskReady},
-        {{"loadcore", 5}, FlushDcache},
+        {{"loadcore", 5}, FlushDcache}, {{"loadcore", 6}, RegisterLibraryEntries},
+        {{"thmsgbx", 4}, CreateMbx}, {{"thmsgbx", 5}, DeleteMbx},
+        {{"thmsgbx", 6}, SendMbx}, {{"thmsgbx", 7}, SendMbx},
+        {{"thmsgbx", 8}, ReceiveMbx}, {{"thmsgbx", 9}, PollMbx},
+        {{"timrman", 4}, AllocHardTimer}, {{"timrman", 6}, FreeHardTimer},
+        {{"timrman", 20}, SetTimerHandler}, {{"timrman", 22}, SetupHardTimer},
+        {{"timrman", 23}, StartHardTimer}, {{"timrman", 24}, StopHardTimer},
+        {{"sifcmd", 23}, SifGetOtherData},
+        {{"sysclib", 8}, LookCtypeTable},
+        {{"vblank", 4}, WaitVblank}, {{"vblank", 5}, WaitVblank},
         {{"libsd", 2}, SdInit}, {{"libsd", 4}, SdInit},
         {{"libsd", 5}, SdSetParam}, {{"libsd", 6}, SdGetParam},
         {{"libsd", 7}, SdSetSwitch}, {{"libsd", 8}, SdGetSwitch},

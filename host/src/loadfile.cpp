@@ -78,7 +78,7 @@ std::string Hex(u32 value) {
 
 // A module the EE put in IOP memory (sceSifLoadModuleBuffer): its ELF image -
 // as long as its program and section headers say - and the name its .iopmod
-// section gives it ("sio2man"), or "" when it is not a module.
+// section gives it ("sio2man"); empty when it is not a module.
 std::vector<u8> ModuleInIopMemory(u32 address, std::string* name) {
     Memory& m = GuestMemory();
     auto u16at = [&](u32 o) { return u16(m.Read(kIopRamBase + address + o, 2)); };
@@ -108,6 +108,9 @@ std::vector<u8> ModuleInIopMemory(u32 address, std::string* name) {
         const u32 at = u32at(sh + 16) + 0x1A;
         for (u32 k = at; k < size && image[k]; ++k) *name += char(image[k]);
     }
+    // A module with no name (Resident Evil Outbreak's sound driver) is named by
+    // its size, so a port can still ask for it to run: "unnamed-38664".
+    if (name->empty()) *name = "unnamed-" + std::to_string(size);
     return image;
 }
 
@@ -139,7 +142,7 @@ std::vector<u8> LoadFile(u32 procedure, const std::vector<u8>& data) {
             return Words(-1, 0);
         }
         const s32 id = next_id++;
-        if (!name.empty() && iop::RunsModule(name)) {
+        if (iop::RunsModule(name)) {
             std::vector<u8> args;
             if (arg_length > 0 && data.size() >= 0x104 + std::size_t(arg_length))
                 args.assign(data.begin() + 0x104, data.begin() + 0x104 + arg_length);
@@ -148,7 +151,7 @@ std::vector<u8> LoadFile(u32 procedure, const std::vector<u8>& data) {
                 throw Unimplemented{"IOP: " + name + " is not a module the interpreter can load"};
             return Words(id, u32(result));
         }
-        Note("module " + name, "IOP: module " + (name.empty() ? std::string("(unnamed)") : name) +
+        Note("module " + name, "IOP: module " + name +
                                    " from IOP memory at " + Hex(address) + " loaded as " +
                                    std::to_string(id) + " (its services are the host's)");
         return Words(id, kResidentEnd);
