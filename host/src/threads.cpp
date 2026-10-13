@@ -77,6 +77,7 @@ struct Thread {
     u64 queued = 0;                 // order among ready threads of equal priority
     u32 waiting_on = 0;             // the semaphore, while Waiting
     s32 wakeups = 0;                // WakeupThread calls not yet consumed by a sleep
+    bool suspended = false;         // SuspendThread: not run, whatever its state, until resumed
     u64 runs = 0;                   // times the scheduler switched to it, for the report
     lifted::Context context = NewContext();
     std::vector<u32> calls;         // the guest call stack, for the report
@@ -197,7 +198,7 @@ void CALLBACK ThreadMain(void* parameter) {
 Thread* PickReady() {
     Thread* best = nullptr;
     for (auto& [id, t] : S().threads) {
-        if (t->state != State::Ready) continue;
+        if (t->state != State::Ready || t->suspended) continue;
         if (!best || t->priority < best->priority ||
             (t->priority == best->priority && t->queued < best->queued))
             best = t.get();
@@ -878,8 +879,9 @@ std::string ThreadReport() {
     std::string out;
     for (auto& [id, t] : S().threads) {
         char line[160];
-        std::snprintf(line, sizeof line, "  thread %u: %s, priority %d, entry 0x%08X, ran %llu times\n", id,
-                      StateName(t->state), t->priority, t->entry, static_cast<unsigned long long>(t->runs));
+        std::snprintf(line, sizeof line, "  thread %u: %s%s, priority %d, entry 0x%08X, ran %llu times\n", id,
+                      StateName(t->state), t->suspended ? " (suspended)" : "", t->priority, t->entry,
+                      static_cast<unsigned long long>(t->runs));
         out += line;
         // Where it is: the innermost calls of its guest stack.
         const std::size_t from = t->calls.size() > 10 ? t->calls.size() - 10 : 0;
@@ -970,6 +972,29 @@ bool ThreadSyscall(lifted::Context& c, s32 number, u64& result) {
         case 0x2F:                                   // GetThreadId
             result = s.current ? s.current->id : 1;
             return true;
+        case 0x37: case -0x38: {                     // SuspendThread / iSuspendThread(id)
+            // A suspended thread keeps its state - ready, waiting, sleeping - but
+            // is not run until ResumeThread; a wait that ends leaves it ready and
+            // still suspended. The kernel refuses to suspend the running thread
+            // from a thread (an interrupt handler may).
+            Thread* t = Find(a0);
+            if (!t || t->state == State::Dormant || t->suspended ||
+                (t == s.current && !s.in_interrupt)) {
+                result = u64(s64(-1));
+                return true;
+            }
+            t->suspended = true;
+            result = a0;
+            return true;
+        }
+        case 0x39: case -0x3A: {                     // ResumeThread / iResumeThread(id)
+            Thread* t = Find(a0);
+            if (!t || !t->suspended) { result = u64(s64(-1)); return true; }
+            t->suspended = false;
+            result = a0;
+            if (t->state == State::Ready) Preempt(*t);
+            return true;
+        }
         case 0x29: case -0x29: {                     // ChangeThreadPriority(id, priority)
             Thread* t = a0 == 0 ? s.current : Find(a0);
             if (!t) { result = u64(-1); return true; }
