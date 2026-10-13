@@ -1193,6 +1193,39 @@ void IopInstructionsMatchTheR5900() {
 
 }  // namespace
 
+// A core's sound-data input (a block transfer's PCM): heard at its BVOL in the
+// dry mix MMIX lets it into; silent at BVOL 0, and once stopped.
+void SpuPlaysItsSoundDataInput() {
+    using ps2host::iop::Spu2;
+    std::vector<Spu2::u8> pcm(0x800);
+    for (int block = 0; block < 2; ++block)
+        for (int i = 0; i < 256; ++i) {
+            const Spu2::s16 left = 8192, right = -8192;
+            std::memcpy(&pcm[block * 0x400 + i * 2], &left, 2);
+            std::memcpy(&pcm[block * 0x400 + 0x200 + i * 2], &right, 2);
+        }
+    auto play = [&](Spu2::u32 bvol, bool stop) {
+        Spu2 spu;
+        std::vector<Spu2::s16> heard;
+        spu.SetOutput([&](const Spu2::s16* frames, Spu2::u32 count) { heard.assign(frames, frames + 2 * count); });
+        spu.SetParam(0x0801, 0x000C);                   // MMIX, core 1: the input, dry
+        spu.SetParam(0x0F01, bvol);                     // BVOLL
+        spu.SetParam(0x1001, bvol);                     // BVOLR
+        spu.SetInput(1, pcm.data(), Spu2::u32(pcm.size()));
+        if (stop) spu.SetInput(1, nullptr, 0);
+        spu.Advance(1000, [](Spu2::u32) {});
+        spu.Advance(11000, [](Spu2::u32) {});           // 10 ms: 480 samples
+        return heard;
+    };
+    const std::vector<Spu2::s16> loud = play(0x7FFF, false);
+    Check(loud.size() >= 2 && loud[loud.size() - 2] > 1000 && loud.back() < -1000,
+          "SPU2: the sound-data input, left and right");
+    const std::vector<Spu2::s16> muted = play(0, false), stopped = play(0x7FFF, true);
+    Check(!muted.empty() && muted[muted.size() - 2] == 0 && muted.back() == 0,
+          "SPU2: the sound-data input at BVOL 0 is silent");
+    Check(!stopped.empty() && stopped.back() == 0, "SPU2: a stopped input is silent");
+}
+
 void SpuDecodesAdpcmAndPlaysAVoice() {
     using ps2host::iop::Spu2;
     // Shift 0, filter 0: a nibble is the sample's top four bits.
@@ -1346,6 +1379,7 @@ int main() {
     IpuDecodesAndRetriesCleanly();
     IopInstructionsMatchTheR5900();
     SpuDecodesAdpcmAndPlaysAVoice();
+    SpuPlaysItsSoundDataInput();
     std::printf(g_failures ? "host tests: %d failed\n" : "host tests: all passed\n", g_failures);
     return g_failures ? EXIT_FAILURE : EXIT_SUCCESS;
 }

@@ -102,6 +102,11 @@ void Spu2::SetParam(u32 entry, u32 value) {
         case 0x04: v.adsr2 = value; break;
         case 0x09: c.mvoll = value; c.main_left.Set(value); break;     // SD_P_MVOLL
         case 0x0A: c.mvolr = value; c.main_right.Set(value); break;    // SD_P_MVOLR
+        case 0x08: c.mmix = value; break;              // SD_P_MMIX
+        case 0x0D: c.avoll = value; break;             // SD_P_AVOLL: the external input
+        case 0x0E: c.avolr = value; break;
+        case 0x0F: c.bvoll = value; break;             // SD_P_BVOLL: the sound-data input
+        case 0x10: c.bvolr = value; break;
         case 0x0B: c.evoll = value; break;             // SD_P_EVOLL: the reverb's output
         case 0x0C: c.evolr = value; break;             // SD_P_EVOLR
         default: break;                         // external input: not yet
@@ -120,6 +125,11 @@ Spu2::u32 Spu2::GetParam(u32 entry) const {
         case 0x05: return u32(v.level);             // ENVX
         case 0x06: return u32(v.left.now) & 0xFFFF;    // VOLXL, VOLXR: the current volume
         case 0x07: return u32(v.right.now) & 0xFFFF;
+        case 0x08: return c.mmix;
+        case 0x0D: return c.avoll;
+        case 0x0E: return c.avolr;
+        case 0x0F: return c.bvoll;
+        case 0x10: return c.bvolr;
         case 0x09: return c.mvoll;
         case 0x0A: return c.mvolr;
         case 0x0B: return c.evoll;
@@ -497,6 +507,13 @@ void Spu2::Envelope(Voice& v) {
     }
 }
 
+void Spu2::SetInput(u32 core, const u8* data, u32 size) {
+    Core& c = cores_[core & 1];
+    c.input = size >= 0x400 ? data : nullptr;
+    c.input_size = size;
+    c.input_sample = 0;
+}
+
 void Spu2::Advance(u64 now_us, const std::function<void(u32 core)>& irq) {
     // Transfers that touched IRQA.
     for (std::size_t i = 0; i + 1 < pending_irqs_.size(); i += 2)
@@ -590,6 +607,21 @@ void Spu2::Advance(u64 now_us, const std::function<void(u32 core)>& irq) {
                 const u32 index = v.counter >> 12;
                 if (crossed || index != before_index)
                     v.previous = index ? v.samples[index - 1] : last;
+            }
+            // The sound-data input: a stereo sample from the block, at BVOL.
+            if (c.input) {
+                const u32 at = c.input_sample;
+                const u8* block = c.input + (at / 256) * 0x400 + (at % 256) * 2;
+                const s32 in_left = s32(s16(block[0] | block[1] << 8));
+                const s32 in_right = s32(s16(block[0x200] | block[0x201] << 8));
+                auto volume = [](u32 v) { return v & 0x8000 ? 0x7FFF : s32(v & 0x7FFF); };
+                const s32 sent_left = (in_left * volume(c.bvoll)) >> 15;
+                const s32 sent_right = (in_right * volume(c.bvolr)) >> 15;
+                if (c.mmix & 0x8) core_left += sent_left;
+                if (c.mmix & 0x4) core_right += sent_right;
+                if (c.mmix & 0x2) wet_left += sent_left;
+                if (c.mmix & 0x1) wet_right += sent_right;
+                c.input_sample = (at + 1) % (c.input_size / 0x400 * 256);
             }
             // The reverb (SD_CORE_EFFECT_ENABLE, attr bit 2): a step every
             // other sample, on the pair's first input; its output held for

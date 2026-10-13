@@ -19,9 +19,15 @@
  * output joins the core's at EVOL. The algorithm is the PS1 SPU's, which the
  * SPU2 kept (no-cash psx-spx, "SPU Reverb Formula").
  *
+ * Sound-data input (a core's block transfer, sceSdBlockTrans - how CRI's ADX
+ * streams its music): PCM in IOP memory, played a stereo sample per 48 kHz
+ * tick in the SPU2's layout - 0x200 bytes of left samples, then 0x200 of
+ * right - looping over the buffer, at the core's BVOL and into its dry and
+ * wet mixes as MMIX bits 0-3 say (wet right, wet left, dry right, dry left).
+ *
  * Not modelled yet: volume sweeps (a sweeping volume plays at its maximum),
- * noise, pitch modulation, and the cores' external and sound-data inputs
- * (core 0's output into core 1's reverb included).
+ * noise, pitch modulation, and the cores' external input (core 0's output
+ * into core 1, at AVOL).
  *
  * libsd's entries (ps2sdk libsd-common.h): a voice parameter or address is
  * (param << 8) | core | voice << 1; a switch or core address (n << 8) | core.
@@ -62,6 +68,10 @@ public:
     int SetEffectAttr(u32 core, u32 mode, s32 depth_left, s32 depth_right, u32 delay, u32 feedback);
     /* What the last SetEffectAttr was given (libsd keeps it). */
     void GetEffectAttr(u32 core, u32* mode, s32* depth_left, s32* depth_right, u32* delay, u32* feedback) const;
+
+    /* A core's sound-data input: `size` bytes of PCM at `data` (it stays
+       there, the source's memory), from its start; null stops it. */
+    void SetInput(u32 core, const u8* data, u32 size);
 
     /* Data into (or out of) SPU RAM at a byte address, as a transfer would. */
     void Write(u32 address, const u8* data, u32 size);
@@ -116,6 +126,10 @@ private:
         u32 endx = 0, irqa = 0, attr = 0, esa = 0, eea = 0, tsa = 0;
         u32 switches[16] = {};          // by switch number - 0x13
         u32 mvoll = 0x3FFF, mvolr = 0x3FFF;
+        u32 avoll = 0, avolr = 0, bvoll = 0, bvolr = 0;   // the inputs' volumes
+        u32 mmix = 0xFFF;                                 // what goes where (bits 0-3: the input)
+        const u8* input = nullptr;      // the sound-data input, while a block transfer runs
+        u32 input_size = 0, input_sample = 0;
         Level main_left{0x3FFF}, main_right{0x3FFF};     // MVOLL, MVOLR as they are now
         bool irq_enabled = false;
         // Reverb: the registers (libsd's order: dAPF1, dAPF2, vIIR, vCOMB1-4,

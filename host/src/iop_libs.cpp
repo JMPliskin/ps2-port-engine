@@ -979,9 +979,14 @@ Outcome SdBlockTrans(Vm& vm, Context& c) {
     Sound::Block& b = S().block[channel];
     if ((mode & 3) == 2) {                   // SD_TRANS_STOP
         b.active = false;
+        S().spu.SetInput(channel, nullptr, 0);
         return Ret(c, 0);
     }
     b.active = true;
+    // Written to the core (SD_TRANS_WRITE): its sound-data input plays the
+    // buffer, from IOP memory, as the half-buffer interrupts below pace it.
+    if ((mode & 3) == 0 && address < kRamSize && size <= kRamSize - address)
+        S().spu.SetInput(channel, vm.ram + address, size);
     b.address = address;
     b.size = size;
     b.half = 0;
@@ -998,6 +1003,7 @@ Outcome SdBlockTransStatus(Vm&, Context& c) {
 
 Outcome SdStopTrans(Vm&, Context& c) {
     S().block[c.r[4] & 1].active = false;
+    S().spu.SetInput(c.r[4] & 1, nullptr, 0);
     return Ret(c, 0);
 }
 
