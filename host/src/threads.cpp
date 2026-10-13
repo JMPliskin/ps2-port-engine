@@ -73,6 +73,7 @@ struct Thread {
     u32 id = 0;
     u32 entry = 0, stack = 0, stack_size = 0, gp = 0;
     s32 priority = 0;
+    s32 initial_priority = 0;       // CreateThread's, for ReferThreadStatus
     State state = State::Dormant;
     u64 queued = 0;                 // order among ready threads of equal priority
     u32 waiting_on = 0;             // the semaphore, while Waiting
@@ -939,6 +940,7 @@ bool ThreadSyscall(lifted::Context& c, s32 number, u64& result) {
             t->stack_size = u32(m.Read(a0 + 12, 4));
             t->gp = u32(m.Read(a0 + 16, 4));
             t->priority = s32(m.Read(a0 + 20, 4));
+            t->initial_priority = t->priority;
             result = t->id;
             s.threads[t->id] = std::move(t);
             return true;
@@ -1028,6 +1030,32 @@ bool ThreadSyscall(lifted::Context& c, s32 number, u64& result) {
             }
             result = 0;
             return true;
+        case 0x30: case -0x31: {                     // ReferThreadStatus / iReferThreadStatus(id, status*)
+            // ee_thread_status: status, entry, stack, stack size, gp, initial
+            // and current priority, attr, option, wait type, wait id, wakeups.
+            // Status: running 0x01, ready 0x02, waiting 0x04, suspended 0x08
+            // (with waiting: 0x0C), dormant 0x10. Games read their own priority
+            // so, and wake the threads that wait.
+            Thread* t = a0 == 0 ? s.current : Find(a0);
+            if (!t) { result = u64(s64(-1)); return true; }
+            u32 status = 0, wait_type = 0, wait_id = 0;
+            switch (t->state) {
+                case State::Running: status = 0x01; break;
+                case State::Ready: status = 0x02; break;
+                case State::Waiting: status = 0x04; wait_type = 2; wait_id = t->waiting_on; break;
+                case State::Sleeping: status = 0x04; wait_type = 1; break;
+                case State::Dormant: status = 0x10; break;
+            }
+            if (t->suspended) status = status == 0x04 ? 0x0C : status == 0x10 ? 0x10 : 0x08;
+            if (a1) {
+                const u32 fields[12] = {status, t->entry, t->stack, t->stack_size, t->gp,
+                                        u32(t->initial_priority), u32(t->priority), 0, 0,
+                                        wait_type, wait_id, u32(t->wakeups)};
+                for (int i = 0; i < 12; ++i) m.Write(a1 + 4 * i, fields[i], 4);
+            }
+            result = status;
+            return true;
+        }
         case 0x33: case 0x34: case -0x34: {          // WakeupThread / iWakeupThread
             Thread* t = Find(a0);
             if (!t) { result = u64(-1); return true; }
