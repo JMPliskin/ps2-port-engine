@@ -23,12 +23,12 @@ sys.path[:0] = [HERE, os.path.dirname(HERE)]
 from ps2decomp import game as game_config
 from ps2decomp.elf import ElfFile
 from ps2decomp.analysis import ImageAnalyzer
-from ps2decomp import gaps, lift
+from ps2decomp import gaps, lift, overlay
 from ps2decomp.r5900 import DISASM
 from ps2decomp.symbols import SymbolRecovery
 
 
-def build_database(elf_path: str, verbose: bool = True) -> dict:
+def build_database(elf_path: str, verbose: bool = True, keep=()) -> dict:
     started = time.time()
     elf = ElfFile.load(elf_path)
     exec_sections = elf.exec_sections
@@ -162,6 +162,14 @@ def build_database(elf_path: str, verbose: bool = True) -> dict:
     if labels:
         functions = [f for f in functions if f["addr"] not in labels]
         log("  %d labels of other functions were taken for functions; dropped" % len(labels))
+    if keep:
+        # An overlay (ps2decomp/overlay.py): the executable's own functions were
+        # found too, as the overlay's calls lead into them, but they are the base
+        # game's to decompile.
+        kept = [f for f in functions if overlay.in_code(keep, f["addr"])]
+        log("  %d functions in the overlay; %d of the executable's left to it"
+            % (len(kept), len(functions) - len(kept)))
+        functions = kept
     for f in functions:
         f["chunks"] = [list(c) for c in analyzer.chunks(f["addr"], f["end"], entries)]
     log("  %d functions have out-of-line pieces (%s bytes)"
@@ -198,6 +206,11 @@ def build_database(elf_path: str, verbose: bool = True) -> dict:
         ],
         "renderware": [{"addr": addr, "path": path} for addr, path in rw_tags],
     }
+    if keep:
+        # The overlay's own numbers, not the combined image's.
+        database["meta"]["image_size"] = sum(high - low for low, high in keep)
+        database["meta"]["code_ranges"] = [list(r) for r in keep]
+        database["stats"]["code_bytes"] = sum(f["size"] for f in functions)
     log("done in %.1fs" % (time.time() - started))
     return database
 
@@ -213,7 +226,8 @@ def main(argv=None) -> int:
     game = game_config.from_args(args)
     output = args.output or game.database_path
     os.makedirs(os.path.dirname(output), exist_ok=True)
-    database = build_database(game.elf_path, verbose=not args.quiet)
+    database = build_database(game.elf_path, verbose=not args.quiet,
+                              keep=game.code_ranges)
     os.makedirs(os.path.dirname(output) or ".", exist_ok=True)
     with open(output, "w", encoding="utf-8") as handle:
         json.dump(database, handle, indent=1)

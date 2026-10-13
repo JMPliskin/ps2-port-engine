@@ -1669,6 +1669,7 @@ def main(argv=None) -> int:
                 ),
             }
         rows = [existing[key] for key in sorted(existing)]
+        os.makedirs(os.path.dirname(os.path.abspath(args.csv)), exist_ok=True)
         with open(args.csv, "w", newline="", encoding="utf-8") as handle:
             writer = csv.DictWriter(
                 handle, fieldnames=["address", "name", "status", "source", "notes"]
