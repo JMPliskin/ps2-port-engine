@@ -364,6 +364,11 @@ void DbcFrame();
    libpad's order - 3 is Start): the keyboard, the game controller and
    --press together. For hooks that act on a button as the game would. */
 u16 PadButtonsHeld();
+/* The device the player last pressed something on - a key, or a
+   controller's button or stick (scripted presses are neither) - and the pad
+   read (frame) it was, a press later than the last: kNone before any. */
+enum class InputDevice { kNone, kController, kKeyboard };
+InputDevice LastInputDevice(u64* frame = nullptr);
 /* A game's own input, as DualShock 2 buttons held (bit n: input n), asked for
    each time the pad is read (once a frame, on the EE's thread, at the
    vertical blank): what the mouse means, say. */

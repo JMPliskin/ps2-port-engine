@@ -106,16 +106,34 @@ std::vector<Press>& Script() {
 u64 g_frame = 0;
 u16 g_held = 0;                     // PadButtonsHeld
 u16 (*g_pad_hook)() = nullptr;      // SetPadHook
+// LastInputDevice: the device of the last press, and when; what each held.
+InputDevice g_last_device = InputDevice::kNone;
+u64 g_last_input_frame = 0;
+u16 g_keys_before = 0, g_controller_before = 0;
+bool g_sticks_before = false;
 
 void PadData(u8* data) {
     u16 buttons = 0xFFFF;                                   // active low: nothing pressed
+    u16 keys = 0;
     for (const auto& [input, key] : kKeys)
-        if (Pressed(key)) buttons &= u16(~(1u << input));
+        if (Pressed(key)) keys |= u16(1u << input);
+    buttons &= u16(~keys);
     for (const Press& p : Script())
         if (g_frame >= p.from && g_frame <= p.to) buttons &= u16(~(1u << p.input));
     HostPadState pad;
     const bool controller = HostPad(&pad);
     buttons &= u16(~pad.buttons);
+    // A key or a controller's button newly down, or a stick pushed well off
+    // its centre: that device the player's now.
+    bool sticks = false;
+    if (controller)
+        for (int i = 0; i < 4; ++i) sticks = sticks || std::abs(int(pad.sticks[i]) - 0x80) > 0x50;
+    if (keys & ~g_keys_before) g_last_device = InputDevice::kKeyboard, g_last_input_frame = g_frame;
+    if (controller && ((pad.buttons & ~g_controller_before) || (sticks && !g_sticks_before)))
+        g_last_device = InputDevice::kController, g_last_input_frame = g_frame;
+    g_keys_before = keys;
+    g_controller_before = controller ? pad.buttons : 0;
+    g_sticks_before = sticks;
     if (g_pad_hook) buttons &= u16(~g_pad_hook());
     g_held = u16(~buttons);
     data[0] = u8(buttons);
@@ -372,6 +390,11 @@ void InstallDbc() {
 }
 
 u16 PadButtonsHeld() { return g_held; }
+
+InputDevice LastInputDevice(u64* frame) {
+    if (frame) *frame = g_last_input_frame;
+    return g_last_device;
+}
 
 void SetPadHook(u16 (*hook)()) { g_pad_hook = hook; }
 
