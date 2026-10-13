@@ -75,13 +75,18 @@ def dispatch_source(addresses, names: dict, untranslated=(), sizes=None) -> str:
     return "\n".join(lines)
 
 
-def overlays_source(game, out: str) -> str:
+def overlays_source(game, out: str, pairs=()) -> str:
     """The overlays' dispatch tables (ps2host::OverlayEntry), and in `out` a source
     for each of their translated files - which stay where lift.py wrote them, in
     the overlay's own src/lifted. Overlays loaded at the same address have
     functions of the same names, so each overlay's are compiled in a namespace of
     its own: its files are included inside it, after the header they include
-    (guarded, so the inner include is empty)."""
+    (guarded, so the inner include is empty).
+
+    Code a run found in an overlay's range (`pairs`, from discovered.txt) is
+    translated from each overlay whose code covers it - the run cannot say
+    which was loaded - and added to its table; the check bytes pick the one in
+    memory. NOT VERIFIED, as the executable's found code."""
     lines = ['#include "ps2host/host.h"', ""]
     entries, wrappers = [], set()
     for relative in game.overlays:
@@ -91,6 +96,19 @@ def overlays_source(game, out: str) -> str:
         if not os.path.isdir(translated):
             print("  overlay %s: no translated sources in %s (lift.py --emit)" % (relative, translated))
             continue
+        lifted_here = set(translated_functions(translated))
+        mine = {(run, source) for run, source in pairs if source == run and run not in lifted_here
+                and overlay.in_code(part.code_ranges, run)}
+        found = discovered_functions(part, "", mine) if mine else {}
+        if found:
+            wrapper = "%s_discovered.cpp" % space
+            wrappers.add(wrapper)
+            body = ['#include "ps2rt/lifted.h"', "", "using namespace generated;",
+                    "using namespace lifted;", "", "namespace %s {" % space, "",
+                    "/* Reached at run time; no function in the overlay's analysis starts "
+                    "there. NOT VERIFIED. */", ""]
+            body += [text for _source, text in (found[a] for a in sorted(found))]
+            _write_if_changed(os.path.join(out, wrapper), "\n".join(body + ["}", ""]))
         for name in sorted(os.listdir(translated)):
             if name.endswith(".cpp"):
                 wrapper = "%s_%s" % (space, name)
@@ -99,7 +117,7 @@ def overlays_source(game, out: str) -> str:
                 _write_if_changed(os.path.join(out, wrapper),
                                   '#include "ps2rt/lifted.h"\n\nnamespace %s {\n#include "%s"\n}\n'
                                   % (space, path))
-        addresses = translated_functions(translated)
+        addresses = sorted(lifted_here | set(found))
         elf = part.load_elf()
         section = elf.exec_sections[0]
         image = elf.section_data(section)
@@ -122,7 +140,8 @@ def overlays_source(game, out: str) -> str:
         high = max(r[1] for r in part.code_ranges) if part.code_ranges else section.addr + len(image)
         entries.append('    {"%s", 0x%08Xu, 0x%08Xu, k_%s, %d, k_%s_checks},'
                        % (label, low, high, space, len(addresses), space))
-        print("overlay %s: %d translated functions" % (label, len(addresses)))
+        print("overlay %s: %d translated functions, %d found at run time"
+              % (label, len(addresses) - len(found), len(found)))
     for stale in os.listdir(out):
         if stale.startswith("overlay_") and stale.endswith(".cpp") and stale not in wrappers:
             os.remove(os.path.join(out, stale))
@@ -132,10 +151,22 @@ def overlays_source(game, out: str) -> str:
     return "\n".join(lines)
 
 
-def discovered_functions(game, path: str) -> dict:
-    """{run address: C++} for the code runs found copied at run time, translated
-    at their run addresses from the executable's bytes."""
+def discovered_pairs(path: str) -> set:
+    """(run address, source address) for each piece of code a run found."""
     if not os.path.exists(path):
+        return set()
+    with open(path, encoding="utf-8") as handle:
+        return {(int(run, 16), int(source, 16)) for run, source in
+                (line.split() for line in handle if line.strip())}
+
+
+def discovered_functions(game, path: str, pairs=None) -> dict:
+    """{run address: C++} for the code runs found copied at run time, translated
+    at their run addresses from the executable's bytes - or, for an overlay
+    (`game` is one), from the overlay's, given its `pairs`."""
+    if pairs is None:
+        pairs = discovered_pairs(path)
+    if not pairs:
         return {}
     elf = game.load_elf()
     section = elf.exec_sections[0]
@@ -145,9 +176,6 @@ def discovered_functions(game, path: str) -> dict:
     lift.use_sections([(image, section.addr)] + [(elf.section_data(s), s.addr) for s in elf.sections
                                                   if s.is_alloc and s.size and s is not section and s.type != 8])
     found = {}
-    with open(path, encoding="utf-8") as handle:
-        pairs = {(int(run, 16), int(source, 16)) for run, source in
-                 (line.split() for line in handle if line.strip())}
     for run, source in sorted(pairs):
         offset = source - section.addr
         code = image[offset:offset + gaps.MAX_FUNCTION]
@@ -172,8 +200,12 @@ def generate(game) -> str:
                     if f["size"] and f["addr"] not in set(addresses)]
     out = game.path(os.path.join(game.build, "port", "generated"))
     os.makedirs(out, exist_ok=True)
-    discovered = discovered_functions(game, game.path(os.path.join(game.build, "port",
-                                                                   "discovered.txt")))
+    pairs = discovered_pairs(game.path(os.path.join(game.build, "port", "discovered.txt")))
+    # Code found in an overlay's range is the overlay's to translate.
+    ranges = [r for relative in game.overlays
+              for r in game_config.load(game.path(relative)).code_ranges]
+    in_overlay = {p for p in pairs if p[0] == p[1] and any(lo <= p[0] < hi for lo, hi in ranges)}
+    discovered = discovered_functions(game, "", pairs - in_overlay)
     # What the analysis has since found is translated - and verified - with the rest.
     discovered = {a: v for a, v in discovered.items() if a not in set(addresses)}
     copies = ['#include "ps2rt/lifted.h"', "", "using namespace generated;",
@@ -195,7 +227,8 @@ def generate(game) -> str:
     text = dispatch_source(sorted(set(addresses) | set(discovered)), names, untranslated, sizes)
     _write_if_changed(path, text)
     # Named so that the overlays' own sources (overlay_*.cpp) never take it for one.
-    _write_if_changed(os.path.join(out, "dispatch_overlays.cpp"), overlays_source(game, out))
+    _write_if_changed(os.path.join(out, "dispatch_overlays.cpp"),
+                      overlays_source(game, out, in_overlay))
     print("dispatch table: %d translated functions, %d found at run time, %d without a "
           "translation" % (len(addresses), len(discovered), len(untranslated)))
     # The microprograms runs recorded (--vu-record), compiled ahead of time.

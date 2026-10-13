@@ -263,6 +263,9 @@ u32 FindSource(u32 address) {
     // Code in the executable itself that no function starts at - a tail call's
     // target the analysis missed - is its own source.
     if (address >= g_image_start && address < g_image_end) return address;
+    // So is code in an overlay's range: port.py translates it from the overlay.
+    for (std::size_t i = 0; i < g_overlay_count; ++i)
+        if (address >= g_overlays[i].start && address < g_overlays[i].end) return address;
     constexpr u32 kPattern = 32;
     Memory& memory = GuestMemory();
     const u8* here = memory.Translate(address, kPattern);
