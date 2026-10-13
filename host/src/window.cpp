@@ -213,6 +213,30 @@ bool HostKeyDown(int key) {
     return (GetAsyncKeyState(key) & 0x8000) != 0;
 }
 
+void HostTriggerEffects(const HostTriggerEffect& left, const HostTriggerEffect& right) {
+#ifdef PS2HOST_VULKAN
+    if (g_display) {
+        auto effect = [](const HostTriggerEffect& e) {
+            ps2gpu::Display::TriggerEffect t;
+            t.kind = ps2gpu::Display::TriggerEffect::Kind(e.kind);
+            t.start = e.start;
+            t.force = e.force;
+            t.frequency = e.frequency;
+            return t;
+        };
+        g_display->SetTriggerEffects(effect(left), effect(right));
+    }
+#else
+    (void)left, (void)right;
+#endif
+}
+
+void ReleaseController() {
+#ifdef PS2HOST_VULKAN
+    if (g_display) g_display->ReleaseController();
+#endif
+}
+
 void HostRumble(u8 large, u8 small) {
 #ifdef PS2HOST_VULKAN
     if (g_display) g_display->SetRumble(u16(large * 257), u16(small * 257));

@@ -610,7 +610,7 @@ int Run(const Options& options) {
     }
     if (sound) iop::EnableSound();
     for (const auto& press : options.presses)
-        if (!ScriptPress(press.button, press.from, press.to))
+        if (!ScriptPress(press.button, press.from, press.to, press.pressure))
             std::fprintf(stderr, "--press: no button %s\n", press.button.c_str());
     if (!options.frames_dir.empty())
         SetFrameDumps(options.frames_dir, options.frames_every, 200, u64(options.frames_from));
@@ -712,11 +712,17 @@ int Main(int argc, char** argv) {
             const std::string spec = argv[++i];
             const std::size_t at = spec.find('@');
             if (at != std::string::npos) {
-                const std::string when = spec.substr(at + 1);
+                std::string when = spec.substr(at + 1);
+                u8 pressure = 0xFF;
+                const std::size_t colon = when.find(':');
+                if (colon != std::string::npos) {
+                    pressure = u8(std::min(255, std::max(1, std::atoi(when.c_str() + colon + 1))));
+                    when.resize(colon);
+                }
                 const std::size_t dash = when.find('-');
                 const u64 from = std::stoull(when.substr(0, dash));
                 const u64 to = dash == std::string::npos ? from + 5 : std::stoull(when.substr(dash + 1));
-                options.presses.push_back({spec.substr(0, at), from, to});
+                options.presses.push_back({spec.substr(0, at), from, to, pressure});
             }
         }
         else if (arg == "--real-time-from" && i + 1 < argc) {

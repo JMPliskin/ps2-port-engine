@@ -335,6 +335,7 @@ struct HostPadState {
     u16 buttons = 0;
     u8 sticks[4] = {0x80, 0x80, 0x80, 0x80};
     u8 l2 = 0, r2 = 0;
+    u8 pressure[16] = {};       // each input's pressure (a controller filter's to change; 0xFF pressed)
 };
 bool HostPad(HostPadState* state);
 /* The mouse over the window (window.cpp), in the picture's terms: x and y
@@ -358,6 +359,17 @@ void ShowHostCursor(bool on);
 /* The window's controller's motors, as a DualShock 2's: the large one 0-255,
    the small one 0-255 (a DualShock 2's is on or off: 0 or 255). */
 void HostRumble(u8 large, u8 small);
+/* A controller's adaptive triggers (a DualSense's), left and right: off, a
+   resistance from `start` (0-255 of the travel) of `force` (0-255), or a
+   vibration from `start` of `force` at `frequency` Hz - until set again. */
+struct HostTriggerEffect {
+    enum Kind : u8 { kOff, kResistance, kVibration } kind = kOff;
+    u8 start = 0, force = 0, frequency = 0;
+};
+void HostTriggerEffects(const HostTriggerEffect& left, const HostTriggerEffect& right);
+/* The controller left as it was found (the game ending): motors stopped,
+   trigger effects off. */
+void ReleaseController();
 /* Controllers (dbc.cpp): each frame, the devices write their state. */
 void DbcFrame();
 /* The DualShock 2's buttons as the game last read them (bit n: input n held,
@@ -374,7 +386,12 @@ InputDevice LastInputDevice(u64* frame = nullptr);
    vertical blank): what the mouse means, say. */
 void SetPadHook(u16 (*hook)());
 /* --press: hold `button` (cross, start, up, ...) for 6 frames from `frame`. */
-bool ScriptPress(const std::string& button, u64 from, u64 to);
+bool ScriptPress(const std::string& button, u64 from, u64 to, u8 pressure = 0xFF);
+/* A game's own controls: the controller's state each pad read, before the
+   game sees it - its buttons (DualShock 2 inputs, libpad's order) and their
+   pressures to change as the filter likes; the keyboard and scripted presses
+   are not given to it. LastInputDevice sees what the player pressed. */
+void SetControllerFilter(void (*filter)(HostPadState* pad));
 /* --mouse FRAME:X,Y[,L|R|U|D]: the mouse at (X, Y) of the picture (0 to 1)
    from that frame - and its left or right button clicked, or the wheel
    turned up or down, then. With any, the window's own mouse is not read. */

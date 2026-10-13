@@ -134,6 +134,16 @@ public:
     void SetRumble(std::uint16_t large, std::uint16_t small) override {
         rumble_.store(std::uint32_t(large) << 16 | small);
     }
+    void SetTriggerEffects(TriggerEffect left, TriggerEffect right) override {
+        std::lock_guard<std::mutex> hold(triggers_lock_);
+        triggers_[0] = left;
+        triggers_[1] = right;
+    }
+    void ReleaseController() override;
+    std::mutex triggers_lock_;
+    TriggerEffect triggers_[2], triggers_sent_[2];      // left, right: wanted, and last sent
+    bool triggers_unsent_ = true;                       // (a controller plugged in since)
+    void SendTriggers(const TriggerEffect& left, const TriggerEffect& right);
     bool TakeMouse(MouseState* state) override {
         std::lock_guard<std::mutex> hold(mouse_lock_);
         *state = mouse_;
@@ -1269,6 +1279,21 @@ bool VulkanDisplay::Pump() {
         if (title_changed_ && window_) SDL_SetWindowTitle(window_, title_.c_str());
         title_changed_ = false;
     }
+    // The triggers' effects as last set, when they change.
+    if (gamepad_) {
+        TriggerEffect wanted[2];
+        {
+            std::lock_guard<std::mutex> hold(triggers_lock_);
+            wanted[0] = triggers_[0];
+            wanted[1] = triggers_[1];
+        }
+        if (triggers_unsent_ || !(wanted[0] == triggers_sent_[0]) || !(wanted[1] == triggers_sent_[1])) {
+            SendTriggers(wanted[0], wanted[1]);
+            triggers_sent_[0] = wanted[0];
+            triggers_sent_[1] = wanted[1];
+            triggers_unsent_ = false;
+        }
+    }
     // The motors as the game last set them: renewed before SDL's duration
     // runs out, stopped when set to zero.
     if (gamepad_) {
@@ -1322,6 +1347,7 @@ bool VulkanDisplay::Pump() {
         }
         if (e.type == SDL_EVENT_GAMEPAD_ADDED && !gamepad_) {
             gamepad_ = SDL_OpenGamepad(e.gdevice.which);
+            triggers_unsent_ = true;
             if (gamepad_) std::fprintf(stderr, "[window] controller: %s\n", SDL_GetGamepadName(gamepad_));
         }
         if (e.type == SDL_EVENT_GAMEPAD_REMOVED && gamepad_ && SDL_GetGamepadID(gamepad_) == e.gdevice.which) {
@@ -1450,6 +1476,40 @@ bool VulkanDisplay::Pad(PadState* state) const {
     }
     *state = s;
     return true;
+}
+
+/* A DualSense's effects packet (SDL's HIDAPI PS5 driver takes it as the
+   controller's output report's effects part: SDL_SendGamepadEffect), the
+   triggers' alone: their effects at 10 (right) and 21 (left), 11 bytes each,
+   enabled by bits 2 and 3 of the first byte. An effect: its mode, then its
+   parameters - 0x05 off; 0x01 resistance (start, force); 0x06 vibration
+   (frequency, amplitude, start). */
+void VulkanDisplay::SendTriggers(const TriggerEffect& left, const TriggerEffect& right) {
+    if (!gamepad_ || SDL_GetGamepadType(gamepad_) != SDL_GAMEPAD_TYPE_PS5) return;
+    std::uint8_t packet[47] = {};
+    packet[0] = 0x04 | 0x08;
+    auto put = [](std::uint8_t* at, const TriggerEffect& t) {
+        switch (t.kind) {
+            case TriggerEffect::kResistance:
+                at[0] = 0x01, at[1] = t.start, at[2] = t.force;
+                break;
+            case TriggerEffect::kVibration:
+                at[0] = 0x06, at[1] = t.frequency, at[2] = t.force, at[3] = t.start;
+                break;
+            default:
+                at[0] = 0x05;
+        }
+    };
+    put(packet + 10, right);
+    put(packet + 21, left);
+    if (!SDL_SendGamepadEffect(gamepad_, packet, sizeof packet))
+        std::fprintf(stderr, "[window] trigger effects: %s\n", SDL_GetError());
+}
+
+void VulkanDisplay::ReleaseController() {
+    if (!gamepad_) return;
+    SendTriggers(TriggerEffect{}, TriggerEffect{});
+    SDL_RumbleGamepad(gamepad_, 0, 0, 0);
 }
 
 bool VulkanDisplay::Focused() const {
