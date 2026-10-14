@@ -168,6 +168,9 @@ int GsReplay(const std::string& file, const std::string& out) {
     }
     g.Finish();
     if (repeat > 0) {
+        // To the last drawn: a block read back waits for the GPU (and for a
+        // renderer on a thread of its own, its queue).
+        if (gpu && g.on_memory) g.on_memory(0, 1, false);
         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
         std::fprintf(stderr, "gs-replay: %d passes, %.2f ms a pass (%d pictures each)\n", repeat, ms / repeat, pictures);
         if (std::getenv("PS2HOST_REPLAY_SAMPLE"))

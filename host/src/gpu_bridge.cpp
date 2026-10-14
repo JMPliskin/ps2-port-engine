@@ -1714,6 +1714,11 @@ bool StartGpuRenderer(std::string* error, GpuMode mode, bool show) {
         ps2gpu::SetPipelineCacheDir(std::filesystem::path(SettingsPath()).parent_path().u8string());
     bridge.renderer = ps2gpu::CreateGsRenderer(*device, error);
     if (!bridge.renderer) return false;
+    // Vulkan's recording on a thread of its own, beside the GS thread's
+    // (PS2HOST_GPU_THREAD=0: on the GS thread, as before).
+    const char* threaded = std::getenv("PS2HOST_GPU_THREAD");
+    if (!threaded || std::strcmp(threaded, "0") != 0)
+        bridge.renderer = ps2gpu::MakeThreadedGsRenderer(std::move(bridge.renderer));
     g_bridge = &bridge;
     OpenTexturePack();
     bridge.primary = mode == GpuMode::Primary;
