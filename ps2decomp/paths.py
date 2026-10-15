@@ -25,6 +25,7 @@ import struct
 from .r5900 import DISASM
 from .symexec import (
     ARG_COUNT,
+    arguments_used,
     vu_written,
     VU_KEYS,
     vf_lane,
@@ -1073,6 +1074,14 @@ def _step(regs: dict, stores: list, frame: dict, memory: dict, ins, get,
                 _frame_write(frame, slot, size, get(ins.rt))
             return
         value = get(ins.rt)
+        if size <= 8 and _is_frame_address(value):
+            # A local's address stored where a callee can find it - a request
+            # block's reply buffer (Resident Evil Outbreak's 0x00119B28 and
+            # eighteen like it): from here on the frame is real memory, as when
+            # the address is passed in a register.
+            if not isinstance(frame, Frame):
+                raise Unsupported("stores a stack address")
+            frame.escape(stores, memory)
         if size == 16 and (ins.rt == 0 or upper(ins.rt) in regs) and not (
                 _is_frame_address(target) and isinstance(frame, Frame)
                 and id(value) in frame.seeds):
@@ -1134,10 +1143,111 @@ def _step(regs: dict, stores: list, frame: dict, memory: dict, ins, get,
     _apply(regs, ins, get, epoch)
 
 
+# The halves of an unaligned access: (the other half, the whole's opcode, the
+# high half's offset above the low's).
+_UNALIGNED_HALVES = {
+    "ldl": ("ldr", 0x37, 7), "ldr": ("ldl", 0x37, 7),     # ld
+    "lwl": ("lwr", 0x23, 3), "lwr": ("lwl", 0x23, 3),     # lw: sign-extended either way
+    "sdl": ("sdr", 0x3F, 7), "sdr": ("sdl", 0x3F, 7),     # sd
+    "swl": ("swr", 0x2B, 3), "swr": ("swl", 0x2B, 3),     # sw
+}
+
+
+def _fuse_unaligned(image: bytes, base: int, start: int, end: int) -> dict:
+    """{address: word} rewriting each pair of halves in [start, end) as the
+    aligned access they make together (_unaligned_pair): the first half
+    becomes the whole, the second a `nop`.
+
+    The halves are adjacent, or - a store only - the second is the delay slot
+    of the jump or branch after the first (`sdl $v1, 0xF($a0); jr $ra; sdr
+    $v1, 0x8($a0)`), which runs it before control moves. A pair is left as it
+    is, and its halves refused, where code could arrive between them: a branch
+    or switch case targeting the second half, or the jump between them, or
+    where the first half is itself a delay slot.
+    """
+    def decode(address):
+        return DISASM.decode(struct.unpack_from("<I", image, address - base)[0], address)
+
+    if not (base <= start and end <= base + len(image)):
+        return {}
+    code = {address: decode(address) for address in range(start, end, 4)}
+    targets = set()
+    for address, ins in code.items():
+        if (ins.is_branch or ins.is_jump) and ins.target is not None:
+            targets.add(ins.target)
+        if ins.mnemonic == "jr" and not ins.is_return:
+            targets |= set(_switch_targets(image, base, address, ins.rs) or ())
+    fused = {}
+    for address, ins in code.items():
+        if ins.mnemonic not in _UNALIGNED_HALVES or address in fused:
+            continue
+        before = code.get(address - 4)
+        if before is not None and before.has_delay_slot:
+            continue
+        nxt = code.get(address + 4)
+        if nxt is None:
+            continue
+        whole = _unaligned_pair(ins, nxt)
+        if whole is not None and address + 4 not in targets:
+            fused[address], fused[address + 4] = whole.raw, 0
+            continue
+        slot = code.get(address + 8)
+        if (slot is None or not nxt.has_delay_slot or nxt.is_likely
+                or not ins.mnemonic.startswith("s") or address + 4 in targets
+                or address + 8 in targets):
+            continue
+        whole = _unaligned_pair(ins, slot)
+        if whole is not None:
+            fused[address], fused[address + 8] = whole.raw, 0
+    return fused
+
+
+def _unaligned_pair(first, second):
+    """The aligned access an adjacent pair of halves makes, or None.
+
+    `ldl $t, A+7($b); ldr $t, A($b)` (either order) reads the eight bytes at
+    A, whatever A's alignment: each half fills the bytes the other leaves, so
+    together they are `ld $t, A($b)` - CodeWarrior's copy of a struct that may
+    not be aligned (89 of Resident Evil Outbreak's refusals). The same holds
+    for sdl/sdr and swl/swr writing them. A load whose first half overwrites
+    its own base is not a pair: the second half reads another address.
+    """
+    other, opcode, span = _UNALIGNED_HALVES[first.mnemonic]
+    if second.mnemonic != other or second.rt != first.rt or second.rs != first.rs:
+        return None
+    if first.mnemonic.startswith("l") and (first.rt == first.rs or first.rt == 0):
+        return None
+    high, low = (first, second) if first.mnemonic.endswith("l") else (second, first)
+    if high.imm - low.imm != span:
+        return None
+    word = (opcode << 26) | (low.rs << 21) | (low.rt << 16) | (low.imm & 0xFFFF)
+    return DISASM.decode(word, low.addr)
+
+
 # Registers a call may clobber. After inlining a callee these are dropped rather
 # than left holding stale values: if the caller then reads one, the derivation is
 # refused instead of quietly using a value the real code would not have had.
 CALLER_SAVED = tuple(range(2, 4)) + tuple(range(4, 8)) + tuple(range(8, 16)) + (24, 25)
+
+
+def _preserved_across(regs: dict, target, parameters, own) -> dict:
+    """The caller-saved registers, both halves, that a call to `target` leaves
+    as they were (calls.preserved_registers): a value CodeWarrior keeps in $t1
+    across a call to a function that never touches it is still there after.
+
+    Only values made from the function's own parameters (`own`, liveness's):
+    liveness takes a call to kill every argument register, so an incoming
+    argument still in place after one is no parameter to it, and kept, it
+    would make one - 0x0015FB20, passing $a1-$t3 on to a printf, would take
+    eight, and none of its callers passes them."""
+    if target is None or parameters is None:
+        return {}
+    kept = {}
+    for index in getattr(parameters, "preserved", {}).get(target, ()):
+        for key in (index, upper(index)):
+            if key in regs and arguments_used(regs[key]) <= own:
+                kept[key] = regs[key]
+    return kept
 
 
 def _call_arguments(regs: dict) -> dict:
@@ -1305,9 +1415,14 @@ def _derive_paths(image: bytes, base: int, start: int, end: int,
     # (calls.float_returning).
     returns_float = force_float or start in getattr(parameters, "returns_float", ())
 
+    fused = _fuse_unaligned(image, base, start, end)
+    own_parameters = set(parameters.get(start, ())) if parameters is not None else set()
+
     def word_at(addr: int) -> int:
         if not (base <= addr < base + len(image) - 3):
             raise Unsupported("address outside the image")
+        if addr in fused:
+            return fused[addr]
         return struct.unpack_from("<I", image, addr - base)[0]
 
     paths = []
@@ -1316,6 +1431,31 @@ def _derive_paths(image: bytes, base: int, start: int, end: int,
     epochs = [0]
     loop_ids = [0]
     loop_info = _loop_info(image, base, start, end) if loops else {}
+    liveness = {}
+
+    def dead_arguments(address):
+        """The argument registers (and their upper halves) that nothing from
+        `address` on reads - calls.live_map over this function's own code. A
+        loop exit still holds the arguments a call in the body made dead, and
+        keeping them as variables gave the function every argument as a
+        parameter: 0x00102F08 of Resident Evil Outbreak, a wait loop calling
+        printf, took sixteen, and its 139 callers passed the eight liveness
+        found, so none of them could be emitted."""
+        if parameters is None or not start <= address < end:
+            return frozenset()
+        if "map" not in liveness:
+            from .calls import _graph, live_map
+            liveness["map"] = live_map(
+                _graph({"addr": start, "end": end}, image, base, parameters), parameters)
+        live = liveness["map"].get(address)
+        if live is None:
+            return frozenset()
+        dead = set()
+        for index in range(ARG_COUNT):
+            if not live >> index & 1:
+                register = _arg_register(index)
+                dead |= {register, upper(register)} if index < FLOAT_ARG_BASE else {register}
+        return frozenset(dead)
     joins = _join_points(image, base, start, end) if merge else {}
 
     def shared_code(address: int) -> bool:
@@ -1378,6 +1518,8 @@ def _derive_paths(image: bytes, base: int, start: int, end: int,
         index = memory.next_epoch() if isinstance(memory, Overlay) else epoch + 1
         call = Call(index, target, tuple(arguments), pointer)
         before_v0 = regs.get(2)
+        kept = _preserved_across(regs, None if pointer is not None else target, parameters,
+                                 own_parameters)
         for index in CALLER_SAVED + (REG_HI, REG_LO, FP_COND):
             regs.pop(index, None)
         for index in CALLER_SAVED:
@@ -1392,6 +1534,7 @@ def _derive_paths(image: bytes, base: int, start: int, end: int,
                 regs[2] = before_v0
         else:
             regs[2] = CallResult(call.index, target)
+        regs.update(kept)
         # A float result comes back in $f0. Whatever the callee left there is
         # what the original reads, so it is a result like $v0 - one the emitted
         # code can only name for a callee called by address (derive._call).
@@ -1416,10 +1559,31 @@ def _derive_paths(image: bytes, base: int, start: int, end: int,
         body_paths = []
         body_frame = frame.fork()
         body_frame.frozen = True
-        walk(head, body_regs, [], body_frame, Overlay(epoch=head_epoch, counter=epochs),
-             (), {}, (), loop=context, sink=body_paths)
+        try:
+            walk(head, body_regs, [], body_frame, Overlay(epoch=head_epoch, counter=epochs),
+                 (), {}, (), loop=context, sink=body_paths)
+        except Unsupported as exc:
+            # A body that writes a local - a counter, a buffer filled a byte at a
+            # time - or passes one's address cannot keep the frame symbolic: a
+            # slot written on one iteration is read on the next. The frame
+            # becomes real memory before the loop, as for a call given a local's
+            # address, and the body is derived again over loads and stores (57
+            # and 54 of Resident Evil Outbreak's refusals).
+            if (str(exc) not in _FRAME_IN_LOOP or not isinstance(frame, Frame)
+                    or frame.frozen):
+                raise
+            frame.escaped = False               # flush the slots written since, too
+            frame.escape(stores, memory)
+            head_epoch = memory.next_epoch()
+            context = LoopContext(identity, head, body, carried, [])
+            body_paths = []
+            body_frame = frame.fork()
+            body_frame.frozen = True
+            walk(head, body_regs, [], body_frame, Overlay(epoch=head_epoch, counter=epochs),
+                 (), {}, (), loop=context, sink=body_paths)
         tree = _build_tree([(path.events(), path.end()) for path in body_paths])
-        carried, tree = _prune_loop_variables(identity, carried, tree, context.exits)
+        carried, tree = _prune_loop_variables(identity, carried, tree, context.exits,
+                                              dead_arguments)
         init = tuple((register, value) for register, value in init if register in carried)
         after_epoch = memory.next_epoch()
         node = Loop(identity, head, init, carried, tree, head_epoch, after_epoch,
@@ -1434,7 +1598,11 @@ def _derive_paths(image: bytes, base: int, start: int, end: int,
             guards = [LoopExit(identity, j).negate() for j in range(index)]
             if index < count - 1:
                 guards.append(LoopExit(identity, index))
-            walk(exit_address, dict(exit_regs), list(stores), frame.fork(),
+            # A register nothing after the exit reads may hold a variable pruned
+            # above; it is dropped, so a read the liveness missed refuses.
+            dead = dead_arguments(exit_address)
+            exit_regs = {r: v for r, v in exit_regs.items() if r not in dead}
+            walk(exit_address, exit_regs, list(stores), frame.fork(),
                  Overlay(epoch=after_epoch, counter=epochs),
                  conditions + tuple(guards), visited,
                  marks + (loop_mark,) + tuple((len(stores), "cond", g) for g in guards),
@@ -1801,11 +1969,14 @@ def _derive_paths(image: bytes, base: int, start: int, end: int,
                     extra = _apply_callee_path(
                         callee_path, arguments, branch_stores, branch_memory, epoch
                     )
+                    kept = _preserved_across(branch_regs, ins.target, parameters,
+                                             own_parameters)
                     for index in CALLER_SAVED:
                         branch_regs.pop(index, None)
                         branch_regs.pop(upper(index), None)
                     for index in VU_KEYS:
                         branch_regs.pop(index, None)
+                    branch_regs.update(kept)
                     if callee_path.expression is not None:
                         # A float result comes back in $f0, anything else in $v0.
                         branch_regs[fpr(0) if callee.returns_float else 2] = simplify(
@@ -1868,9 +2039,11 @@ def _derive_paths(image: bytes, base: int, start: int, end: int,
     # And with no caller known to read $v0 (calls.int_returning), any callee's
     # leftover is: Resident Evil Outbreak's handlers call a function on one path
     # and return on another, and 32 of 40 sampled "inconsistent void and value"
-    # refusals returned nothing but such leftovers.
+    # refusals returned nothing but such leftovers. Known only from the calls
+    # the scan sees: a function whose address is taken has callers it cannot.
     if any(path.expression is None for path in paths):
-        unread = start not in getattr(parameters, "returns_int", ())
+        unread = (start not in getattr(parameters, "returns_int", ())
+                  and start not in getattr(parameters, "address_taken", ()))
         for index, path in enumerate(paths):
             if isinstance(path.expression, CallResult) and path.calls and \
                     (unread or path.expression.index == path.calls[-1].index):
@@ -1892,7 +2065,11 @@ def _derive_paths(image: bytes, base: int, start: int, end: int,
     return derivation
 
 
-def _prune_loop_variables(identity, carried, tree, exits) -> tuple:
+# What a loop body refuses for when it needs the frame as memory.
+_FRAME_IN_LOOP = ("a loop writes the stack frame", "a loop passes the address of a local")
+
+
+def _prune_loop_variables(identity, carried, tree, exits, dead_at=None) -> tuple:
     """Drop loop variables that nothing reads; returns (carried, tree).
 
     Every register the body writes starts as a variable, but one that is always
@@ -1900,7 +2077,9 @@ def _prune_loop_variables(identity, carried, tree, exits) -> tuple:
     iterations. Keeping it would also give it an initial value from before the
     loop: `$t0` started as argument 4, which made the function appear to take a
     fifth argument it never reads. A variable is kept if any expression of the
-    body other than its own update reads it, or any exit's registers do.
+    body other than its own update reads it, or any exit's registers do -
+    those the code after the exit can read (`dead_at(exit)`: the registers it
+    cannot).
     """
     def mentions(expr, wanted):
         found, seen, stack = set(), set(), [expr]
@@ -1942,6 +2121,9 @@ def _prune_loop_variables(identity, carried, tree, exits) -> tuple:
                 out.append(statement)
         return out
 
+    if dead_at is not None:
+        exits = [(address, {r: v for r, v in regs.items() if r not in dead_at(address)})
+                 for address, regs in exits]
     keep = set(carried)
     while True:
         used = readers(tree, keep)

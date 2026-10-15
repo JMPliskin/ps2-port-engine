@@ -62,5 +62,37 @@ class TestRunCases(unittest.TestCase):
         self.assertEqual(outcome, "mismatch")
 
 
+class TestCountPlan(unittest.TestCase):
+    """memset(p, n): every argument a pointer, n is 25 million and the original
+    never finishes; with n a small count it does."""
+
+    def setUp(self):
+        A1, ZERO_ = 5, 0
+        words = [
+            i_type(0x04, A1, ZERO_, 5),      # 0: beq $a1, $zero, to the jr
+            0,
+            i_type(0x2B, A0, ZERO_, 0),      # 8: sw $zero, 0($a0)
+            i_type(0x09, A1, A1, -1),        # 12: addiu $a1, $a1, -1
+            i_type(0x04, ZERO_, ZERO_, -5),  # 16: b back to 0
+            i_type(0x09, A0, A0, 4),         # 20: addiu $a0, $a0, 4
+            (RA << 21) | 0x08,               # 24: jr $ra
+            0,
+        ]
+        self.image = struct.pack("<%dI" % len(words), *words)
+        self.machine = Machine(BASE, self.image, 0x02000000 - BASE)
+        self.func = {"addr": BASE, "end": BASE + 4 * len(words), "size": 4 * len(words)}
+
+    def test_a_count_argument_makes_it_testable(self):
+        plan = testplan.test_plan(self.func, self.machine)
+        self.assertIsNotNone(plan)
+        arg_sets, _profile = plan
+        self.assertTrue(all(args[1] <= testplan.COUNT_LIMIT for args in arg_sets))
+        self.assertTrue(all(args[0] > testplan.COUNT_LIMIT for args in arg_sets))
+
+    def test_the_plan_is_the_same_every_time(self):
+        self.assertEqual(testplan.test_plan(self.func, self.machine)[0],
+                         testplan.test_plan(self.func, self.machine)[0])
+
+
 if __name__ == "__main__":
     unittest.main()

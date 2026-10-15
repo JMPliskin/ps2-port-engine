@@ -84,11 +84,15 @@ class Parameters(dict):
     """{function: argument-vector indices it reads}, plus `preserves_v0`: the
     functions after a call to which $v0 still holds the caller's value, and
     `returns_float`: the functions whose callers read their result from $f0;
-    `returns_int`: those whose callers read $v0 after calling them."""
+    `returns_int`: those whose callers read $v0 after calling them;
+    `address_taken`: those a pointer can reach; `preserved`: {function: the
+    caller-saved registers it leaves untouched}."""
 
     preserves_v0 = frozenset()
     returns_float = frozenset()
     returns_int = frozenset()
+    address_taken = frozenset()
+    preserved = {}
 
 
 def parameters(database, image, base) -> dict:
@@ -106,7 +110,20 @@ def parameters(database, image, base) -> dict:
     found.preserves_v0 = v0_preserving(database, image, base)
     found.returns_float = float_returning(database, image, base)
     found.returns_int = int_returning(database, image, base)
+    found.address_taken = address_taken(database, image, base)
+    found.preserved = preserved_registers(database, image, base)
     return found
+
+
+def address_taken(database, image, base) -> frozenset:
+    """Functions whose address a word of the image holds or code builds (the
+    analysis's xrefs): reached through a pointer, by callers no scan of call
+    sites sees - so int_returning's silence says nothing about them."""
+    starts = {f["addr"] for f in database["functions"]}
+    words = struct.unpack_from("<%dI" % (len(image) // 4), image, 0)
+    taken = {word for word in words if word in starts}
+    taken |= {x["to"] for x in database.get("xrefs", ()) if x["to"] in starts}
+    return frozenset(taken)
 
 
 # How far after a call a read of $f0 still counts as reading its result.
@@ -236,6 +253,95 @@ def v0_preserving(database, image, base) -> frozenset:
     return frozenset(preserving)
 
 
+# Caller-saved general registers a callee may leave as they were: $v1, $a0-$t7,
+# $t8, $t9 ($v0 is v0_preserving's).
+PRESERVABLE = (3,) + tuple(range(4, 16)) + (24, 25)
+
+# Instructions that name a general register first and only read it.
+_READS_FIRST = frozenset({
+    "sb", "sh", "sw", "sd", "sq", "swl", "swr", "sdl", "sdr", "swc1", "sdc1", "sqc2",
+    "mtc0", "mtc1", "ctc1", "qmtc2", "ctc2", "mthi", "mtlo", "mthi1", "mtlo1",
+    "mtsa", "mtsab", "mtsah", "pmthi", "pmtlo", "pmthl", "jr", "cache", "pref", "sync",
+})
+
+
+def _may_write(ins):
+    """The general register an instruction may write, or None. Over-reports
+    rather than under: whatever names a register first, other than a store, a
+    branch or a move to another unit, is taken to write it."""
+    if ins.is_call:
+        return 31
+    if ins.is_branch or ins.is_jump or ins.mnemonic in _READS_FIRST:
+        return None
+    from .structs import _NUMBER, _REGISTER
+    for operand in ins.operands:
+        for name in _REGISTER.findall(str(operand)):
+            if name in _NUMBER:
+                return _NUMBER[name]
+    return None
+
+
+def preserved_registers(database, image, base) -> dict:
+    """{function: the PRESERVABLE registers it leaves as the caller had them}.
+
+    CodeWarrior keeps a value in a caller-saved register across a call to a
+    function that never touches it (Resident Evil Outbreak's 0x00190100 holds
+    its argument in $t1 across a call to 0x0018F570, and reads it after).
+    A register is preserved by a function that writes it nowhere - not in its
+    body, its cold chunks, or any function it calls or jumps to. A call through
+    a register, a kernel call, a jump table, a branch or a fall-through out of
+    the function's known code, or a call into the middle of something, and
+    nothing is: a fixed point over the call graph, from the conservative side.
+    """
+    functions = {f["addr"]: f for f in database["functions"] if f["size"]}
+    every = frozenset(PRESERVABLE)
+    kept, needs = {}, {}
+    for address, func in functions.items():
+        ranges = [(func["addr"], func["end"])] + [tuple(c) for c in func.get("chunks") or ()]
+
+        def inside(target):
+            return any(low <= target < high for low, high in ranges)
+
+        written, callees, unknown = set(), set(), False
+        for low, high in ranges:
+            last = DISASM.decode(struct.unpack_from("<I", image, high - 8 - base)[0], high - 8)
+            if not last.ends_block:
+                unknown = True                       # runs on past what is known
+            for pc in range(low, high, 4):
+                ins = DISASM.decode(struct.unpack_from("<I", image, pc - base)[0], pc)
+                if ins.mnemonic in ("syscall", "jalr") or (ins.mnemonic == "jr" and not ins.is_return):
+                    unknown = True
+                    break
+                register = _may_write(ins)
+                if register is not None:
+                    written.add(register)
+                if (ins.is_call or ins.is_jump or ins.is_branch) and not ins.is_return:
+                    if ins.target is None or ins.target < 0:
+                        unknown = True
+                    elif ins.is_call or not inside(ins.target):
+                        if ins.is_branch and not ins.is_call:
+                            unknown = True           # a branch out of the function
+                        elif ins.target in functions:
+                            callees.add(ins.target)
+                        else:
+                            unknown = True
+            if unknown:
+                break
+        kept[address] = frozenset() if unknown else every - written
+        needs[address] = callees
+    changed = True
+    while changed:
+        changed = False
+        for address, callees in needs.items():
+            value = kept[address]
+            for callee in callees:
+                value &= kept[callee]
+            if value != kept[address]:
+                kept[address] = value
+                changed = True
+    return {address: value for address, value in kept.items() if value}
+
+
 def scanned_parameters(database, image, base) -> dict:
     """{function: sorted argument-vector indices it reads}, for every known function.
 
@@ -270,10 +376,25 @@ def _effects(ins) -> tuple:
     from .structs import _read_registers, _written_register
 
     uses = defs = 0
+    if ins.mnemonic == "syscall":
+        # The kernel takes its arguments where a function does: a stub of
+        # `addiu $v1, N; syscall; jr $ra` reads them though no instruction
+        # names them. Read as none, a caller passing a local's address to
+        # ReferThreadStatus or SetOsdConfigParam kept its frame symbolic and
+        # read back a slot the kernel had filled (Resident Evil Outbreak, 14
+        # functions). How many a service takes is not recorded, so all eight.
+        uses |= (1 << FLOAT_ARG_BASE) - 1
     for reg in _read_registers(ins):
         if reg in _INT_INDEX:
             uses |= 1 << _INT_INDEX[reg]
     written = _written_register(ins)
+    if ins.mnemonic in ("movz", "movn"):
+        # A conditional move keeps the old value when its condition fails: it
+        # reads its destination, and kills nothing (Resident Evil Outbreak's
+        # 0x00197900 passes on $t0 untouched when its `movz` does not move).
+        if written in _INT_INDEX:
+            uses |= 1 << _INT_INDEX[written]
+        written = None
     if written in _INT_INDEX:
         defs |= 1 << _INT_INDEX[written]
     read, wrote = _float_operands(ins)

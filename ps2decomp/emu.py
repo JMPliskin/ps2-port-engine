@@ -1400,9 +1400,14 @@ _HANDLERS = {
 
 # Services whose stub result is not 0. SifGetReg reads a SIF register, and code
 # polls it until the IOP sets a flag (`while (!(SifGetReg(4) & 0x20000))`); with
-# every bit set, the IOP is up and has answered, and the poll ends.
+# every bit set, the IOP is up and has answered, and the poll ends. Deci2Call
+# talks to a debugger over DECI2; a retail console has none, and the call
+# fails. Returning 0 had it succeed, and a send then waited for the handler's
+# acknowledgement, which no test ever delivers (Resident Evil Outbreak: 48
+# functions, every one that prints through it, ran out of instructions).
 SYSCALL_RESULTS = {
     0x7A: 0xFFFFFFFF,     # SifGetReg
+    0x7C: 0xFFFFFFFF,     # Deci2Call: -1, no debugger attached
 }
 
 

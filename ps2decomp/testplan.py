@@ -212,8 +212,38 @@ def test_plan(func, machine):
                     + tuple(testmem.float_bits(local_rng) for _ in range(8)))
     profile = _choose_profile(machine, func, arg_sets[0])
     if profile is None:
-        return None
+        return _count_plan(func, machine, arg_sets)
     return arg_sets, profile
+
+
+# Integer arguments tried as a count when every argument a pointer runs out of
+# instructions, and the largest count drawn.
+COUNT_ARGUMENTS = 4
+COUNT_LIMIT = 64
+
+
+def _count_plan(func, machine, arg_sets):
+    """A plan with one integer argument a small count, or None.
+
+    Every integer argument is a pointer into scratch, about 0x01800000 - as a
+    length, a copy of 25 MB. A function passing its argument on to memcpy or
+    memset ran past the budget on every case and every profile, and was
+    untestable (Resident Evil Outbreak: 318 functions, most of them spinning
+    in those two). Only then are the first few integer arguments tried as a
+    count, one at a time, each case's drawn from its own seed; the first under
+    which the original runs is the plan. A function that runs as it was never
+    meets these, so no verdict reached before changes.
+    """
+    if _LAST_FAILURE is None or type(_LAST_FAILURE[1]).__name__ != "ExecutionLimit":
+        return None
+    for index in range(COUNT_ARGUMENTS):
+        rng = random.Random("%d:count:%d" % (func["addr"], index))
+        sets = [args[:index] + (rng.randrange(COUNT_LIMIT + 1),) + args[index + 1:]
+                for args in arg_sets]
+        profile = _choose_profile(machine, func, sets[0])
+        if profile is not None:
+            return sets, profile
+    return None
 
 
 def run_cases(func, machine, arg_sets, profile, evaluate, record=None, recorded=None,

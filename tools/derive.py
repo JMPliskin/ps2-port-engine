@@ -542,6 +542,12 @@ class StatementEmitter:
         # A call result inside the loop may be used after it, where a local
         # declared in the body no longer exists, so it is declared here.
         for index in sorted(_calls_in(loop.body)):
+            # Only the integer result is declared; one whose float result the
+            # code after the loop reads named a local that did not exist
+            # (Resident Evil Outbreak's game.bin 0x005A5E10, `return rf8;`),
+            # and the check at the call, which sees only the body, missed it.
+            if any(_mentions_call(expr, index, FLOAT_RESULT) for expr in later):
+                raise Unsupported("uses the float result of a call in a loop")
             if index not in self.hoisted:
                 self.hoisted.add(index)
                 lines.append("u64 r%d = 0;" % index)
@@ -1466,7 +1472,7 @@ def check_compiled(verified, machine, out_dir: str, database: dict, work: str,
     # rather than aborting the whole check: one rendering gap must not cost every
     # other function its verdict.
     source = os.path.join(out_dir, "accessors.cpp")
-    for _attempt_number in range(8):
+    for _attempt_number in range(24):
         try:
             stage = time.time()
             dll, _functions = cppcheck.build(source, runtime,

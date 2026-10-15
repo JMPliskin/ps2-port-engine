@@ -159,6 +159,11 @@ class TestOpaqueCalls(unittest.TestCase):
         parameters.returns_int = frozenset({start})
         with self.assertRaises(Unsupported):
             derive_paths(image, BASE, start, start + 4 * len(words), known={}, parameters=parameters)
+        # So does one reached through a pointer, whose callers no scan sees.
+        parameters.returns_int = frozenset()
+        parameters.address_taken = frozenset({start})
+        with self.assertRaises(Unsupported):
+            derive_paths(image, BASE, start, start + 4 * len(words), known={}, parameters=parameters)
 
     def test_without_parameters_the_call_is_still_refused(self):
         """Opaque calls are opt-in: the old behaviour must remain available."""
@@ -383,6 +388,148 @@ class TestOutParameters(unittest.TestCase):
 
 
 
+class TestAddressOfALocalInMemory(unittest.TestCase):
+    """f(): int local; G = &local; fill(); return local + 1  - fill writes 41
+    through G. The address reaches the callee through memory, not a register,
+    and the frame has to be real memory all the same."""
+
+    G = 0x01800000
+
+    def setUp(self):
+        lui = lambda rt, imm: i_type(0x0F, 0, rt, imm)
+        T0 = 8
+        fill = [lui(V1, self.G >> 16), lw(V1, 0, V1), addiu(T0, 0, 41), JR_RA, sw(T0, 0, V1)]
+        caller = [
+            addiu(SP, SP, -32),
+            sd(RA, 16, SP),
+            lui(V1, self.G >> 16),
+            addiu(A0, SP, 0),
+            sw(0, 0, SP),                       # local = 0
+            sw(A0, 0, V1),                      # G = &local
+            jal(BASE),
+            NOP,
+            lw(V0, 0, SP),
+            addiu(V0, V0, 1),
+            ld(RA, 16, SP),
+            JR_RA,
+            addiu(SP, SP, 32),
+        ]
+        self.words = fill + caller
+        self.image = struct.pack("<%dI" % len(self.words), *self.words)
+        self.caller = BASE + 4 * len(fill)
+        self.parameters = {BASE: (), self.caller: ()}
+
+    def test_the_local_is_read_back_after_the_call(self):
+        derivation = derive_paths(self.image, BASE, self.caller, BASE + 4 * len(self.words),
+                                  known={}, parameters=self.parameters)
+        machine = Machine(BASE, self.image, 0x02000000 - BASE)
+        self.assertEqual(machine.call(self.caller, ()), 42)
+        machine.memory.begin_journal()
+        result = derivation.run((0,) * 16, Execution(machine))
+        machine.memory.rollback()
+        machine.memory.end_journal()
+        self.assertEqual(result, 42)
+
+
+class TestRegisterKeptAcrossACall(unittest.TestCase):
+    """A caller-saved register the callee never touches survives the call.
+
+        g(p): return *p;     f(p): t1 = p; v = g(p); return v + t1;
+
+    CodeWarrior relies on it (Resident Evil Outbreak's 0x00190100 and $t1);
+    dropping every caller-saved register at a call refused f.
+    """
+
+    T1 = 9
+
+    def setUp(self):
+        self.g = BASE
+        g = [lw(V0, 0, A0), JR_RA, NOP]
+        self.f = BASE + 4 * len(g)
+        f = [addiu(SP, SP, -32), sd(RA, 16, SP), move(self.T1, A0), jal(self.g), NOP,
+             addu(V0, V0, self.T1), ld(RA, 16, SP), JR_RA, addiu(SP, SP, 32)]
+        self.end = self.f + 4 * len(f)
+        self.image = struct.pack("<%dI" % (len(g) + len(f)), *(g + f))
+        self.database = {"functions": [
+            {"addr": self.g, "end": self.f, "size": self.f - self.g},
+            {"addr": self.f, "end": self.end, "size": self.end - self.f}]}
+
+    def test_the_callee_preserves_what_it_never_writes(self):
+        from ps2decomp.calls import preserved_registers
+
+        kept = preserved_registers(self.database, self.image, BASE)
+        self.assertIn(self.T1, kept[self.g])
+        self.assertNotIn(self.T1, kept.get(self.f, ()))     # f writes $t1
+
+    def test_a_caller_reading_it_after_the_call_derives_and_agrees(self):
+        from ps2decomp.calls import parameters
+
+        derivation = derive_paths(self.image, BASE, self.f, self.end, known={},
+                                  parameters=parameters(self.database, self.image, BASE))
+        machine = Machine(BASE, self.image, 0x02000000 - BASE)
+        for value in (0, 5, -3):
+            machine.memory.write_int(0x01800000, value & 0xFFFFFFFF, 4)
+            expected = machine.call(self.f, (0x01800000,))
+            machine.memory.begin_journal()
+            self.assertEqual(derivation.run((0x01800000,) + (0,) * 15, Execution(machine)),
+                             expected)
+            machine.memory.rollback()
+            machine.memory.end_journal()
+
+    def test_without_the_fact_it_is_refused(self):
+        from ps2decomp.calls import Parameters
+        from ps2decomp.symexec import Unsupported
+
+        with self.assertRaises(Unsupported):
+            derive_paths(self.image, BASE, self.f, self.end, known={},
+                         parameters=Parameters({self.g: (0,), self.f: (0,)}))
+
+    def test_a_callee_that_calls_through_a_register_preserves_nothing(self):
+        from ps2decomp.calls import preserved_registers
+
+        jalr_a1 = r_type(5, 0, RA, 0x09)
+        g = [jalr_a1, NOP, JR_RA, NOP]
+        image = struct.pack("<4I", *g)
+        kept = preserved_registers({"functions": [{"addr": BASE, "end": BASE + 16, "size": 16}]},
+                                   image, BASE)
+        self.assertNotIn(BASE, kept)
+
+    def test_a_callee_writing_it_through_its_own_callee_does_not_preserve_it(self):
+        from ps2decomp.calls import preserved_registers
+
+        h = [move(self.T1, A0), JR_RA, NOP]                  # h writes $t1
+        g = [addiu(SP, SP, -16), sd(RA, 0, SP), jal(BASE), NOP, ld(RA, 0, SP), JR_RA,
+             addiu(SP, SP, 16)]
+        image = struct.pack("<%dI" % (len(h) + len(g)), *(h + g))
+        g_at, end = BASE + 12, BASE + 12 + 4 * len(g)
+        kept = preserved_registers({"functions": [
+            {"addr": BASE, "end": g_at, "size": 12},
+            {"addr": g_at, "end": end, "size": end - g_at}]}, image, BASE)
+        self.assertNotIn(self.T1, kept[g_at])
+        self.assertIn(10, kept[g_at])                         # $t2: nobody writes it
+
+
+class TestKernelStubs(unittest.TestCase):
+    def test_a_syscall_stub_reads_the_integer_arguments(self):
+        from ps2decomp.calls import live_parameters
+
+        # ReferThreadStatus(tid, &status): addiu $v1, $zero, 0x30; syscall; jr $ra
+        words = [addiu(V1, 0, 0x30), 0x0000000C, JR_RA, NOP]
+        image = struct.pack("<%dI" % len(words), *words)
+        database = {"functions": [{"addr": BASE, "end": BASE + 16, "size": 16}]}
+        self.assertEqual(live_parameters(database, image, BASE)[BASE], tuple(range(8)))
+
+    def test_a_conditional_move_reads_its_destination(self):
+        from ps2decomp.calls import live_parameters
+
+        T0 = 8
+        # movz $t0, $zero, $a0; jr $ra; daddu $v0, $t0, $zero: $t0 survives a0 != 0.
+        words = [r_type(0, A0, T0, 0x0A), JR_RA, r_type(T0, 0, V0, 0x2D)]
+        image = struct.pack("<%dI" % len(words), *words)
+        database = {"functions": [{"addr": BASE, "end": BASE + 12, "size": 12}]}
+        self.assertEqual(live_parameters(database, image, BASE)[BASE], (0, 4))
+
+
 class TestPointerCalls(unittest.TestCase):
     """f(obj): return obj->method(obj)  - a call through a function pointer.
 
@@ -522,6 +669,108 @@ class TestLoops(unittest.TestCase):
         self.assertIn("break;", text)
         self.assertIn("continue;", text)
 
+
+class TestLoopWithACall(unittest.TestCase):
+    """A loop calling a function leaves the argument registers dead at its exit.
+
+        f(p): while (*p != 0) g(p);    g(p): *p -= 1;
+
+    The call makes every argument register a loop variable. Kept as variables
+    because an exit still holds them, they gave f every argument as a
+    parameter (Resident Evil Outbreak's 0x00102F08 took sixteen), and no caller
+    passing what liveness found - only p - could be emitted.
+    """
+
+    def setUp(self):
+        def beq(rs, rt, here, target):
+            return i_type(0x04, rs, rt, (target - (here + 4)) // 4)
+
+        T0 = 8
+        self.callee = BASE
+        callee = [lw(T0, 0, A0), addiu(T0, T0, -1), sw(T0, 0, A0), JR_RA, NOP]
+        f = BASE + 4 * len(callee)
+        self.f = f
+        body = [
+            addiu(SP, SP, -32),                     # 0
+            sd(RA, 16, SP),                         # 4
+            sd(S0, 0, SP),                          # 8
+            move(S0, A0),                           # 12
+            lw(V0, 0, S0),                          # 16: the head
+            beq(V0, 0, f + 20, f + 44),             # 20
+            NOP,                                    # 24
+            jal(self.callee),                       # 28
+            move(A0, S0),                           # 32
+            beq(0, 0, f + 36, f + 16),              # 36
+            NOP,                                    # 40
+            ld(RA, 16, SP),                         # 44
+            ld(S0, 0, SP),                          # 48
+            JR_RA,                                  # 52
+            addiu(SP, SP, 32),                      # 56
+        ]
+        self.end = f + 4 * len(body)
+        self.words = callee + body
+        self.image = struct.pack("<%dI" % len(self.words), *self.words)
+
+    def derive(self):
+        from ps2decomp.calls import Parameters
+
+        parameters = Parameters({self.callee: (0,), self.f: (0,)})
+        return derive_paths(self.image, BASE, self.f, self.end, known={},
+                            parameters=parameters, loops=True)
+
+    def test_the_function_takes_only_the_argument_it_reads(self):
+        import derive
+
+        self.assertEqual(derive.derivation_args(self.derive()), {0})
+
+    def test_it_still_agrees_with_the_original(self):
+        derivation = self.derive()
+        machine = Machine(BASE, self.image, 0x02000000 - BASE)
+        for count in (0, 1, 5):
+            machine.memory.write_int(0x01800000, count, 4)
+            machine.memory.begin_journal()
+            derivation.run((0x01800000,) + (0,) * 15, Execution(machine))
+            self.assertEqual(machine.memory.read_int(0x01800000, 4, False), 0)
+            machine.memory.rollback()
+            machine.memory.end_journal()
+
+
+
+class TestLoopOverALocal(unittest.TestCase):
+    """f(n): int total = 0; while (n--) total += 2; return total  - with total
+    kept in the stack frame, as code compiled without optimisation keeps it."""
+
+    def setUp(self):
+        def beq(rs, rt, here, target):
+            return i_type(0x04, rs, rt, (target - (here + 4)) // 4)
+
+        self.words = [
+            addiu(SP, SP, -16),                     # 0
+            sw(0, 0, SP),                           # 4: total = 0
+            beq(A0, 0, BASE + 8, BASE + 36),        # 8: the head
+            NOP,                                    # 12
+            lw(V0, 0, SP),                          # 16
+            addiu(V0, V0, 2),                       # 20
+            sw(V0, 0, SP),                          # 24
+            beq(0, 0, BASE + 28, BASE + 8),         # 28
+            addiu(A0, A0, -1),                      # 32
+            lw(V0, 0, SP),                          # 36
+            JR_RA,                                  # 40
+            addiu(SP, SP, 16),                      # 44
+        ]
+        self.image = struct.pack("<%dI" % len(self.words), *self.words)
+
+    def test_the_frame_becomes_memory_and_the_loop_agrees(self):
+        derivation = derive_paths(self.image, BASE, BASE, BASE + 4 * len(self.words),
+                                  known={}, loops=True)
+        machine = Machine(BASE, self.image, 0x02000000 - BASE)
+        for n in (0, 1, 7):
+            expected = machine.call(BASE, (n,))
+            machine.memory.begin_journal()
+            actual = derivation.run((n,) + (0,) * 15, Execution(machine))
+            machine.memory.rollback()
+            machine.memory.end_journal()
+            self.assertEqual((actual, expected), (2 * n, 2 * n))
 
 
 class TestBranchMerging(unittest.TestCase):
