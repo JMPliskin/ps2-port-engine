@@ -875,6 +875,9 @@ struct Sound {
         u64 period_us = 0, due_us = 0;
     } block[2];
     std::vector<u32> pending;       // channels whose transfer interrupt is due now
+    // The IOP's instructions at the last SoundInterrupts: while the IOP
+    // catches up, the sound goes no faster than they.
+    u64 sound_instructions = 0;
 };
 
 Sound& S() {
@@ -997,8 +1000,11 @@ Outcome SdBlockTrans(Vm& vm, Context& c) {
 }
 
 Outcome SdBlockTransStatus(Vm&, Context& c) {
-    const Sound::Block& b = S().block[c.r[4] & 1];
-    return Ret(c, (b.half << 24) | ((b.address + b.half * (b.size / 2)) & 0xFFFFFF));
+    const u32 channel = c.r[4] & 1;
+    const Sound::Block& b = S().block[channel];
+    // A buffer the SPU2 plays: the half it is playing.
+    const u32 half = S().spu.InputActive(channel) ? S().spu.InputHalf(channel) : b.half;
+    return Ret(c, (half << 24) | ((b.address + half * (b.size / 2)) & 0xFFFFFF));
 }
 
 Outcome SdStopTrans(Vm&, Context& c) {
@@ -1180,13 +1186,15 @@ void EnableSound() {
 
 // Due sound interrupts: a voice transfer's completion, a block transfer's
 // half-buffer. Called by the interpreter's scheduler (iop_vm.cpp).
-void SoundInterrupts(Vm& vm) {
+bool SoundInterrupts(Vm& vm, bool idle) {
     Sound& s = S();
     std::vector<u32> due;
     due.swap(s.pending);
     const u64 now = vm.NowUs();
     for (u32 ch = 0; ch < 2; ++ch) {
         Sound::Block& b = s.block[ch];
+        // A buffer the SPU2 plays interrupts as it plays it (below).
+        if (s.spu.InputActive(ch)) continue;
         if (b.active && b.period_us && now >= b.due_us) {
             b.half ^= 1;
             b.due_us += b.period_us;
@@ -1198,12 +1206,30 @@ void SoundInterrupts(Vm& vm) {
         if (s.transfer[ch].function) vm.Call(s.transfer[ch].function, {ch, s.transfer[ch].arg});
         else if (s.transfer_callback[ch]) vm.Call(s.transfer_callback[ch], {0});
     }
+    // The SPU2 runs beside the IOP, and a stream's decoder (CRI's ADX) on the
+    // IOP keeps a half of the buffer ahead of it. The IOP here runs in bursts
+    // (between the EE's frames, or as it idles): through a burst the sound
+    // goes on only as fast as the IOP's work (36.864 MHz, an instruction a
+    // cycle), never more than 50 ms behind; once the IOP has nothing to do,
+    // to the present. Each half the input begins stops it, its interrupt
+    // delivered, so the decoder runs before the SPU2 reads on.
+    const u64 executed = vm.instructions - s.sound_instructions;
+    s.sound_instructions = vm.instructions;
+    const u64 played = s.spu.PlayedUs();
+    u64 to = idle || !played ? now : std::min(now, played + executed * 1000 / 36864);
+    if (to + 50'000 < now) to = now - 50'000;
     // The SPU2's own interrupt: playback (or a transfer) reached IRQA.
     Timed timed(Section::Spu2);
-    s.spu.Advance(now, [&](u32 core) {
+    s.spu.Advance(to, [&](u32 core) {
         if (s.spu2.function) vm.Call(s.spu2.function, {1u << core, s.spu2.arg});
         else if (s.irq_callback) vm.Call(s.irq_callback, {0});
+    }, [&](u32 core) {
+        Sound::Block& b = s.block[core];
+        b.half = s.spu.InputHalf(core);
+        if (s.transfer[core].function) vm.Call(s.transfer[core].function, {core, s.transfer[core].arg});
+        else if (s.transfer_callback[core]) vm.Call(s.transfer_callback[core], {0});
     });
+    return s.spu.PlayedUs() + 21 < now;     // a sample (20.8 us) or more to play
 }
 
 std::string Format(Vm& vm, u32 format, const std::function<u32()>& next) {

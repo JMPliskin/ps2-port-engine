@@ -174,7 +174,9 @@ std::string ExportName(const std::string& library, u32 index);
 void ServeNext(Vm& vm, Thread& t);
 
 /* Due sound-hardware interrupts (iop_libs.cpp), run by the scheduler. */
-void SoundInterrupts(Vm& vm);
+// Due sound interrupts, the SPU2 run on; `idle`: the IOP has nothing to run,
+// the sound may go on to the present. True while the sound is behind it.
+bool SoundInterrupts(Vm& vm, bool idle = false);
 
 /* printf-style formatting from IOP memory: `next` yields each argument word. */
 std::string Format(Vm& vm, u32 format, const std::function<u32()>& next);

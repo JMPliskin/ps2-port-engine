@@ -380,13 +380,21 @@ u64 HardTimerPeriodUs(const HardTimer& t) {
     return std::max<u64>(1, u64(double(t.compare) * t.prescale * 1e6 / hz));
 }
 
+// The last Run ended with threads still to run (its slice spent): the IOP
+// was held, not idle, until this one - its sound waits for its work.
+namespace {
+bool g_iop_held = false;
+}  // namespace
+
 void Run(u64 slice) {
     Vm& vm = TheVm();
     if (vm.threads.empty() && vm.alarms.empty() && vm.completions.empty() &&
         vm.hard_timers.empty()) return;
     const u64 start = vm.instructions;
+    bool idle = !g_iop_held;        // nothing to run since the last Run: the sound may catch up
     for (;;) {
-        SoundInterrupts(vm);
+        const bool behind = SoundInterrupts(vm, idle);
+        idle = false;
         // Completion callbacks of finished SIF DMA (sceSifSetDmaIntr), as interrupts.
         while (!vm.completions.empty()) {
             const auto done = vm.completions.front();
@@ -418,7 +426,18 @@ void Run(u64 slice) {
             if (t.ready && (!best || t.priority < best->priority ||
                             (t.priority == best->priority && t.queued < best->queued)))
                 best = &t;
-        if (!best || vm.instructions - start > slice) return;
+        if (vm.instructions - start > slice) {
+            g_iop_held = best != nullptr;
+            return;
+        }
+        if (!best) {
+            // Nothing to run: the sound on to the present, a half at a time
+            // (each half's interrupt may wake the stream's decoder).
+            g_iop_held = false;
+            if (!behind) return;
+            idle = true;
+            continue;
+        }
         vm.current = best->id;
         vm.reschedule = false;
         bool stopped = false;

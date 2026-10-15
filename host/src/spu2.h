@@ -77,8 +77,19 @@ public:
     void Write(u32 address, const u8* data, u32 size);
     void Read(u32 address, u8* data, u32 size) const;
 
-    /* Advance playback to `now_us`; `irq(core)` for each interrupt raised. */
-    void Advance(u64 now_us, const std::function<void(u32 core)>& irq);
+    /* Advance playback to `now_us`; `irq(core)` for each interrupt raised.
+       With `input_half`, a core's sound-data input reaching a half of its
+       buffer calls it (the block transfer's interrupt: the half before is
+       free to refill) and playback stops there, the rest owed (Behind): the
+       IOP's handler and the stream's decoder run before the SPU2 reads on
+       (PlayedUs: where it stopped). */
+    void Advance(u64 now_us, const std::function<void(u32 core)>& irq,
+                 const std::function<void(u32 core)>& input_half = nullptr);
+    /* The time played to: the last Advance's, or short of it where it stopped. */
+    u64 PlayedUs() const { return start_us_ + clock_ * 1000000 / 48000; }
+    /* The half of its buffer a core's sound-data input is playing (0 or 1). */
+    u32 InputHalf(u32 core) const;
+    bool InputActive(u32 core) const { return cores_[core & 1].input != nullptr; }
 
     /* Where the mixed output goes: interleaved 16-bit stereo at 48 kHz. */
     using Output = std::function<void(const s16* frames, u32 count)>;
@@ -100,7 +111,12 @@ private:
         u32 counter = 0;
         explicit Level(u32 value = 0) { Set(value); }
         void Set(u32 value);
-        void Step();
+        // A sample of a sweep; a fixed volume (bit 15 clear) stays as it is.
+        // Inline: 100 levels step at 48 kHz, nearly all of them fixed.
+        void Step() {
+            if (reg & 0x8000) Sweep();
+        }
+        void Sweep();
     };
     struct Voice {
         u32 pitch = 0, ssa = 0, lsax = 0, nax = 0;
@@ -130,6 +146,11 @@ private:
         u32 mmix = 0xFFF;                                 // what goes where (bits 0-3: the input)
         const u8* input = nullptr;      // the sound-data input, while a block transfer runs
         u32 input_size = 0, input_sample = 0;
+        // PS2HOST_SPU_LOG: halves begun, and those begun as they were the
+        // last time round (not refilled: the decoder behind its reader).
+        u32 input_halves = 0, input_stale = 0;
+        u64 input_hash[2] = {};
+        s32 peak_voices = 0, peak_input = 0, peak_reverb = 0, voice_peak[24] = {};   // PS2HOST_SPU_LOG: the second's
         Level main_left{0x3FFF}, main_right{0x3FFF};     // MVOLL, MVOLR as they are now
         bool irq_enabled = false;
         // Reverb: the registers (libsd's order: dAPF1, dAPF2, vIIR, vCOMB1-4,
@@ -145,12 +166,14 @@ private:
     };
     Core cores_[2];
     std::vector<u8> ram_;
-    u64 last_us_ = 0;
-    double clock_ = 0;               // samples since the SPU2 started
-    double owed_ = 0;                // a fraction of a sample not yet produced
+    bool started_ = false;
+    u64 start_us_ = 0;               // the first Advance's time
+    u64 clock_ = 0;                  // samples since then, played (or passed over)
+    u64 logged_second_ = ~0ull;      // PS2HOST_SPU_LOG: the last second logged
     Output output_;
     std::vector<s16> mixed_;
 
+    void InputHalfBegun(Core& c);
     static u32 CoreOf(u32 entry) { return entry & 1; }
     static u32 VoiceOf(u32 entry) { return ((entry >> 1) & 0x1F) % 24; }
     void CheckIrq(u32 core_hint, u32 from, u32 to, const std::function<void(u32)>& irq);

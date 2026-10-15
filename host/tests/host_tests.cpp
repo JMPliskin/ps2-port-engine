@@ -1226,6 +1226,27 @@ void SpuPlaysItsSoundDataInput() {
     Check(!stopped.empty() && stopped.back() == 0, "SPU2: a stopped input is silent");
 }
 
+// The input's half-buffer interrupt comes from where the SPU2 plays: each half
+// begun stops the Advance there (the IOP refills the half before it is read
+// again), InputHalf says which half plays, and PlayedUs where it stopped.
+void SpuInputInterruptsAtEachHalf() {
+    using ps2host::iop::Spu2;
+    std::vector<Spu2::u8> pcm(0x1000);              // two halves of 512 samples
+    Spu2 spu;
+    Spu2::u32 played = 0;
+    spu.SetOutput([&](const Spu2::s16*, Spu2::u32 count) { played += count; });
+    spu.SetInput(1, pcm.data(), Spu2::u32(pcm.size()));
+    std::vector<Spu2::u32> halves;
+    auto half = [&](Spu2::u32 core) { halves.push_back(spu.InputHalf(core)); };
+    spu.Advance(1000, [](Spu2::u32) {}, half);
+    spu.Advance(1000 + 30000, [](Spu2::u32) {}, half);  // 30 ms: 1,440 samples due
+    Check(played == 512 && halves.size() == 1 && halves[0] == 1, "SPU2: the input stops at its second half");
+    Check(spu.PlayedUs() < 1000 + 30000, "SPU2: an input's stop leaves the rest owed");
+    spu.Advance(1000 + 30000, [](Spu2::u32) {}, half);
+    spu.Advance(1000 + 30000, [](Spu2::u32) {}, half);
+    Check(played == 1440 && halves.size() == 2 && halves[1] == 0, "SPU2: the rest played, a half at a time");
+}
+
 void SpuDecodesAdpcmAndPlaysAVoice() {
     using ps2host::iop::Spu2;
     // Shift 0, filter 0: a nibble is the sample's top four bits.
@@ -1380,6 +1401,7 @@ int main() {
     IopInstructionsMatchTheR5900();
     SpuDecodesAdpcmAndPlaysAVoice();
     SpuPlaysItsSoundDataInput();
+    SpuInputInterruptsAtEachHalf();
     std::printf(g_failures ? "host tests: %d failed\n" : "host tests: all passed\n", g_failures);
     return g_failures ? EXIT_FAILURE : EXIT_SUCCESS;
 }
