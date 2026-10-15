@@ -292,6 +292,44 @@ void GsLayoutsArePermutations() {
     Check(std::memcmp(one->data(), run->data(), 4u << 20) == 0, "GS row runs store as single pixels do");
 }
 
+void GsTakesRegisterPacketsInBlocks() {
+    using namespace ps2host::gs;
+    std::vector<u32> words;
+    auto quad = [&](u64 low, u64 high) {
+        words.insert(words.end(), {u32(low), u32(low >> 32), u32(high), u32(high >> 32)});
+    };
+    quad(3ull | 1ull << 60, 0xE); // PACKED A+D: configure a 64-pixel target.
+    quad(1ull << 16, 0x4C);
+    quad(63ull << 16 | 63ull << 48, 0x40);
+    quad(6, 0x00);
+    quad(1ull | 1ull << 58 | 3ull << 60, 0x551); // odd REGLIST, with padding.
+    quad(0x80402010, 4ull << 4 | (4ull << 4) << 16);
+    quad(8ull << 4 | (6ull << 4) << 16, ~0ull);
+    quad(0, 0); // empty tag, then another PACKED sprite.
+    quad(2ull | 2ull << 60, 0x51);
+    quad(0x10ull | 0x20ull << 32, 0x40ull | 0x80ull << 32);
+    quad(10ull << 4 | (10ull << 4) << 32, 0);
+    quad(0x10ull | 0x20ull << 32, 0x40ull | 0x80ull << 32);
+    quad(14ull << 4 | (12ull << 4) << 32, 0);
+    auto reference = std::make_unique<Gs>();
+    for (u32 word : words) reference->Word(3, word);
+    reference->Finish();
+    Check(reference->primitives() == 2, "mixed GIF fixture draws two sprites");
+    for (u32 chunk = 1; chunk <= 19; ++chunk) {
+        auto blocks = std::make_unique<Gs>();
+        for (u32 i = 0; i < words.size();) {
+            const u32 n = std::min(chunk, u32(words.size()) - i);
+            blocks->Words(3, words.data() + i, n);
+            i += n;
+        }
+        blocks->Finish();
+        Check(blocks->Summary() == reference->Summary() &&
+              blocks->primitives() == reference->primitives() &&
+              std::memcmp(blocks->memory.data(), reference->memory.data(), 4u << 20) == 0,
+              "batched and fragmented register packets match single words");
+    }
+}
+
 void GsDrawsASprite() {
     using namespace ps2host::gs;
     Gs gs;
@@ -574,6 +612,73 @@ void GpuMemorySwizzlesAsTheGs() {
         what = std::string(f.name) + ": memory unswizzled on the GPU as the GS reads it";
         Check(back.size() == w * h && wrong == 0, what.c_str());
         base += 8;
+    }
+}
+
+// A target drawn at 2x-4x taken to memory and back (swizzle.comp, its
+// specialised pipelines): GS memory and every pixel as the scalar GS has them.
+void GpuScaledColourTransfersAsTheGs() {
+    using namespace ps2host::gs;
+    std::string error;
+    auto gpu = ps2gpu::CreateGpu(&error);
+    if (!gpu) return;
+    auto renderer = ps2gpu::CreateGsRenderer(*gpu, &error);
+    Check(renderer != nullptr, "scaled transfer renderer starts");
+    if (!renderer) return;
+    Memory reference;
+    renderer->MemoryWrite(0, 16384, reference.data());
+    const u32 w = 384, h = 64, fbw = 6;
+    u32 base = 0x20, seed = 52413;
+    auto next = [&] { return seed = seed * 1664525u + 1013904223u; };
+    for (u32 scale : {2u, 3u, 4u}) {
+        renderer->SetScale(scale);
+        for (u32 psm : {PSMCT32, PSMCT24, PSMCT16, PSMCT16S}) {
+            const bool sixteen = psm == PSMCT16 || psm == PSMCT16S;
+            renderer->TargetFromMemory(base, fbw, psm, w, h);
+            ps2gpu::GsDrawState state;
+            state.fbp = base; state.fbw = fbw; state.psm = psm;
+            state.width = w; state.height = h;
+            state.scissor_x1 = w - 1; state.scissor_y1 = h - 1;
+            const ps2gpu::GsVertex vertices[] = {
+                {0, 0, 0, 16, 32, 64, 128, 0, 0, 1},
+                {float(w), 0, 0, 16, 32, 64, 128, 0, 0, 1},
+                {0, float(h), 0, 16, 32, 64, 128, 0, 0, 1},
+                {float(w), 0, 0, 16, 32, 64, 128, 0, 0, 1},
+                {float(w), float(h), 0, 16, 32, 64, 128, 0, 0, 1},
+                {0, float(h), 0, 16, 32, 64, 128, 0, 0, 1}};
+            renderer->DrawTriangles(state, vertices, 6);
+            Check(renderer->TargetToMemory(base, fbw, psm, w, h), "scaled target swizzles to memory");
+            for (u32 y = 0; y < h; ++y)
+                for (u32 x = 0; x < w; ++x) {
+                    u32 c = 0x80402010u;
+                    if (sixteen) c = ((c >> 3) & 31) | (((c >> 11) & 31) << 5) |
+                        (((c >> 19) & 31) << 10) | ((c >> 31) << 15);
+                    reference.Write(base * 32, fbw, x, y, psm, c);
+                }
+            std::vector<u8> bytes(4u << 20);
+            renderer->MemoryRead(0, 16384, bytes.data());
+            Check(std::memcmp(bytes.data(), reference.data(), bytes.size()) == 0,
+                  "2x/3x/4x color transfer matches scalar GS memory");
+            const u32 begin = base * 32, end = begin + fbw * (sixteen ? 1 : 2) * 32;
+            for (u32 i = begin * 256; i < end * 256; ++i) reference.data()[i] = u8(next() >> 24);
+            renderer->MemoryWrite(begin, end, reference.data() + begin * 256);
+            renderer->TargetFromMemory(base, fbw, psm, w, h);
+            std::vector<u32> back;
+            u32 width = 0, height = 0;
+            Check(renderer->ReadTarget(base, fbw, psm, &back, &width, &height) && width == w && height == h,
+                  "scaled reloaded image reads at native dimensions");
+            u32 wrong = 0;
+            if (back.size() == w * h)
+                for (u32 y = 0; y < h; ++y)
+                    for (u32 x = 0; x < w; ++x) {
+                        const u32 raw = reference.Read(begin, fbw, x, y, psm);
+                        const u32 want = sixteen ? ((raw & 31) << 3) | (((raw >> 5) & 31) << 11) |
+                            (((raw >> 10) & 31) << 19) | ((raw & 0x8000) ? 0x80000000u : 0) : raw;
+                        if (back[y * w + x] != want) ++wrong;
+                    }
+            Check(back.size() == w * h && wrong == 0, "scaled reload preserves every native color pixel");
+            base += 16;
+        }
     }
 }
 
@@ -1419,9 +1524,11 @@ int main() {
     GsKeepsAFlatDepthExact();
     GsFillsTopLeft();
     GsTakesImagesInBlocks();
+    GsTakesRegisterPacketsInBlocks();
     TexturePackNamesAsPcsx2();
 #if PS2HOST_VULKAN
     GpuMemorySwizzlesAsTheGs();
+    GpuScaledColourTransfersAsTheGs();
     GpuDecodesTexturesAsTheGs();
 #endif
     VifRunsMicroprogramsOnAVu();
