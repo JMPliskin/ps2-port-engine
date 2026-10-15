@@ -1241,6 +1241,137 @@ void SpuDecodesAdpcmAndPlaysAVoice() {
     Check(heard[2 * 575] == 0 && heard[2 * 575 + 1] > 3500, "SPU2: the sweep reaches silence, the other side plays on");
     Check(spu.GetParam(0x0600) == 0, "SPU2: VOLXL, the current volume, is the sweep's");
 
+    // Wet-only voices need their capture buffers even with reverb disabled.
+    // Burnout 3 DMA-reads this mix to process the player's engine sound.
+    Spu2 captured;
+    captured.Write(0x5000, loop, 16);
+    std::vector<Spu2::s16> capture_output;
+    captured.SetOutput([&](const Spu2::s16* frames, Spu2::u32 count) { capture_output.assign(frames, frames + 2 * count); });
+    captured.SetAddr(0x2000, 0x5000);
+    captured.SetParam(0x0000, 0x3FFF);
+    captured.SetParam(0x0100, 0x3FFF);
+    captured.SetParam(0x0200, 0x1000);
+    captured.SetParam(0x0300, 0x000F);
+    captured.SetParam(0x0400, 0x1FC0);
+    captured.SetSwitch(0x1900, 1);
+    captured.SetSwitch(0x1B00, 1);
+    captured.SetSwitch(0x1500, 1);
+    captured.SetAddr(0x1F00, 0x2820);
+    captured.SetAddr(0x1F01, 0x2820);
+    captured.SetCoreAttr(0x04, 1);
+    captured.SetCoreAttr(0x05, 1);
+    unsigned capture_irqs = 0;
+    auto capture_irq = [&](Spu2::u32 core) { capture_irqs |= 1u << core; };
+    captured.Advance(1000, capture_irq);
+    captured.Advance(2000, capture_irq);
+    auto capture_sample = [&](unsigned address) {
+        Spu2::u8 bytes[2]; captured.Read(address, bytes, 2);
+        return int(Spu2::s16(unsigned(bytes[0]) | unsigned(bytes[1]) << 8));
+    };
+    Check(capture_sample(0x2800 + 94) > 3500 && capture_sample(0x2C00 + 94) > 3500,
+          "SPU2: wet capture is written at 48 kHz without audible reverb");
+    Check(capture_sample(0x2000 + 94) == 0 && capture_sample(0x2400 + 94) == 0 &&
+          capture_output.back() == 0, "SPU2: a wet-only voice does not leak into the dry output");
+    Check(capture_irqs == 3, "SPU2: both cores see a capture-buffer write at their IRQA");
+    captured.Advance(12000, none);                  // Fill the complete ring before fading.
+    captured.SetParam(0x0000, 0);
+    captured.SetParam(0x0100, 0);
+    captured.Advance(14000, none);                  // 624 samples total: wrapped at 512
+    Check(capture_sample(0x2800 + 94) == 0 && capture_sample(0x2C00 + 94) == 0 &&
+          capture_sample(0x2800 + 400) > 3500,
+          "SPU2: 512-sample captures wrap and retain the unoverwritten part");
+    // Voice 1 and 3 taps are before voice volume and mix routing.
+    captured.SetAddr(0x2002, 0x5000);
+    captured.SetParam(0x0202, 0x1000);
+    captured.SetParam(0x0302, 0x000F);
+    captured.SetParam(0x0402, 0x1FC0);
+    captured.SetSwitch(0x1500, 2);
+    captured.Advance(15000, none);
+    Check(capture_sample(0x0800 + 300) > 3500,
+          "SPU2: the raw voice-1 tap captures post-envelope audio at zero volume");
+
+    // B3ROUTE returns planar, signed PCM to core 1's input RAM. BVOL is
+    // signed 16-bit (unlike a voice volume's signed 15-bit fixed mode).
+    Spu2 pcm;
+    std::vector<Spu2::s16> pcm_output;
+    pcm.SetOutput([&](const Spu2::s16* frames, Spu2::u32 count) { pcm_output.assign(frames, frames + 2 * count); });
+    std::vector<Spu2::u8> pcm_data(0x800);
+    for (unsigned i = 0; i < 512; ++i) {
+        pcm_data[i*2] = 0x10; pcm_data[i*2+1] = 0x27;     // left: +10000
+        pcm_data[0x400+i*2] = 0xF0; pcm_data[0x401+i*2] = 0xD8; // right: -10000
+    }
+    pcm.Write(0x4800, pcm_data.data(), unsigned(pcm_data.size()));
+    pcm.SetParam(0x0801, 0x0C0);                   // PCM directly to both speakers
+    pcm.SetParam(0x0F81, 0x7FFF);
+    pcm.SetParam(0x1081, 0x4000);
+    pcm.Advance(1000, none); pcm.Advance(2000, none);
+    Check(pcm_output[90] > 9900 && pcm_output[90] < 10000 &&
+          pcm_output[91] >= -5000 && pcm_output[91] < -4900,
+          "SPU2: planar PCM input plays at independent signed 16-bit volumes");
+    Check(pcm.GetParam(0x0801) == 0x0C0 && pcm.GetParam(0x0F81) == 0x7FFF &&
+          pcm.GetParam(0x1081) == 0x4000, "SPU2: input parameters read back");
+    pcm.SetParam(0x0801, 0x040);                   // gate off only the left input
+    pcm.Advance(3000, none);
+    Check(pcm_output[90] == 0 && pcm_output[91] < -4900,
+          "SPU2: MMIX gates PCM separately on each side");
+    pcm.SetParam(0x0801, 0x0C0);
+    pcm.SetParam(0x0F81, 0x8000);                  // negative unity, not a sweep
+    pcm.SetParam(0x1081, 0);
+    pcm.Advance(4000, none);
+    Check(pcm_output[90] < -9900 && pcm_output[91] == 0,
+          "SPU2: signed PCM volume can invert or silence the input");
+    pcm.Advance(15000, none);                     // crosses the 512-sample ring
+    Check(pcm_output[900] < -9900 && pcm_output[901] == 0,
+          "SPU2: PCM input wraps at 512 samples");
+
+    // Host engine gain changes only returned PCM, with a 5 ms ramp. The
+    // guest's samples and volume registers remain untouched.
+    pcm.SetParam(0x0F81, 0x7FFF);
+    pcm.SetParam(0x1081, 0x7FFF);
+    pcm.Advance(16000, none);
+    const int unity_left = pcm_output[90], unity_right = pcm_output[91];
+    pcm.SetInputVolume(1, 50);
+    pcm.Advance(25000, none);
+    Check(pcm_output[700] >= 4990 && pcm_output[700] <= 5000 &&
+          pcm_output[701] >= -5000 && pcm_output[701] <= -4990,
+          "SPU2: host PCM gain halves both channels after the ramp");
+    pcm.SetInputVolume(1, 0);
+    pcm.Advance(35000, none);
+    Check(pcm_output[0] > 0 && pcm_output[700] == 0 && pcm_output[701] == 0,
+          "SPU2: gain fades smoothly to silence");
+    pcm.SetInputVolume(1, 200);
+    pcm.Advance(45000, none);
+    Check(pcm_output[700] >= 19980 && pcm_output[700] <= 20000,
+          "SPU2: host PCM gain can boost to 200 percent");
+    pcm.SetInputVolume(1, 100);
+    pcm.Advance(55000, none);
+    Check(pcm_output[700] == unity_left && pcm_output[701] == unity_right,
+          "SPU2: 100 percent preserves the original PCM exactly");
+    Spu2::u8 retained[2] = {};
+    pcm.Read(0x4800, retained, 2);
+    Check(retained[0] == 0x10 && retained[1] == 0x27 &&
+          pcm.GetParam(0x0F81) == 0x7FFF,
+          "SPU2: host gain preserves guest input RAM and BVOL");
+
+    // Voices (traffic/effects/music) remain audible with player PCM muted.
+    Spu2::u8 traffic[16] = {0x00, 0x07};
+    for (int i = 2; i < 16; ++i) traffic[i] = 0x11;
+    pcm.Write(0x5000, traffic, 16);
+    pcm.SetAddr(0x2001, 0x5000);
+    pcm.SetParam(0x0001, 0x3FFF);
+    pcm.SetParam(0x0101, 0x3FFF);
+    pcm.SetParam(0x0201, 0x1000);
+    pcm.SetParam(0x0301, 0x000F);
+    pcm.SetParam(0x0401, 0x1FC0);
+    pcm.SetParam(0x0801, 0x0CC0);
+    pcm.SetSwitch(0x1801, 1);
+    pcm.SetSwitch(0x1A01, 1);
+    pcm.SetSwitch(0x1501, 1);
+    pcm.SetInputVolume(1, 0);
+    pcm.Advance(70000, none);
+    Check(pcm_output[1000] > 3500 && pcm_output[1001] > 3500,
+          "SPU2: PCM mute does not mute the other ADPCM voices");
+
     // The reverb: one loud sample sent only to it (VMIXEL/VMIXER, not the dry
     // mix) comes out later, and keeps coming out after the voice has ended.
     Spu2 wet;
