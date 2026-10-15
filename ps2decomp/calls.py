@@ -97,6 +97,11 @@ def parameters(database, image, base) -> dict:
     Live-in analysis over each function's control flow, to a fixed point over the
     call graph (see live_parameters).
     """
+    # An overlay's callees in the executable and the other overlays resident
+    # with it (analyze.py's `external_functions`) are analysed with its own:
+    # a call to one is a call to a known function.
+    if database.get("external_functions"):
+        database = dict(database, functions=database["functions"] + database["external_functions"])
     found = Parameters(live_parameters(database, image, base))
     found.preserves_v0 = v0_preserving(database, image, base)
     found.returns_float = float_returning(database, image, base)
@@ -346,6 +351,11 @@ def _graph(func, image, base, functions) -> list:
 
 
 def _live_in(nodes, start, parameters) -> int:
+    return live_map(nodes, parameters).get(start, 0)
+
+
+def live_map(nodes, parameters) -> dict:
+    """{node: mask of the argument-vector indices live on entry to it}."""
     live = {key: 0 for key in nodes}
 
     def uses_of(node):
@@ -373,7 +383,7 @@ def _live_in(nodes, start, parameters) -> int:
             if value != live[key]:
                 live[key] = value
                 changed = True
-    return live.get(start, 0)
+    return live
 
 
 def live_parameters(database, image, base, rounds: int = 40) -> dict:

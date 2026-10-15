@@ -87,6 +87,79 @@ class TestOpaqueCalls(unittest.TestCase):
         kinds = [statement[0] for statement in derivation.tree()]
         self.assertEqual(kinds, ["store", "call", "return"])
 
+    def test_an_overlays_external_callee_has_parameters(self):
+        """A callee outside the overlay's code (analyze.py's external_functions)
+        is analysed with its own functions: the call is to a known function."""
+        from ps2decomp import calls
+        end = self.caller + 4 * len(caller_words(self.callee))
+        entry = lambda start, stop: {"addr": start, "end": stop, "size": stop - start, "label": "f",
+                                     "confidence": "called", "calls": []}
+        database = {"functions": [entry(self.caller, end)],
+                    "external_functions": [entry(self.callee, self.caller)]}
+        found = calls.parameters(database, self.image, BASE)
+        self.assertIn(self.callee, found)
+        self.assertEqual(tuple(found[self.callee]), (0, 1))
+        derivation = derive_paths(self.image, BASE, self.caller, end, known={}, parameters=found)
+        self.assertTrue(derivation.has_calls)
+
+    def test_f0_as_scratch_and_a_callees_v0_is_a_void_function(self):
+        """One path calls the callee (its $v0 left as is) and uses $f0 as scratch;
+        the other writes neither. Not a float function - $f0 is not set on every
+        path - so a void one, as a function that never writes $v0 is."""
+        bnez = lambda rs, words: (5 << 26) | (rs << 21) | (words & 0xFFFF)
+        mtc1_zero_f0 = (0x11 << 26) | (4 << 21) | (0 << 16) | (0 << 11)
+        words = [
+            addiu(SP, SP, -16),
+            sd(RA, 0, SP),
+            bnez(A1, 4),                     # to the epilogue
+            NOP,
+            jal(self.callee),
+            NOP,
+            mtc1_zero_f0,                    # $f0 = 0.0: scratch, nothing returned in it
+            ld(RA, 0, SP),
+            JR_RA,
+            addiu(SP, SP, 16),
+        ]
+        start = BASE + 4 * len(CALLEE)
+        image = struct.pack("<%dI" % (len(CALLEE) + len(words)), *(CALLEE + words))
+        derivation = derive_paths(image, BASE, start, start + 4 * len(words), known={},
+                                  parameters=self.parameters)
+        self.assertTrue(all(path.expression is None for path in derivation.paths))
+
+    def test_a_leftover_from_an_earlier_call_is_no_value_either(self):
+        """The last call preserves $v0 (calls.v0_preserving), so the path ends with
+        the first callee's $v0; the other path writes none. With no caller known to
+        read $v0, the function is void (Resident Evil Outbreak's 0x005AFAD0)."""
+        from ps2decomp.calls import Parameters
+        bnez = lambda rs, words: (5 << 26) | (rs << 21) | (words & 0xFFFF)
+        keeper = BASE + 4 * len(CALLEE)                 # jr $ra; nop: $v0 as it was
+        start = keeper + 8
+        words = [
+            addiu(SP, SP, -16),
+            sd(RA, 0, SP),
+            bnez(A1, 6),                     # to the epilogue
+            NOP,
+            jal(self.callee),
+            NOP,
+            jal(keeper),
+            NOP,
+            NOP,
+            ld(RA, 0, SP),
+            JR_RA,
+            addiu(SP, SP, 16),
+        ]
+        image = struct.pack("<%dI" % (len(CALLEE) + 2 + len(words)), *(CALLEE + [JR_RA, NOP] + words))
+        parameters = Parameters({self.callee: (0, 1), keeper: ()})
+        parameters.preserves_v0 = frozenset({keeper})
+        derivation = derive_paths(image, BASE, start, start + 4 * len(words), known={},
+                                  parameters=parameters)
+        self.assertTrue(all(path.expression is None for path in derivation.paths))
+        # A caller that reads $v0 keeps the question open: refused, as before.
+        from ps2decomp.symexec import Unsupported
+        parameters.returns_int = frozenset({start})
+        with self.assertRaises(Unsupported):
+            derive_paths(image, BASE, start, start + 4 * len(words), known={}, parameters=parameters)
+
     def test_without_parameters_the_call_is_still_refused(self):
         """Opaque calls are opt-in: the old behaviour must remain available."""
         from ps2decomp.symexec import Unsupported

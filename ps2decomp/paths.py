@@ -67,9 +67,12 @@ from .symexec import (
 )
 
 # Caps that keep a pathological function from exploding the enumeration. A small
-# accessor or predicate has a handful of paths; anything past these is not the kind
-# of function this module is meant for.
-MAX_PATHS = 24
+# accessor or predicate has a handful of paths, but a game's flag handlers and
+# state updates test several independent conditions in turn - 2^n paths. At 24,
+# half of Resident Evil Outbreak's game.bin functions refused for "too many
+# paths" or the step budget derived at 128-256 (a sample: 0 of 30 at 24, 15 at
+# 128, 18 at 512, the slowest explorations then 20 s apiece).
+MAX_PATHS = 256
 
 # Loop unrolling bounds. MAX_UNROLL caps how often any one instruction may execute on
 # a single path, i.e. the largest trip count that will be unrolled. MAX_PATH_STEPS
@@ -83,7 +86,7 @@ MAX_PATH_STEPS = 2048
 # fork on every iteration for a very long time before any path completes. One such
 # function - a ring-buffer walk at 0x0020DD08, forking four ways per iteration - grew
 # roughly as 4^64 and never returned. Capping the work, not the results, bounds it.
-MAX_TOTAL_STEPS = 20_000
+MAX_TOTAL_STEPS = 150_000
 
 # Largest expression, counted as a tree, that a derivation may hold. Step counts do
 # not bound this: an unrolled loop that uses a value twice per iteration doubles the
@@ -616,6 +619,20 @@ def _constant_truth(predicate):
         return bool(predicate.evaluate((0, 0, 0, 0), None))
     except Exception:
         return None
+
+
+_SWITCH_ANALYZERS: dict = {}
+
+
+def _switch_targets(image: bytes, base: int, jr_addr: int, register: int):
+    """The case addresses of the switch ending in `jr register` at `jr_addr`, or
+    None (analysis.jump_table: its table, bounded by the index's check)."""
+    from .analysis import ImageAnalyzer           # analysis imports this module's users
+    analyzer = _SWITCH_ANALYZERS.get(base)
+    if analyzer is None or analyzer.data is not image:
+        _SWITCH_ANALYZERS.clear()
+        analyzer = _SWITCH_ANALYZERS[base] = ImageAnalyzer(image, base)
+    return analyzer.jump_table(jr_addr, register)
 
 
 def _condition_for(ins, get):
@@ -1255,13 +1272,24 @@ def derive_paths(image: bytes, base: int, start: int, end: int, *args, **kwargs)
     try:
         return _derive_paths(image, base, start, end, *args, **kwargs)
     except FloatResult:
-        return _derive_paths(image, base, start, end, *args, force_float=True, **kwargs)
+        try:
+            return _derive_paths(image, base, start, end, *args, force_float=True, **kwargs)
+        except Unsupported as exc:
+            # A float result that some paths never set is no float result: $f0
+            # was the function's scratch (a comparison), and $v0 a callee's
+            # leftover - a void function, as one whose paths never write $v0
+            # is. Resident Evil Outbreak's state handlers, reached through
+            # pointers, were refused this way: 216 of game.bin's functions.
+            if str(exc) != "reads uninitialised register $%d" % fpr(0):
+                raise
+            return _derive_paths(image, base, start, end, *args, leftover_void=True, **kwargs)
 
 
 def _derive_paths(image: bytes, base: int, start: int, end: int,
                  gp_value: int = None, known: dict = None,
                  parameters: dict = None, loops: bool = False,
-                 merge: bool = False, force_float: bool = False) -> PathDerivation:
+                 merge: bool = False, force_float: bool = False,
+                 leftover_void: bool = False) -> PathDerivation:
     """Derive a function as guarded paths, handling acyclic control flow.
 
     `known` maps an address to an already-derived `PathDerivation`. A call to one of
@@ -1526,9 +1554,44 @@ def _derive_paths(image: bytes, base: int, start: int, end: int,
                 sink.append(Path(conditions, None, tuple(stores), marks, leaf=("trap", addr)))
                 return
 
-            if m == "jr":
-                if not ins.is_return:
+            if m == "jr" and not ins.is_return:
+                # A switch: the register holds a case's address, loaded from a
+                # table the analysis can bound (analysis.jump_table). Each case
+                # is a path, on the condition that the address is that case's -
+                # so it holds whatever the index arithmetic was. A jump through
+                # anything else is still refused.
+                cases = _switch_targets(image, base, addr, ins.rs)
+                if not cases:
                     raise Unsupported("indirect jump")
+                jump = get(ins.rs)                # read before the delay slot runs
+                _step(regs, stores, frame, memory,
+                      DISASM.decode(word_at(addr + 4), addr + 4), get, epoch)
+                marks = _drain(memory, marks)
+                # An if-else ladder (paths part in twos): each case is not any
+                # case before it; the last is what is left.
+                ordered = sorted(set(cases))
+                for case in ordered:
+                    if not (start <= case < end) and not shared_code(case):
+                        raise Unsupported("control flow leaves the function")
+                ladder, ladder_marks = conditions, marks
+                for i, case in enumerate(ordered):
+                    case_memory = memory.fork()
+                    if i == len(ordered) - 1:
+                        walk(case, dict(regs), list(stores), frame.fork(), case_memory,
+                             ladder, visited, _drain(case_memory, ladder_marks),
+                             loop=loop, sink=sink, stop=stop)
+                        break
+                    predicate = Predicate("eq", jump, Const(case))
+                    walk(case, dict(regs), list(stores), frame.fork(), case_memory,
+                         ladder + (predicate,), visited,
+                         _drain(case_memory, ladder_marks + ((len(stores), "cond", predicate),)),
+                         loop=loop, sink=sink, stop=stop)
+                    negated = predicate.negate()
+                    ladder = ladder + (negated,)
+                    ladder_marks = ladder_marks + ((len(stores), "cond", negated),)
+                return
+
+            if m == "jr":
                 _step(regs, stores, frame, memory,
                       DISASM.decode(word_at(addr + 4), addr + 4), get, epoch)
                 marks = _drain(memory, marks)
@@ -1551,6 +1614,9 @@ def _derive_paths(image: bytes, base: int, start: int, end: int,
                 # about what it really returns.
                 if (isinstance(result, CallResult) and result.register == 2
                         and regs.get(fpr(0)) is not None):
+                    if leftover_void:
+                        sink.append(Path(conditions, None, tuple(stores), marks))
+                        return
                     if start not in getattr(parameters, "returns_int", ()):
                         raise FloatResult("returns a float in $f0")
                     raise Unsupported("returns a float in $f0")
@@ -1799,10 +1865,15 @@ def _derive_paths(image: bytes, base: int, start: int, end: int,
         raise Unsupported("every path traps")
     # A tail call to an underived function hands on whatever the callee left in
     # $v0. In a function whose other paths return nothing, that is no value either.
+    # And with no caller known to read $v0 (calls.int_returning), any callee's
+    # leftover is: Resident Evil Outbreak's handlers call a function on one path
+    # and return on another, and 32 of 40 sampled "inconsistent void and value"
+    # refusals returned nothing but such leftovers.
     if any(path.expression is None for path in paths):
+        unread = start not in getattr(parameters, "returns_int", ())
         for index, path in enumerate(paths):
             if isinstance(path.expression, CallResult) and path.calls and \
-                    path.expression.index == path.calls[-1].index:
+                    (unread or path.expression.index == path.calls[-1].index):
                 paths[index] = Path(path.conditions, None, path.stores, path.marks)
     returned = list(_returned_values(paths))
     void_paths = sum(1 for value in returned if value is None)

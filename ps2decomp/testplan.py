@@ -248,6 +248,8 @@ def run_cases(func, machine, arg_sets, profile, evaluate, record=None, recorded=
         # left those changes in place - which both corrupted later cases and
         # made correct derivations look wrong.
         if recorded is not None:
+            if recorded[case] is None:
+                continue                        # the original could not run it
             expected, effects = recorded[case]
         else:
             machine.memory.begin_journal()
@@ -257,10 +259,18 @@ def run_cases(func, machine, arg_sets, profile, evaluate, record=None, recorded=
                     # A function returning a float returns it in $f0.
                     expected = machine.fpr[0] & 0xFFFFFFFF
             except Exception as exc:
+                # An input the original cannot finish with - a loop that runs
+                # past the budget on this memory, a trap, a fault beyond the
+                # pages it may map - is no evidence either way: the case is left
+                # out, not the function. Its callers decide how many must run
+                # (derive: five of the eight), and a disagreement on any case
+                # that did run still fails it.
                 _failed("original", exc)
                 machine.memory.rollback()
                 machine.memory.end_journal()
-                return "failed", tested
+                if record is not None:
+                    record.append(None)
+                continue
             effects = _effects_digest(machine.memory)
             machine.memory.rollback()
             if record is not None:
