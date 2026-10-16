@@ -485,8 +485,11 @@ class ImageAnalyzer:
             candidates.append(self._scheduled_entry(addr, inside_function))
         return candidates
 
-    # How many instructions the compiler may schedule above a frame's setup.
-    MAX_SCHEDULED = 4
+    # How far back from a frame's setup the entry is looked for. The walk stops
+    # at the first branch, jump or padding anyway; four left out 0x001ADF00 of
+    # Resident Evil Outbreak, five instructions above its `addiu $sp`, called
+    # only from an overlay - whose port stopped there entering a room.
+    MAX_SCHEDULED = 16
 
     def _scheduled_entry(self, addr: int, inside_function) -> int:
         """The entry of a function whose frame is set up at `addr`.

@@ -233,6 +233,14 @@ void DmaChainsAreWalked() {
           words[8] == 0xE0u, "tags' upper halves, then each tag's data, in order");
     Check(((ch.chcr >> 28) & 7) == 7 && ((ch.chcr >> 4) & 3) == 0,
           "the TAG field and the call depth are left as at the end");
+    // The GIF takes no tags: with TTE set, only the data reaches it (Resident
+    // Evil Outbreak's PATH3 after a door, its register packet misaligned).
+    PutTag(chain, 1, 7, 0, 0, 0);                   // end, its one qword after it
+    for (u32 i = 0; i < 4; ++i) m.Write(chain + 16 + 4 * i, 0xF0 + i, 4);
+    ps2host::DmaChannelState gif{0x145u, 0, 0, chain, 0, 0};
+    std::vector<u32> gif_words;
+    ps2host::SendDma(gif, [&gif_words](u32 w) { gif_words.push_back(w); }, 1u << 16, false);
+    Check(gif_words.size() == 4 && gif_words[0] == 0xF0u, "a channel taking no tags ignores TTE");
     // A chain that never ends is stopped, not followed forever.
     PutTag(chain, 0, 2, chain, 0, 0);               // next -> itself
     ps2host::DmaChannelState loop{0x105u, 0, 0, chain, 0, 0};
@@ -1129,6 +1137,17 @@ void MmiLanesAreScalar() {
             ++checked;
             if (lo1 != lo2 || hi1 != hi2) ++wrong;
         }
+    for (u32 width : {16u, 32u, 64u})
+        for (u32 kind = 0; kind < 3; ++kind)
+            for (int trial = 0; trial < 2000; ++trial) {
+                const u64 blo = value(), bhi = value();
+                const u32 amount = u32(value());
+                u64 lo1, hi1, lo2, hi2;
+                lifted::ShiftLanes(lo1, hi1, blo, bhi, width, kind, amount);
+                lifted::ShiftLanesScalar(lo2, hi2, blo, bhi, width, kind, amount);
+                ++checked;
+                if (lo1 != lo2 || hi1 != hi2) ++wrong;
+            }
     char what[128];
     std::snprintf(what, sizeof what, "MMI lanes in SSE2 are the model's (%u of %u differ)", wrong, checked);
     Check(wrong == 0, what);

@@ -120,6 +120,38 @@ def load(directory: str) -> Game:
     return game
 
 
+def _overlay_images(directory: str):
+    """(its own image, every image in memory with it) of an overlay, as paths."""
+    with open(os.path.join(directory, "game.json"), encoding="utf-8") as handle:
+        described = json.load(handle).get("overlay") or {}
+    own = os.path.normpath(os.path.join(directory, described["image"]))
+    resident = {os.path.normpath(os.path.join(directory, entry["image"]))
+                for entry in described.get("resident", [])}
+    return own, resident | {own}
+
+
+def callers_known(game: Game) -> bool:
+    """Whether every part that can be in memory with this one is in its analysis.
+
+    An overlay's analysis holds the executable and the overlays resident with
+    it, so it sees each call into it - unless some other overlay, resident with
+    it but not in its list, can be loaded beside it as well. A game with
+    overlays never sees its overlays' calls into it.
+    """
+    if game.base is None:
+        return not game.overlays
+    _own, together = _overlay_images(game.directory)
+    own = _own
+    for relative in game.base.overlays:
+        sibling = os.path.normpath(os.path.join(game.base.directory, relative))
+        if os.path.normcase(sibling) == os.path.normcase(os.path.normpath(game.directory)):
+            continue
+        _theirs, theirs = _overlay_images(sibling)
+        if own in theirs and not theirs <= together:
+            return False
+    return True
+
+
 def configure_layout(game: Game) -> layout_module.Layout:
     """Set the engine's memory layout from the game: detected, then overridden."""
     settings = {}

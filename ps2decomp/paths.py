@@ -25,6 +25,7 @@ import struct
 from .r5900 import DISASM
 from .symexec import (
     ARG_COUNT,
+    V0_IN,
     arguments_used,
     vu_written,
     VU_KEYS,
@@ -137,6 +138,13 @@ class Call:
     # For a call through a register - a function pointer or a virtual method - the
     # expression the target address is taken from; `target` is then -1.
     pointer: Expr = None
+    # The caller's $sp at the call, where the original runs the callee; None
+    # when it is not a frame address.
+    sp: int = None
+    # The caller's $v0 at the call. A callee that leaves $v0 alone on some path
+    # returns it there; the model and the compiled check hand it over, as the
+    # original does.
+    v0: Expr = None
 
 
 @dataclasses.dataclass(eq=False)
@@ -431,13 +439,15 @@ def _run_tree(statements, args, execution):
             )
         elif kind == "call":
             call = statement[1]
-            vector = [0] * ARG_COUNT
+            vector = [0] * (ARG_COUNT + 1)
             for index, expr in call.arguments:
                 vector[index] = simplify(expr).evaluate(args, execution)
+            if call.v0 is not None:
+                vector[V0_IN] = simplify(call.v0).evaluate(args, execution)
             target = call.target
             if call.pointer is not None:
                 target = simplify(call.pointer).evaluate(args, execution) & MASK32
-            execution.call(call.index, target, vector)
+            execution.call(call.index, target, vector, call.sp)
         elif kind == "barrier":
             execution.barrier(statement[1].index)
         elif kind == "loop":
@@ -550,12 +560,16 @@ class Execution:
         self.flush()
         self.markers[index] = len(self.memory._journal)
 
-    def call(self, index, target, vector):
+    def call(self, index, target, vector, sp=None):
         self.flush()
         # Below this function's frame, which may hold an out-parameter the callee
         # writes - running the callee at the usual stack top would trample it.
+        # At the caller's own $sp, as the original does: a callee that stores a
+        # stack address (an RPC's request block, Resident Evil Outbreak's
+        # 0x00119B28) stored a different one at a fixed depth, and some 20
+        # functions calling it disagreed by two bytes.
         self.machine.call(target, vector, max_instructions=self.budget,
-                          stack_top=callee_stack_top())
+                          stack_top=callee_stack_top() if sp is None else sp)
         self.results[index] = self.machine.get(2) & MASK64
         self.float_results[index] = self.machine.fpr[0] & 0xFFFFFFFF
         self.markers[index] = len(self.memory._journal)
@@ -1257,7 +1271,25 @@ def _call_arguments(regs: dict) -> dict:
     for k, reg in enumerate(FLOAT_ARG_REGS):
         if fpr(reg) in regs:
             arguments[FLOAT_ARG_BASE + k] = regs[fpr(reg)]
+    if 2 in regs:
+        arguments[V0_IN] = regs[2]
     return arguments
+
+
+def _check_v0_known(callee, arguments) -> None:
+    """Refuse to inline a callee that reads its incoming $v0 when the caller's is
+    not known: substitution would leave it the caller's own incoming $v0."""
+    if V0_IN in arguments:
+        return
+    for path in callee.paths:
+        exprs = [path.expression] + list(path.conditions)
+        exprs += [part for store in path.stores for part in (store.address, store.value)]
+        exprs += [expr for call in path.calls for _i, expr in call.arguments]
+        exprs += [call.v0 for call in path.calls]
+        exprs += [expr for _n, kind, obj in path.marks if kind == "loop"
+                  for expr in tree_expressions([("loop", obj)])]
+        if any(expr is not None and V0_IN in arguments_used(expr) for expr in exprs):
+            raise Unsupported("passes an unknown $v0 to a callee that reads it")
 
 
 def _contains_load(expr) -> bool:
@@ -1498,6 +1530,13 @@ def _derive_paths(image: bytes, base: int, start: int, end: int,
             raise Unsupported("calls an address that is not a known function start")
         else:
             indices = parameters[target]
+            if target in getattr(parameters, "stack_readers", ()):
+                # The callee reads its arguments past the eighth from this
+                # function's frame: the frame becomes memory, as for a local's
+                # address passed.
+                if not isinstance(frame, Frame):
+                    raise Unsupported("passes stack arguments to an underived function")
+                frame.escape(stores, memory)
         arguments = []
         for index in indices:
             reg = _arg_register(index)
@@ -1516,7 +1555,13 @@ def _derive_paths(image: bytes, base: int, start: int, end: int,
                 frame.escape(stores, memory)
             arguments.append((index, regs[reg]))
         index = memory.next_epoch() if isinstance(memory, Overlay) else epoch + 1
-        call = Call(index, target, tuple(arguments), pointer)
+        stack = regs.get(29)
+        sp = (simplify(stack).value & MASK32
+              if stack is not None and _is_frame_address(stack) else None)
+        # A callee that may return the $v0 it is given is given the caller's.
+        v0 = (regs.get(2) if pointer is None
+              and target not in getattr(parameters, "sets_v0", ()) else None)
+        call = Call(index, target, tuple(arguments), pointer, sp, v0)
         before_v0 = regs.get(2)
         kept = _preserved_across(regs, None if pointer is not None else target, parameters,
                                  own_parameters)
@@ -1893,6 +1938,7 @@ def _derive_paths(image: bytes, base: int, start: int, end: int,
                 if callee.returns_float != returns_float and not callee.is_void:
                     raise Unsupported("tail-calls a function returning the other kind")
                 arguments = _call_arguments(regs)
+                _check_v0_known(callee, arguments)
                 epoch, marks = _settle_for_callee(callee, arguments, memory, stores, marks,
                                                   frame)
 
@@ -1953,6 +1999,7 @@ def _derive_paths(image: bytes, base: int, start: int, end: int,
                       DISASM.decode(word_at(addr + 4), addr + 4), get, epoch)
                 marks = _drain(memory, marks)
                 arguments = _call_arguments(regs)
+                _check_v0_known(callee, arguments)
                 epoch, marks = _settle_for_callee(callee, arguments, memory, stores, marks,
                                                   frame)
 
@@ -2026,6 +2073,7 @@ def _derive_paths(image: bytes, base: int, start: int, end: int,
         regs[reg] = Arg(i)
     for k, reg in enumerate(FLOAT_ARG_REGS):
         regs[fpr(reg)] = Arg(FLOAT_ARG_BASE + k)
+    regs[2] = Arg(V0_IN)
     seeds = frozenset(id(regs[index]) for index in
                       list(range(16, 24)) + [30, 31] + [fpr(i) for i in range(20, 32)])
     walk(start, regs, [], Frame(seeds=seeds), Overlay(counter=epochs), (), {})
@@ -2041,6 +2089,13 @@ def _derive_paths(image: bytes, base: int, start: int, end: int,
     # and return on another, and 32 of 40 sampled "inconsistent void and value"
     # refusals returned nothing but such leftovers. Known only from the calls
     # the scan sees: a function whose address is taken has callers it cannot.
+    # A path that leaves $v0 as it came is void, as one that never wrote it -
+    # unless other paths return a value: then the function returns one, and
+    # those paths the caller's (V0_IN). Kept as found for that case.
+    found = list(paths)
+    for index, path in enumerate(paths):
+        if path.leaf is None and path.expression == Arg(V0_IN):
+            paths[index] = dataclasses.replace(path, expression=None)
     if any(path.expression is None for path in paths):
         unread = (start not in getattr(parameters, "returns_int", ())
                   and start not in getattr(parameters, "address_taken", ()))
@@ -2051,10 +2106,13 @@ def _derive_paths(image: bytes, base: int, start: int, end: int,
     returned = list(_returned_values(paths))
     void_paths = sum(1 for value in returned if value is None)
     if void_paths and void_paths != len(returned):
-        # Some paths produce a value and others do not. That is either a function
-        # whose result is only meaningful on some routes, or a misread; either way
-        # the signature is ambiguous, so refuse rather than choose.
-        raise Unsupported("inconsistent void and value-returning paths")
+        # Some paths produce a value and others do not. With the incoming $v0
+        # the ones leaving it are values too; a path with no value at all (a
+        # float leftover, a void callee's) is ambiguous still, so refuse rather
+        # than choose.
+        if any(value is None for value in _returned_values(found)):
+            raise Unsupported("inconsistent void and value-returning paths")
+        paths = found
     derivation = PathDerivation(start, tuple(paths), returns_float)
     if not derivation.sequential and _touches_frame_memory(derivation):
         # The frame is symbolic unless it escaped, and escaping always makes the

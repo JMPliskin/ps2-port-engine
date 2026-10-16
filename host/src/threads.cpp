@@ -289,10 +289,22 @@ u64 g_real_time_from = 0;               // SetRealTimeFrom
 // main loop ran five times a frame, its clocks with it.
 std::atomic<u32> g_intc_stat{0};
 
+void SleepUntil(std::chrono::steady_clock::time_point when);
+bool g_paced = false;                   // SetPaced
+
 // One frame's interrupts, delivered to the handlers registered for them.
 bool DeliverFrame() {
     Scheduler& s = S();
     ++s.frames;
+    if (g_paced && s.virtual_time) {
+        // No sooner than the display's next blank (NTSC's 59.94 a second): the
+        // run stays exact, only slowed to where it can be played.
+        static auto next = std::chrono::steady_clock::now();
+        next += std::chrono::nanoseconds(16683350);
+        const auto now = std::chrono::steady_clock::now();
+        if (next < now - std::chrono::milliseconds(100)) next = now;   // fell behind: no catching up
+        SleepUntil(next);
+    }
     g_intc_stat.fetch_or((1u << kVblankStart) | (1u << kVblankEnd), std::memory_order_relaxed);
     if (s.virtual_time && g_real_time_from && s.frames >= g_real_time_from) StartRealTime();
     {
@@ -318,6 +330,7 @@ void DeliverPendingDmac() {
 }
 
 void SpendBudget(lifted::Context& c) {
+    *static_cast<volatile u32*>(&c.attention) = 1;   // read at its next loop head (lifted::Tick)
     reinterpret_cast<std::atomic<s64>*>(&c.budget)->store(0);
 }
 
@@ -363,7 +376,12 @@ bool TakeVblank(Scheduler& s) {
     if (g_hitch_blanks) {
         const u64 due = g_blank_due_ns.load(std::memory_order_relaxed), now = ClockNs();
         if (due && now > due + 4'000'000) {
-            SampleOnly(due + 500'000, now);
+            // The sampler's times are the steady clock's, which the host's
+            // clock is not after --real-time-from (it carries on from the
+            // virtual one): the same span, ending now on the steady clock.
+            const u64 steady = u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                       std::chrono::steady_clock::now().time_since_epoch()).count());
+            SampleOnly(steady - (now - due) + 500'000, steady);
             std::fprintf(stderr, "[hitch] a blank taken %.1f ms late\n", (now - due) / 1e6);
         }
         g_blank_due_ns.store(0, std::memory_order_relaxed);
@@ -511,6 +529,7 @@ constexpr s64 kIdleSliceIterations = 256;
 // deliver interrupts, or the end of the run.
 void LoopHead(lifted::Context& c, u32 address) {
     Scheduler& s = S();
+    c.attention = 0;                    // taken: what asked for it is looked at below
     if (StopRequested() || s.in_interrupt || !s.current || &c != &s.current->context)
         throw lifted::Abort{address, 2};
     const bool idle = s.virtual_time && IdleLoops().count(address) != 0;
@@ -1186,6 +1205,7 @@ u64 LostVblanks() { return g_lost_vblanks.load(std::memory_order_relaxed); }
 u64 IdleNanoseconds() { return g_idle_ns.load(std::memory_order_relaxed); }
 void SetVif1Worker(bool on) { g_vif1_worker_wanted = on; }
 void SetRealTimeFrom(u64 frame) { g_real_time_from = frame; }
+void SetPaced(bool on) { g_paced = on; }
 
 void SetFastUntil(u64 frame, unsigned factor) {
     g_fast_until = frame;

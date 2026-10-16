@@ -154,16 +154,19 @@ class TestOpaqueCalls(unittest.TestCase):
         derivation = derive_paths(image, BASE, start, start + 4 * len(words), known={},
                                   parameters=parameters)
         self.assertTrue(all(path.expression is None for path in derivation.paths))
-        # A caller that reads $v0 keeps the question open: refused, as before.
-        from ps2decomp.symexec import Unsupported
+        # A caller that reads $v0 reads a value: the first callee's on one path,
+        # its own $v0 back on the other (V0_IN).
+        from ps2decomp.symexec import Arg, CallResult, V0_IN
         parameters.returns_int = frozenset({start})
-        with self.assertRaises(Unsupported):
-            derive_paths(image, BASE, start, start + 4 * len(words), known={}, parameters=parameters)
+        returned = [path.expression for path in derive_paths(
+            image, BASE, start, start + 4 * len(words), known={}, parameters=parameters).paths]
+        self.assertIn(Arg(V0_IN), returned)
+        self.assertTrue(any(isinstance(value, CallResult) for value in returned))
         # So does one reached through a pointer, whose callers no scan sees.
         parameters.returns_int = frozenset()
         parameters.address_taken = frozenset({start})
-        with self.assertRaises(Unsupported):
-            derive_paths(image, BASE, start, start + 4 * len(words), known={}, parameters=parameters)
+        self.assertFalse(derive_paths(image, BASE, start, start + 4 * len(words), known={},
+                                      parameters=parameters).is_void)
 
     def test_without_parameters_the_call_is_still_refused(self):
         """Opaque calls are opt-in: the old behaviour must remain available."""
@@ -205,7 +208,11 @@ class TestOpaqueCalls(unittest.TestCase):
 
     def test_emitted_statements_call_in_order(self):
         import derive
+        from ps2decomp.calls import Parameters
 
+        # The callee sets $v0 on its one path, so the call hands over none.
+        self.parameters = Parameters(self.parameters)
+        self.parameters.sets_v0 = frozenset({self.callee})
         derive._SIGNATURES.clear()
         derive._EXTERNS.clear()
         lines = derive.render_body(self.derive())
@@ -243,7 +250,9 @@ class TestOpaqueCalls(unittest.TestCase):
                                   parameters=self.parameters)
         derive._SIGNATURES.clear()
         derive._EXTERNS.clear()
-        lines = derive.render_body(derivation)
+        # The frame the call is made from is entered first (callees run at its $sp).
+        lines = [line for line in derive.render_body(derivation)
+                 if not line.startswith("const u64 sp = StackEnter")]
         call_line = next(i for i, line in enumerate(lines) if "func_" in line)
         self.assertTrue(lines[0].startswith("const u64 t1 = ReadS32(arg0)"), lines)
         self.assertLess(0, call_line)
@@ -509,6 +518,224 @@ class TestRegisterKeptAcrossACall(unittest.TestCase):
         self.assertIn(10, kept[g_at])                         # $t2: nobody writes it
 
 
+class TestIncomingV0(unittest.TestCase):
+    """f(p): if (p == 0) return; return 5;  - $v0 left as the caller had it.
+
+    A state handler in a table does this (Resident Evil Outbreak's game.bin:
+    395 refused as "inconsistent void and value-returning paths"). Its result
+    is the caller's own $v0 on one path, which a caller through the table may
+    read, so it is derived as returning a value: V0_IN there.
+    """
+
+    def setUp(self):
+        def beq(rs, rt, here, target):
+            return i_type(0x04, rs, rt, (target - (here + 4)) // 4)
+
+        self.words = [beq(A0, 0, BASE, BASE + 12), NOP, addiu(V0, 0, 5), JR_RA, NOP]
+        self.image = struct.pack("<%dI" % len(self.words), *self.words)
+
+    def test_it_returns_the_incoming_v0_on_the_path_leaving_it(self):
+        import derive
+        from ps2decomp.symexec import V0_IN
+
+        derivation = derive_paths(self.image, BASE, BASE, BASE + 4 * len(self.words),
+                                  known={})
+        self.assertFalse(derivation.is_void)
+        self.assertIn(V0_IN, derive.derivation_args(derivation))
+        func = {"addr": BASE, "end": BASE + 20, "size": 20}
+        self.assertIn("u64 v0_in", derive._signature(func, derivation, None)[1])
+        machine = Machine(BASE, self.image, 0x02000000 - BASE)
+        for a0, v0 in ((0, 77), (0, 0x01800010), (1, 77)):
+            args = (a0,) + (0,) * 15 + (v0,)
+            expected = machine.call(BASE, args)
+            self.assertEqual(expected, v0 if a0 == 0 else 5)
+            machine.memory.begin_journal()
+            self.assertEqual(derivation.run(args, Execution(machine)), expected)
+            machine.memory.rollback()
+            machine.memory.end_journal()
+
+    def test_a_function_that_never_sets_v0_is_still_void(self):
+        image = struct.pack("<2I", JR_RA, NOP)
+        self.assertTrue(derive_paths(image, BASE, BASE, BASE + 8, known={}).is_void)
+
+
+class TestCalleeLeavingV0(unittest.TestCase):
+    """g(p): if (p != 0) $v0 = 3;   f(p): $v0 = 7; return g(p);
+
+    g returns f's 7 when p is 0. The model ran g with $v0 0 and disagreed;
+    every call now hands the callee the caller's $v0, in the model, in the
+    compiled check, and in the emitted call where its result is used.
+    """
+
+    def setUp(self):
+        def beq(rs, rt, here, target):
+            return i_type(0x04, rs, rt, (target - (here + 4)) // 4)
+
+        g = [beq(A0, 0, BASE, BASE + 12), NOP, addiu(V0, 0, 3), JR_RA, NOP]
+        self.f = BASE + 4 * len(g)
+        f = [addiu(SP, SP, -32), sd(RA, 16, SP), addiu(V0, 0, 7), jal(BASE), NOP,
+             ld(RA, 16, SP), JR_RA, addiu(SP, SP, 32)]
+        self.end = self.f + 4 * len(f)
+        self.image = struct.pack("<%dI" % (len(g) + len(f)), *(g + f))
+        self.database = {"functions": [
+            {"addr": BASE, "end": self.f, "size": self.f - BASE},
+            {"addr": self.f, "end": self.end, "size": self.end - self.f}]}
+
+    def derive(self):
+        from ps2decomp.calls import parameters
+
+        return derive_paths(self.image, BASE, self.f, self.end, known={},
+                            parameters=parameters(self.database, self.image, BASE))
+
+    def test_the_model_hands_the_callee_the_callers_v0(self):
+        derivation = self.derive()
+        machine = Machine(BASE, self.image, 0x02000000 - BASE)
+        for a0 in (0, 1):
+            expected = machine.call(self.f, (a0,))
+            self.assertEqual(expected, 7 if a0 == 0 else 3)
+            machine.memory.begin_journal()
+            self.assertEqual(derivation.run((a0,) + (0,) * 15, Execution(machine)), expected)
+            machine.memory.rollback()
+            machine.memory.end_journal()
+
+    def test_the_emitted_call_passes_it(self):
+        import derive
+
+        derive._SIGNATURES.clear()
+        derive._EXTERNS.clear()
+        derive._V0_EXTERNS.clear()
+        text = chr(10).join(derive.render_body(self.derive()))
+        self.assertIn("func_%08X(arg0, 7)" % BASE, text)
+        self.assertIn(BASE, derive._V0_EXTERNS)
+
+
+class TestV0Setting(unittest.TestCase):
+    """Which functions write $v0 on every path, so that a call to one need not
+    hand over the caller's (calls.v0_setting)."""
+
+    def setting(self, words, functions=None):
+        from ps2decomp.calls import v0_setting
+
+        image = struct.pack("<%dI" % len(words), *words)
+        end = BASE + 4 * len(words)
+        functions = functions or [(BASE, end)]
+        return v0_setting({"functions": [{"addr": a, "end": b, "size": b - a}
+                                         for a, b in functions]}, image, BASE)
+
+    def beq(self, rs, rt, here, target):
+        return i_type(0x04, rs, rt, (target - (here + 4)) // 4)
+
+    def test_a_write_on_every_path(self):
+        self.assertIn(BASE, self.setting(CALLEE))
+
+    def test_a_path_without_one(self):
+        words = [self.beq(A0, 0, BASE, BASE + 12), NOP, addiu(V0, 0, 3), JR_RA, NOP]
+        self.assertNotIn(BASE, self.setting(words))
+
+    def test_the_return_delay_slot_counts(self):
+        self.assertIn(BASE, self.setting([JR_RA, addiu(V0, 0, 1)]))
+
+    def test_a_branch_likely_skips_its_slot_when_not_taken(self):
+        beql = lambda rs, rt, here, target: i_type(0x14, rs, rt, (target - (here + 4)) // 4)
+        # beql $a0, $zero, ret; addiu $v0, 1 (taken only); ...; ret: jr $ra; nop
+        words = [beql(A0, 0, BASE, BASE + 12), addiu(V0, 0, 1), NOP, JR_RA, NOP]
+        self.assertNotIn(BASE, self.setting(words))
+
+    def test_a_call_to_a_setter_sets_it(self):
+        g = [JR_RA, addiu(V0, 0, 1)]
+        f_at = BASE + 8
+        f = [addiu(SP, SP, -16), sd(RA, 0, SP), jal(BASE), NOP, ld(RA, 0, SP), JR_RA,
+             addiu(SP, SP, 16)]
+        end = f_at + 4 * len(f)
+        found = self.setting(g + f, [(BASE, f_at), (f_at, end)])
+        self.assertEqual(found, {BASE, f_at})
+
+    def test_a_call_to_anything_else_does_not(self):
+        g = [JR_RA, NOP]
+        f_at = BASE + 8
+        f = [addiu(SP, SP, -16), sd(RA, 0, SP), jal(BASE), NOP, ld(RA, 0, SP), JR_RA,
+             addiu(SP, SP, 16)]
+        end = f_at + 4 * len(f)
+        self.assertEqual(self.setting(g + f, [(BASE, f_at), (f_at, end)]), frozenset())
+
+    def test_a_conditional_move_is_not_a_write(self):
+        movz = r_type(A0, A1, V0, 0x0A)
+        self.assertNotIn(BASE, self.setting([movz, JR_RA, NOP]))
+
+
+class TestCalleeStackPointer(unittest.TestCase):
+    """A callee runs at its caller's $sp: g() { *G = $sp; }, f() { frame; g(); }.
+
+    The model ran callees at a fixed depth, and one that stored a stack address
+    (an RPC's request block) disagreed with the original (Resident Evil
+    Outbreak's 0x00119B28 and some 20 callers).
+    """
+
+    G = 0x01800000
+
+    def test_the_callee_sees_the_original_stack_pointer(self):
+        from ps2decomp.calls import parameters
+
+        lui_v0 = i_type(0x0F, 0, V0, self.G >> 16)
+        g = [lui_v0, JR_RA, sw(SP, 0, V0)]
+        f_at = BASE + 4 * len(g)
+        f = [addiu(SP, SP, -48), sd(RA, 32, SP), jal(BASE), NOP, ld(RA, 32, SP), JR_RA,
+             addiu(SP, SP, 48)]
+        end = f_at + 4 * len(f)
+        image = struct.pack("<%dI" % (len(g) + len(f)), *(g + f))
+        database = {"functions": [{"addr": BASE, "end": f_at, "size": f_at - BASE},
+                                  {"addr": f_at, "end": end, "size": end - f_at}]}
+        derivation = derive_paths(image, BASE, f_at, end, known={},
+                                  parameters=parameters(database, image, BASE))
+        machine = Machine(BASE, image, 0x02000000 - BASE)
+        machine.call(f_at, ())
+        expected = machine.memory.read_int(self.G, 4, False)
+        machine.memory.write_int(self.G, 0, 4)
+        machine.memory.begin_journal()
+        derivation.run((0,) * 16, Execution(machine))
+        self.assertEqual(machine.memory.read_int(self.G, 4, False), expected)
+        machine.memory.rollback()
+        machine.memory.end_journal()
+
+
+class TestStackArguments(unittest.TestCase):
+    """h() returns 0($sp), its ninth argument; f() { 0($sp) = 7; return h(); }.
+
+    The caller's frame was symbolic, so h read nothing there (Resident Evil
+    Outbreak's 0x00135078 and 0x00127FC8).
+    """
+
+    def setUp(self):
+        h = [lw(V0, 0, SP), JR_RA, NOP]
+        self.f = BASE + 4 * len(h)
+        f = [addiu(SP, SP, -32), sd(RA, 16, SP), addiu(V1, 0, 7), sw(V1, 0, SP),
+             jal(BASE), NOP, ld(RA, 16, SP), JR_RA, addiu(SP, SP, 32)]
+        self.end = self.f + 4 * len(f)
+        self.image = struct.pack("<%dI" % (len(h) + len(f)), *(h + f))
+        self.database = {"functions": [
+            {"addr": BASE, "end": self.f, "size": self.f - BASE},
+            {"addr": self.f, "end": self.end, "size": self.end - self.f}]}
+
+    def test_a_callee_reading_above_its_frame_is_found(self):
+        from ps2decomp.calls import stack_readers
+
+        readers = stack_readers(self.database, self.image, BASE)
+        self.assertIn(BASE, readers)
+        self.assertNotIn(self.f, readers)
+
+    def test_the_caller_agrees_with_the_original(self):
+        from ps2decomp.calls import parameters
+
+        derivation = derive_paths(self.image, BASE, self.f, self.end, known={},
+                                  parameters=parameters(self.database, self.image, BASE))
+        machine = Machine(BASE, self.image, 0x02000000 - BASE)
+        self.assertEqual(machine.call(self.f, ()), 7)
+        machine.memory.begin_journal()
+        self.assertEqual(derivation.run((0,) * 16, Execution(machine)), 7)
+        machine.memory.rollback()
+        machine.memory.end_journal()
+
+
 class TestKernelStubs(unittest.TestCase):
     def test_a_syscall_stub_reads_the_integer_arguments(self):
         from ps2decomp.calls import live_parameters
@@ -734,6 +961,56 @@ class TestLoopWithACall(unittest.TestCase):
             machine.memory.rollback()
             machine.memory.end_journal()
 
+
+
+class TestValueReadInALoopUsedAfterIt(unittest.TestCase):
+    """f(p): for (;;) { x = *p; *p = x + 1; if (x < 0) return x; p++; }
+
+    The value returned was read before the store over it. Emitted as a read
+    after the loop, it returned x + 1 (Resident Evil Outbreak's 0x00107ED0).
+    """
+
+    T0, T1 = 8, 9
+
+    def setUp(self):
+        def branch(op, rs, rt, here, target):
+            return i_type(op, rs, rt, (target - (here + 4)) // 4)
+
+        self.words = [
+            lw(self.T0, 0, A0),                                # 0
+            addiu(self.T1, self.T0, 1),                        # 4
+            sw(self.T1, 0, A0),                                # 8
+            branch(0x01, self.T0, 0, BASE + 12, BASE + 28),    # 12: bltz $t0
+            NOP,                                               # 16
+            branch(0x04, 0, 0, BASE + 20, BASE + 0),           # 20
+            addiu(A0, A0, 4),                                  # 24 (delay slot)
+            JR_RA,                                             # 28
+            move(V0, self.T0),                                 # 32
+        ]
+        self.image = struct.pack("<%dI" % len(self.words), *self.words)
+
+    def test_the_exit_keeps_the_value_it_read(self):
+        import derive
+
+        derivation = derive_paths(self.image, BASE, BASE, BASE + 4 * len(self.words),
+                                  known={}, loops=True)
+        derive._SIGNATURES.clear()
+        derive._EXTERNS.clear()
+        text = chr(10).join(derive.render_body(derivation))
+        returned = [line for line in text.splitlines() if "return" in line]
+        self.assertTrue(returned and all("Read" not in line for line in returned), text)
+        machine = Machine(BASE, self.image, 0x02000000 - BASE)
+        for values in ((-5,), (3, 0, -2), (1, 1, 1, -1)):
+            for index, value in enumerate(values):
+                machine.memory.write_int(0x01800000 + 4 * index, value & 0xFFFFFFFF, 4)
+            machine.memory.begin_journal()
+            expected = machine.call(BASE, (0x01800000,))
+            machine.memory.rollback()
+            actual = derivation.run((0x01800000,) + (0,) * 15, Execution(machine))
+            machine.memory.rollback()
+            machine.memory.end_journal()
+            self.assertEqual(actual, expected)
+            self.assertEqual(actual, values[-1])
 
 
 class TestLoopOverALocal(unittest.TestCase):

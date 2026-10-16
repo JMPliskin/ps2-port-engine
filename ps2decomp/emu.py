@@ -377,11 +377,12 @@ class Machine:
         """Run the function at `addr` and return its $v0 as a signed 32-bit value.
 
         `args` follows the register calling convention: entries 0..7 go to $a0..$a3
-        and $t0..$t3, entries 8..15 are float bit patterns for $f12..$f19. More than
-        that is rejected rather than silently mishandled, since stack arguments need
-        the caller's frame layout.
+        and $t0..$t3, entries 8..15 are float bit patterns for $f12..$f19, and an
+        entry 16 is $v0 on entry (symexec.V0_IN). More than that is rejected rather
+        than silently mishandled, since stack arguments need the caller's frame
+        layout.
         """
-        if len(args) > 16:
+        if len(args) > 17:
             raise EmulationError("only register arguments are supported")
         # Every call starts from the same register state. Registers used to keep
         # whatever the previous run left, so a callee reading one the analysis did
@@ -400,8 +401,10 @@ class Machine:
         for i, value in enumerate(args):
             if i < 8:
                 self.set((4, 5, 6, 7, 8, 9, 10, 11)[i], value & MASK64)
-            else:
+            elif i < 16:
                 self.fpr[12 + i - 8] = value & 0xFFFFFFFF
+            else:
+                self.set(2, value & MASK64)
         self.set(28, layout.CURRENT.gp)   # $gp
         self.set(29, layout.CURRENT.stack_top if stack_top is None else stack_top)
         self.set(31, RETURN_SENTINEL)     # $ra

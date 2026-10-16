@@ -273,7 +273,9 @@ std::string Walk(const Channel& ch, u32 chcr, bool describe) {
     char text[160] = "";
     try {
         Timed timed(Section::Dma);      // (VU1 and the GS, which it drives, timed apart)
-        const DmaOutcome outcome = SendDmaBlocks(state, sink);
+        // The GIF takes no chain tags (TTE): dma.h.
+        const bool tags = ch.base != 0x1000A000u;
+        const DmaOutcome outcome = SendDmaBlocks(state, sink, 1u << 16, tags);
         if (describe)
             std::snprintf(text, sizeof text, "%llu quadwords, %u tags%s",
                       static_cast<unsigned long long>(outcome.quadwords), outcome.tags,

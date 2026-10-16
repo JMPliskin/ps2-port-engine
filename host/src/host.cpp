@@ -13,10 +13,13 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <mutex>
 #include <set>
+#include <string>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 
 #include "ps2host/disc.h"
 #include "ps2host/gs.h"
@@ -173,6 +176,9 @@ std::size_t g_overlay_count = 0;
 
 // The function of the overlay whose code is in memory at `address`, if the
 // address is in an overlay and one is: its first bytes there are the original's.
+// OverrideInOverlay's: (overlay name, address) -> the host's function.
+std::map<std::pair<std::string, u32>, FunctionEntry> g_overlay_overrides;
+
 const FunctionEntry* FindInOverlay(u32 address, bool* in_overlay) {
     for (std::size_t i = 0; i < g_overlay_count; ++i) {
         const OverlayEntry& o = g_overlays[i];
@@ -185,7 +191,13 @@ const FunctionEntry* FindInOverlay(u32 address, bool* in_overlay) {
         const u32* check = o.checks + 4 * (at - o.table);
         const u32 length = at->size && at->size < 16 ? at->size : 16;
         const u8* here = GuestMemory().Translate(address, length);
-        if (here && std::memcmp(here, check, length) == 0) return at;
+        if (here && std::memcmp(here, check, length) == 0) {
+            if (!g_overlay_overrides.empty()) {
+                const auto mine = g_overlay_overrides.find({o.name, address});
+                if (mine != g_overlay_overrides.end()) return &mine->second;
+            }
+            return at;
+        }
     }
     return nullptr;
 }
@@ -304,12 +316,27 @@ void Override(u32 address, GuestFunction function, const char* name) {
     for (CachedCall& line : g_call_cache) line = CachedCall{};
 }
 
+void OverrideInOverlay(const char* overlay, u32 address, GuestFunction function, const char* name) {
+    g_overlay_overrides[{overlay, address}] = FunctionEntry{address, function, name, 0};
+    for (CachedCall& line : g_call_cache) line = CachedCall{};
+}
+
 const char* FunctionName(u32 address) {
     const FunctionEntry* entry = Find(address);
     return entry ? entry->name : nullptr;
 }
 
 bool Tracing() { return g_trace; }
+
+bool NotingAll() { return g_all_notes; }
+
+namespace {
+bool g_fast_disc = false, g_fast_loading_default = false;
+}  // namespace
+
+bool FastDisc() { return g_fast_disc; }
+void SetFastDisc(bool on) { g_fast_disc = on; }
+void SetFastLoadingDefault(bool on) { g_fast_loading_default = on; }
 
 Stats& RunStats() {
     static Stats stats;
@@ -491,7 +518,10 @@ void Report(const Options& options, const std::string& outcome) {
     if (!samples.empty()) std::printf("%s", samples.c_str());
     if (!GpuShadowSummary().empty()) std::printf("%s\n", GpuShadowSummary().c_str());
     std::printf("kernel services used:\n");
-    for (const auto& [service, count] : stats.syscalls)
+    std::map<s32, u64> services = stats.syscalls;
+    for (s32 i = 0; i < 0x200; ++i)
+        if (stats.syscall_counts[i]) services[i - 0x100] += stats.syscall_counts[i];
+    for (const auto& [service, count] : services)
         std::printf("  %4d  %-24s x%llu\n", service, SyscallName(service),
                     (unsigned long long)count);
     auto registers = [&](const char* title, const std::map<u32, u64>& seen) {
@@ -512,8 +542,8 @@ void Report(const Options& options, const std::string& outcome) {
         for (std::size_t i = 0; i < hot.size() && i < std::size_t(options.report_limit); ++i)
             std::printf("  %-40s x%llu\n", Describe(hot[i].second).c_str(), (unsigned long long)hot[i].first);
     }
-    registers("device registers read", stats.register_reads);
-    registers("device registers written", stats.register_writes);
+    registers("device registers read", GuestMemory().RegisterCounts(false));
+    registers("device registers written", GuestMemory().RegisterCounts(true));
     for (const auto& [run, source] : stats.discovered)
         std::printf("discovered: code at %s is a copy of %s\n", Hex(run).c_str(), Hex(source).c_str());
     if (!options.discover_path.empty()) {
@@ -617,6 +647,8 @@ int Run(const Options& options) {
         }
         LoadSettings((where / "pc_settings.ini").string());
     }
+    g_fast_disc = options.fast_disc || (!options.virtual_time && SettingOn("fast_loading", g_fast_loading_default));
+    if (g_fast_disc) std::fprintf(stderr, "[host] disc reads fast (no drive time)\n");
     if (options.window) OpenWindow(L"PS2 port", 1280, 896);      // or the game's title (SetGameTitle)
     iop::SetTrace(options.iop_trace);
     gs::TheGs().trace = options.gs_trace;
@@ -653,6 +685,11 @@ int Run(const Options& options) {
     for (const auto& press : options.presses)
         if (!ScriptPress(press.button, press.from, press.to, press.pressure))
             std::fprintf(stderr, "--press: no button %s\n", press.button.c_str());
+    if (!options.record_input.empty() && !RecordInput(options.record_input))
+        std::fprintf(stderr, "--record-input: cannot write %s\n", options.record_input.c_str());
+    if (!options.replay_input.empty() && !ReplayInput(options.replay_input))
+        std::fprintf(stderr, "--replay-input: nothing to read in %s\n", options.replay_input.c_str());
+    SetPaced(options.paced);
     if (!options.frames_dir.empty())
         SetFrameDumps(options.frames_dir, options.frames_every, 200, u64(options.frames_from));
     g_watch = options.watch;
@@ -728,6 +765,7 @@ int Main(int argc, char** argv) {
         else if (arg == "--sample-gs") options.sample = options.sample_gs = true;
         else if (arg == "--sample-vif1") options.sample = options.sample_vif1 = true;
         else if (arg == "--vif1-sync") options.vif1_sync = true;
+        else if (arg == "--fast-disc") options.fast_disc = true;
         else if (arg == "--check-guesses") options.check_guesses = true;
         else if (arg == "--vu-snapshot" && i + 3 < argc) {
             options.vu_snapshot = argv[++i];
@@ -766,6 +804,9 @@ int Main(int argc, char** argv) {
                 options.presses.push_back({spec.substr(0, at), from, to, pressure});
             }
         }
+        else if (arg == "--record-input" && i + 1 < argc) options.record_input = argv[++i];
+        else if (arg == "--replay-input" && i + 1 < argc) options.replay_input = argv[++i];
+        else if (arg == "--paced") options.paced = true;
         else if (arg == "--real-time-from" && i + 1 < argc) {
             options.real_time_from = std::stoull(argv[++i]);
             SetRealTimeFrom(options.real_time_from);

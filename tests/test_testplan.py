@@ -15,6 +15,7 @@ sys.path[:0] = [ROOT, os.path.join(ROOT, "tools")]
 
 from ps2decomp.emu import Machine  # noqa: E402
 from ps2decomp import testplan  # noqa: E402
+import derive  # noqa: E402
 
 BASE = 0x00100000
 ZERO, V0, A0, T0, RA = 0, 2, 4, 8, 31
@@ -92,6 +93,42 @@ class TestCountPlan(unittest.TestCase):
     def test_the_plan_is_the_same_every_time(self):
         self.assertEqual(testplan.test_plan(self.func, self.machine)[0],
                          testplan.test_plan(self.func, self.machine)[0])
+
+
+class TestFullerProfile(unittest.TestCase):
+    """while (p) p = *p: on random links a cycle, for ever; on zeroed memory
+    one step."""
+
+    def setUp(self):
+        words = [
+            i_type(0x23, A0, A0, 0),         # 0: lw $a0, 0($a0)
+            i_type(0x05, A0, ZERO, -2),      # 4: bne $a0, $zero, back to 0
+            0,
+            (RA << 21) | 0x08,               # jr $ra
+            0,
+        ]
+        self.machine = Machine(BASE, struct.pack("<%dI" % len(words), *words),
+                               0x02000000 - BASE)
+        self.func = {"addr": BASE, "end": BASE + 4 * len(words), "size": 4 * len(words)}
+        from ps2decomp import layout, testmem
+        import random
+        rng = random.Random(1)
+        self.arg_sets = [(layout.CURRENT.scratch + 64 * i,) + testmem.arguments(rng)[1:]
+                         for i in range(testplan.ARG_SETS)]
+
+    def test_a_profile_completing_every_case_is_found(self):
+        from ps2decomp import layout, testmem
+        profile = derive.fuller_profile(self.func, self.machine, self.arg_sets, 0)
+        self.assertIsNotNone(profile)
+        for case, args in enumerate(self.arg_sets):
+            self.machine.memory.end_journal()
+            self.machine.memory.write(layout.CURRENT.scratch,
+                                      testmem.build(profile, BASE + case))
+            self.machine.call(BASE, args, max_instructions=testplan.VERIFY_BUDGET)
+
+    def test_none_when_no_profile_does_better(self):
+        self.assertIsNone(derive.fuller_profile(self.func, self.machine, self.arg_sets,
+                                                  testplan.ARG_SETS))
 
 
 if __name__ == "__main__":

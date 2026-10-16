@@ -134,6 +134,14 @@ class TestScheduledEntry(unittest.TestCase):
         self.assertIn(BASE + 12, self.run_on(words))
         self.assertNotIn(BASE + 16, self.run_on(words))
 
+    def test_five_scheduled_instructions(self):
+        # 0x001ADF00: sll, lui, addu, sll, sll, then the frame setup.
+        SLL_V0 = (2 << 11) | (4 << 16) | (1 << 6)
+        words = [JR_RA, NOP] + [SLL_V0] * 4 + [self.LUI_V0, self.ADDIU_SP, self.LW_V1_V0,
+                                               JR_RA, self.ADDIU_SP_BACK]
+        self.assertIn(BASE + 8, self.run_on(words))
+        self.assertNotIn(BASE + 28, self.run_on(words))
+
     def test_a_branch_before_the_setup_is_not_taken_in(self):
         words = [JR_RA, NOP, B_FORWARD, self.ADDIU_SP, self.LW_V1_V0, JR_RA,
                  self.ADDIU_SP_BACK]

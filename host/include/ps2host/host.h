@@ -64,6 +64,11 @@ void CodeChanged();
    Overrides take precedence over translated functions; registering twice
    replaces the earlier one. */
 void Override(u32 address, GuestFunction function, const char* name);
+/* As Override, for the function at `address` of the overlay named `overlay`
+   (its OverlayEntry's name) alone: overlays loaded at the same address have
+   different code there, and while another one is in, its own translation
+   runs. The original stays callable as overlay_<name>::F_<ADDRESS>(c). */
+void OverrideInOverlay(const char* overlay, u32 address, GuestFunction function, const char* name);
 /* A loop the game waits in until an interrupt ends it (a port's, from what
    it found the time going to): under --virtual-time, when its slice runs out
    the clock goes straight to the next event - vertical blank, timer, alarm -
@@ -127,6 +132,7 @@ struct Options {
     std::string vu_bench;          /* --vu-bench FILE: those runs, timed (and nothing else) */
     bool check_guesses = false;    /* --check-guesses: GIF_STAT guesses checked (virtual time) */
     bool vif1_sync = false;        /* --vif1-sync: VIF1 on the EE's thread in real time too */
+    bool fast_disc = false;        /* --fast-disc: disc reads without the drive's time (FastDisc) */
     std::string vu_record;         /* --vu-record: the microprograms run, for vurecomp.py */
     bool vu_interpret = false;     /* --vu-interpret: no compiled microprograms */
     bool vu_fast = false;          /* --vu-fast: VU1 programs without MAC/STATUS readers skip those flags */
@@ -145,6 +151,9 @@ struct Options {
     struct Press { std::string button; u64 from, to; u8 pressure = 0xFF; };
     std::vector<Press> presses;    /* --press BUTTON@FRAME (six frames) or BUTTON@FROM-TO (held), and
                                       :PRESSURE (0-255) after either: pressed that far */
+    std::string record_input;      /* --record-input FILE: what the game read from the pad, by frame */
+    std::string replay_input;      /* --replay-input FILE: a recording read back instead of the pad */
+    bool paced = false;            /* --paced: a --virtual-time run no faster than the display */
 };
 
 /* Load the executable, run it from its entry point, and report how far it got.
