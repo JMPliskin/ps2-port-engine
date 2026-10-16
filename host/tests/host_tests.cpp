@@ -1208,7 +1208,7 @@ void SpuPlaysItsSoundDataInput() {
         Spu2 spu;
         std::vector<Spu2::s16> heard;
         spu.SetOutput([&](const Spu2::s16* frames, Spu2::u32 count) { heard.assign(frames, frames + 2 * count); });
-        spu.SetParam(0x0801, 0x000C);                   // MMIX, core 1: the input, dry
+        spu.SetParam(0x0801, 0x00C0);                   // MMIX, core 1: the input, dry
         spu.SetParam(0x0F01, bvol);                     // BVOLL
         spu.SetParam(0x1001, bvol);                     // BVOLR
         spu.SetInput(1, pcm.data(), Spu2::u32(pcm.size()));
@@ -1224,6 +1224,46 @@ void SpuPlaysItsSoundDataInput() {
     Check(!muted.empty() && muted[muted.size() - 2] == 0 && muted.back() == 0,
           "SPU2: the sound-data input at BVOL 0 is silent");
     Check(!stopped.empty() && stopped.back() == 0, "SPU2: a stopped input is silent");
+}
+
+// The cores' routing (PCSX2's mixer): core 0's output is core 1's external
+// input, heard at core 1's AVOL (silent at 0); MMIX's external bits (0-3) do
+// not let the sound-data input in - its own are 4-7.
+void SpuRoutesCore0ThroughCore1() {
+    using ps2host::iop::Spu2;
+    auto play = [](Spu2::u32 avol) {
+        Spu2 spu;
+        Spu2::u8 loop[16] = {0x00, 0x07};
+        for (int i = 2; i < 16; ++i) loop[i] = 0x11;
+        spu.Write(0x5000, loop, 16);
+        std::vector<Spu2::s16> heard;
+        spu.SetOutput([&](const Spu2::s16* frames, Spu2::u32 count) { heard.assign(frames, frames + 2 * count); });
+        spu.SetAddr(0x2000, 0x5000);                // voice 0 of core 0
+        spu.SetParam(0x0000, 0x3FFF);
+        spu.SetParam(0x0100, 0x3FFF);
+        spu.SetParam(0x0200, 0x1000);
+        spu.SetParam(0x0300, 0x000F);
+        spu.SetParam(0x0400, 0x1FC0);
+        spu.SetParam(0x0D01, avol);                 // AVOLL, core 1
+        spu.SetParam(0x0E01, avol);
+        spu.SetSwitch(0x1800, 1);
+        spu.SetSwitch(0x1A00, 1);
+        spu.SetSwitch(0x1500, 1);
+        spu.Advance(1000, [](Spu2::u32) {});
+        spu.Advance(2000, [](Spu2::u32) {});
+        return heard.size() == 96 ? int(heard[90]) : -1;
+    };
+    Check(play(0x7FFF) > 3500, "SPU2: core 0 heard through core 1");
+    Check(play(0) == 0, "SPU2: core 0 silent at core 1's AVOL 0");
+    std::vector<Spu2::u8> pcm(0x800, 0x40);
+    Spu2 spu;
+    std::vector<Spu2::s16> heard;
+    spu.SetOutput([&](const Spu2::s16* frames, Spu2::u32 count) { heard.assign(frames, frames + 2 * count); });
+    spu.SetParam(0x0801, 0x000F);                   // MMIX, core 1: the external input only
+    spu.SetInput(1, pcm.data(), Spu2::u32(pcm.size()));
+    spu.Advance(1000, [](Spu2::u32) {});
+    spu.Advance(2000, [](Spu2::u32) {});
+    Check(!heard.empty() && heard.back() == 0, "SPU2: the external bits keep the sound-data input out");
 }
 
 // A voice's samples go through the hardware's Gaussian interpolation, whose
@@ -1268,7 +1308,7 @@ void SpuReverbHasNoImage() {
     Spu2 spu;
     std::vector<Spu2::s16> heard;
     spu.SetOutput([&](const Spu2::s16* frames, Spu2::u32 count) { heard.insert(heard.end(), frames, frames + 2 * count); });
-    spu.SetParam(0x0801, 0x0003);                   // MMIX, core 1: the input, wet only
+    spu.SetParam(0x0801, 0x0030);                   // MMIX, core 1: the input, wet only
     spu.SetParam(0x0F01, 0x7FFF);
     spu.SetParam(0x1001, 0x7FFF);
     Check(spu.SetEffectAttr(1, 0x101, 0x3FFF, 0x3FFF, 0, 0) == 0, "SPU2: the Room preset on core 1");
@@ -1469,6 +1509,7 @@ int main() {
     SpuInputInterruptsAtEachHalf();
     SpuReverbHasNoImage();
     SpuInterpolatesAsTheHardware();
+    SpuRoutesCore0ThroughCore1();
     std::printf(g_failures ? "host tests: %d failed\n" : "host tests: all passed\n", g_failures);
     return g_failures ? EXIT_FAILURE : EXIT_SUCCESS;
 }

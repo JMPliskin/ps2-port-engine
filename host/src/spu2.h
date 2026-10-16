@@ -25,9 +25,13 @@
  * right - looping over the buffer, at the core's BVOL and into its dry and
  * wet mixes as MMIX bits 0-3 say (wet right, wet left, dry right, dry left).
  *
- * Not modelled yet: volume sweeps (a sweeping volume plays at its maximum),
- * noise, pitch modulation, and the cores' external input (core 0's output
- * into core 1, at AVOL).
+ * The cores (PCSX2's mixer): each sums its voices (VMIX), its sound-data
+ * input (BVOL) and its external input into a dry and a wet mix, as MMIX lets
+ * each in; the wet goes through the reverb (EVOL); the sum, at MVOL, is the
+ * core's output. Core 0's is core 1's external input (at core 1's AVOL), and
+ * core 1's is what is heard.
+ *
+ * Not modelled yet: noise, pitch modulation.
  *
  * libsd's entries (ps2sdk libsd-common.h): a voice parameter or address is
  * (param << 8) | core | voice << 1; a switch or core address (n << 8) | core.
@@ -52,7 +56,10 @@ public:
     using s32 = std::int32_t;
     using u64 = std::uint64_t;
 
-    Spu2() : ram_(2u << 20) {}
+    Spu2() : ram_(2u << 20) {
+        cores_[0].mmix = 0xFF0;
+        cores_[1].mmix = 0xFFC;
+    }
 
     void SetParam(u32 entry, u32 value);
     u32 GetParam(u32 entry) const;
@@ -142,8 +149,13 @@ private:
         u32 endx = 0, irqa = 0, attr = 0, esa = 0, eea = 0, tsa = 0;
         u32 switches[16] = {};          // by switch number - 0x13
         u32 mvoll = 0x3FFF, mvolr = 0x3FFF;
-        u32 avoll = 0, avolr = 0, bvoll = 0, bvolr = 0;   // the inputs' volumes
-        u32 mmix = 0xFFF;                                 // what goes where (bits 0-3: the input)
+        // The inputs' volumes: AVOL the external input's (core 1's: core 0's
+        // output), BVOL the sound-data input's - at their maximum until set.
+        u32 avoll = 0x7FFF, avolr = 0x7FFF, bvoll = 0x7FFF, bvolr = 0x7FFF;
+        // MMIX, what goes where, wet R, wet L, dry R, dry L in each four bits:
+        // 0-3 the external input, 4-7 the sound-data input, 8-11 the core's
+        // voices (PCSX2's gates). After sceSdInit 0xFF0 and 0xFFC (Spu2()).
+        u32 mmix = 0xFFF;
         const u8* input = nullptr;      // the sound-data input, while a block transfer runs
         u32 input_size = 0, input_sample = 0;
         // PS2HOST_SPU_LOG: halves begun, and those begun as they were the

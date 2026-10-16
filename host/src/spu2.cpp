@@ -642,9 +642,10 @@ void Spu2::Advance(u64 now_us, const std::function<void(u32 core)>& irq,
             for (u32 i = 1; i < 24; ++i)
                 if (c.voice_peak[i] > c.voice_peak[loudest]) loudest = i;
             const Voice& lv = c.voices[loudest];
-            char peaks[200];
-            std::snprintf(peaks, sizeof peaks, "; peaks: voices %d, input %d, reverb %d; loudest %u (%d): "
+            char peaks[260];
+            std::snprintf(peaks, sizeof peaks, "; mmix %03X avol %04X/%04X bvol %04X/%04X; peaks: voices %d, input %d, reverb %d; loudest %u (%d): "
                           "pitch %04X ssa %05X nax %05X adsr %04X/%04X vol %04X/%04X",
+                          unsigned(c.mmix), unsigned(c.avoll), unsigned(c.avolr), unsigned(c.bvoll), unsigned(c.bvolr),
                           int(c.peak_voices), int(c.peak_input), int(c.peak_reverb), unsigned(loudest),
                           int(c.voice_peak[loudest]), unsigned(lv.pitch), unsigned(lv.ssa), unsigned(lv.nax),
                           unsigned(lv.adsr1), unsigned(lv.adsr2), unsigned(lv.voll), unsigned(lv.volr));
@@ -661,9 +662,11 @@ void Spu2::Advance(u64 now_us, const std::function<void(u32 core)>& irq,
     bool stop = false;
     u32 n = 0;
     for (; n < count && !stop; ++n) {
-        s32 left = 0, right = 0;
+        // Core 0's output: core 1's external input.
+        s32 ext_left = 0, ext_right = 0, left = 0, right = 0;
         for (u32 core = 0; core < 2; ++core) {
             Core& c = cores_[core];
+            // The voices' dry and wet sums (VMIX), then the core's: MMIX's.
             s32 core_left = 0, core_right = 0, wet_left = 0, wet_right = 0;
             for (u32 i = 0; i < 24; ++i) {
                 Voice& v = c.voices[i];
@@ -694,6 +697,19 @@ void Spu2::Advance(u64 now_us, const std::function<void(u32 core)>& irq,
                 }
             }
             if (log) c.peak_voices = std::max(c.peak_voices, std::max(std::abs(core_left), std::abs(core_right)));
+            const u32 mix = c.mmix;
+            core_left = mix & 0x800 ? Clamp16(core_left) : 0;
+            core_right = mix & 0x400 ? Clamp16(core_right) : 0;
+            wet_left = mix & 0x200 ? Clamp16(wet_left) : 0;
+            wet_right = mix & 0x100 ? Clamp16(wet_right) : 0;
+            auto volume = [](u32 v) { return v & 0x8000 ? 0x7FFF : s32(v & 0x7FFF); };
+            if (core == 1) {
+                const s32 in_left = (ext_left * volume(c.avoll)) >> 15, in_right = (ext_right * volume(c.avolr)) >> 15;
+                if (mix & 0x8) core_left += in_left;
+                if (mix & 0x4) core_right += in_right;
+                if (mix & 0x2) wet_left += in_left;
+                if (mix & 0x1) wet_right += in_right;
+            }
             // The sound-data input: a stereo sample from the block, at BVOL.
             if (c.input) {
                 const u32 at = c.input_sample;
@@ -710,14 +726,13 @@ void Spu2::Advance(u64 now_us, const std::function<void(u32 core)>& irq,
                     const s16 pair[2] = {s16(in_left), s16(in_right)};
                     std::fwrite(pair, 2, 2, dump);
                 }
-                auto volume = [](u32 v) { return v & 0x8000 ? 0x7FFF : s32(v & 0x7FFF); };
                 const s32 sent_left = (in_left * volume(c.bvoll)) >> 15;
                 const s32 sent_right = (in_right * volume(c.bvolr)) >> 15;
                 if (log) c.peak_input = std::max(c.peak_input, std::max(std::abs(sent_left), std::abs(sent_right)));
-                if (c.mmix & 0x8) core_left += sent_left;
-                if (c.mmix & 0x4) core_right += sent_right;
-                if (c.mmix & 0x2) wet_left += sent_left;
-                if (c.mmix & 0x1) wet_right += sent_right;
+                if (mix & 0x80) core_left += sent_left;
+                if (mix & 0x40) core_right += sent_right;
+                if (mix & 0x20) wet_left += sent_left;
+                if (mix & 0x10) wet_right += sent_right;
                 const u32 frames = InputFrames(c.input_size);
                 c.input_sample = (at + 1) % frames;
                 if (frames >= 2 && c.input_sample % (frames / 2) == 0) {
@@ -754,8 +769,15 @@ void Spu2::Advance(u64 now_us, const std::function<void(u32 core)>& irq,
             }
             c.main_left.Step();
             c.main_right.Step();
-            left += (core_left * c.main_left.now) >> 15;
-            right += (core_right * c.main_right.now) >> 15;
+            const s32 out_left = (Clamp16(core_left) * c.main_left.now) >> 15;
+            const s32 out_right = (Clamp16(core_right) * c.main_right.now) >> 15;
+            if (core == 0) {
+                ext_left = out_left;
+                ext_right = out_right;
+            } else {
+                left = out_left;
+                right = out_right;
+            }
         }
         mixed_[2 * n] = s16(Clamp16(left));
         mixed_[2 * n + 1] = s16(Clamp16(right));
