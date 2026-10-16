@@ -115,7 +115,9 @@ public:
                                         // Triangle Circle Cross Square)
         std::uint8_t sticks[4] = {0x80, 0x80, 0x80, 0x80};   // right X, Y, left X, Y; 0x80 centred
         std::uint8_t l2 = 0, r2 = 0;    // the triggers' travel, 0-255
+        std::uint8_t family = 0;        // whose it is (its buttons' names): ControllerFamily
     };
+    enum ControllerFamily : std::uint8_t { kOtherController, kPlayStationController, kXboxController };
     virtual bool Pad(PadState* state) const { (void)state; return false; }
     /* The controller's motors, 0-65535 each (the low-frequency, large one;
        the high-frequency, small one), until set again - 0, 0 stops them.
