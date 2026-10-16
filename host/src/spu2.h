@@ -194,8 +194,7 @@ private:
     };
     Core cores_[2];
     std::vector<u8> ram_;
-    bool started_ = false;
-    u64 start_us_ = 0;               // the first Advance's time
+    u64 start_us_ = 0;               // the clock's start: the first Advance past 0
     u64 clock_ = 0;                  // samples since then, played (or passed over)
     u64 logged_second_ = ~0ull;      // PS2HOST_SPU_LOG: the last second logged
     Output output_;

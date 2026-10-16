@@ -608,18 +608,18 @@ void Spu2::Advance(u64 now_us, const std::function<void(u32 core)>& irq,
     for (std::size_t i = 0; i + 1 < pending_irqs_.size(); i += 2)
         CheckIrq(0, pending_irqs_[i], pending_irqs_[i + 1] > pending_irqs_[i] ? pending_irqs_[i + 1] : pending_irqs_[i] + 1, irq);
     pending_irqs_.clear();
-    // Samples are counted from the first Advance: those due by `now_us`, less
-    // those played - exact, in whole samples.
-    if (!started_) {
-        started_ = true;
-        start_us_ = now_us;
-    }
-    const u64 due = now_us > start_us_ ? (now_us - start_us_) * 48000 / 1000000 : 0;
+    // Samples are counted from the clock's start - the first Advance at a time
+    // past 0 (at 0 it has not begun) - those due by `now_us`, less those
+    // played: exact, in whole samples (a stopped Advance's rest is due still).
+    if (!start_us_) start_us_ = now_us;
+    if (!start_us_) return;
+    const u64 due = (now_us - std::min(now_us, start_us_)) * 48000 / 1000000;
     if (due <= clock_) return;
     // The voices, a sample at a time; at most a second's worth at once (a host
     // that stalled longer than that catches up the clock, not the sound).
     if (due - clock_ > u64(kRate)) clock_ = due - u64(kRate);
     u32 count = u32(due - clock_);
+    const u64 first_sample = clock_;
     // PS2HOST_SPU_LOG=1: once a second, the voices sounding and how their
     // volumes are set (fixed, or a sweep), and the cores' main volumes.
     static const bool log = std::getenv("PS2HOST_SPU_LOG") != nullptr;
@@ -677,7 +677,7 @@ void Spu2::Advance(u64 now_us, const std::function<void(u32 core)>& irq,
         // core 0's output, each core's dry and wet mixes. A driver reads them
         // back to process (Burnout 3's player engine, its wet mix). Each
         // write checks IRQA, as the hardware's do.
-        const u32 capture_offset = u32((clock_ + n) & 511) * 2;
+        const u32 capture_offset = u32((first_sample + n) & 511) * 2;
         auto capture = [&](u32 base, s32 sample) {
             const u32 address = base + capture_offset;
             const u16 value = u16(s16(Clamp16(sample)));
@@ -806,7 +806,7 @@ void Spu2::Advance(u64 now_us, const std::function<void(u32 core)>& irq,
                 const u32 at = ++c.reverb_at;
                 c.reverb_in[0][at & 63] = Clamp16(wet_left);
                 c.reverb_in[1][at & 63] = Clamp16(wet_right);
-                if ((clock_ + n) & 1) {
+                if ((first_sample + n) & 1) {
                     Reverb(c, Clamp16(ReverbFir(c.reverb_in[0], at)), Clamp16(ReverbFir(c.reverb_in[1], at)));
                     c.reverb_up[0][at & 63] = c.reverb_out_left;
                     c.reverb_up[1][at & 63] = c.reverb_out_right;

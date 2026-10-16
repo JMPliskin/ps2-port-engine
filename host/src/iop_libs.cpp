@@ -1225,11 +1225,15 @@ bool SoundInterrupts(Vm& vm, bool idle) {
     // goes on only as fast as the IOP's work (36.864 MHz, an instruction a
     // cycle), never more than 50 ms behind; once the IOP has nothing to do,
     // to the present. Each half the input begins stops it, its interrupt
-    // delivered, so the decoder runs before the SPU2 reads on.
+    // delivered, so the decoder runs before the SPU2 reads on. Only while a
+    // stream plays (a block transfer's input): otherwise to the present, the
+    // sound's interrupts when the IOP's clock gives them (Burnout 3's
+    // audio-paced movies are recorded so).
     const u64 executed = vm.instructions - s.sound_instructions;
     s.sound_instructions = vm.instructions;
     const u64 played = s.spu.PlayedUs();
-    u64 to = idle || !played ? now : std::min(now, played + executed * 1000 / 36864);
+    const bool streaming = s.spu.InputActive(0) || s.spu.InputActive(1);
+    u64 to = idle || !played || !streaming ? now : std::min(now, played + executed * 1000 / 36864);
     if (to + 50'000 < now) to = now - 50'000;
     // The SPU2's own interrupt: playback (or a transfer) reached IRQA.
     Timed timed(Section::Spu2);
