@@ -138,11 +138,16 @@ ps2gpu::Display::AntiAliasing DisplayAntiAliasing(const std::string& mode) {
 #endif
 
 /* The "aspect" setting as the display takes it: "4:3" (the default), "16:9",
-   or "auto" (0, the window's own shape). */
+   any other "W:H" (21:9, 32:9: an ultrawide screen's), or "auto" (0, the
+   window's own shape). */
 float SettingAspect() {
     const std::string aspect = Setting("aspect", "4:3");
-    if (aspect == "16:9") return 16.0f / 9.0f;
     if (aspect == "auto") return 0.0f;
+    float width = 0.0f, height = 0.0f;
+    if (std::sscanf(aspect.c_str(), "%f:%f", &width, &height) == 2 && width > 0.0f && height > 0.0f) {
+        const float shape = width / height;
+        if (shape >= 1.0f && shape <= 4.0f) return shape;
+    }
     return 4.0f / 3.0f;
 }
 
