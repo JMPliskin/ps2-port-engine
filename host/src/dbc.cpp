@@ -199,6 +199,11 @@ void PadData(u8* data) {
         for (int i = 0; i < 16; ++i)
             if (hooked & (1u << i)) pressure[i] = 0xFF;
     }
+    if (PcMenuOpen()) {                     // the PC settings panel has the keys
+        buttons = 0xFFFF;
+        pad = HostPadState{};
+        std::fill(std::begin(pressure), std::end(pressure), u8(0));
+    }
     g_held = u16(~buttons);
     data[0] = u8(buttons);
     data[1] = u8(buttons >> 8);

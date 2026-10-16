@@ -324,6 +324,28 @@ void SetWindowStatus(const std::string& status);
 /* A panel of text over the picture (a game's tool, its menu): the lines,
    the first a heading, one starting with '>' picked out; none when empty. */
 void SetWindowOverlay(const std::vector<std::string>& lines);
+/* The PC settings panel (pc_menu.cpp): F1, or L3 + R3 on a controller, over
+   any game - resolution, aspect, fullscreen, v-sync, frame pacing, the
+   texture pack. UpdatePcMenu reads its keys (PumpWindow calls it); while it
+   is open the game gets no input (PcMenuOpen). */
+void UpdatePcMenu();
+bool PcMenuOpen();
+/* The PC settings for a game's own menu (a port's PC SETTINGS screen): each
+   one's short name and value in capitals (RESOLUTION, 2X) and a line of help;
+   a texture pack's only when one is loaded. StepPcSetting changes the n-th to
+   its next value (step 1) or the one before (-1), applied and saved. */
+struct PcSetting { std::string label, value, help; };
+std::vector<PcSetting> PcSettings();
+void StepPcSetting(int index, int step);
+/* The panel opened from a game's own menu (a port's PC SETTINGS entry). */
+void OpenPcMenu();
+/* A port's EXIT GAME: the run ends as when the window is closed. */
+void QuitGame();
+/* A port's look at the 2D on its way to the GS (VIF1 DIRECT, PATH2): each
+   block of words, `from` the guest address of the first, before the GS takes
+   it. A copy - the guest's packets stay as the game wrote them - on the EE
+   thread, in order. Widescreen: a port places its HUD in a wider picture. */
+void SetPath2Filter(std::function<void(u32* words, u32 count, u32 from)> filter);
 /* The window's display, null when there is none (or no Vulkan one). */
 ps2gpu::Display* WindowDisplay();
 /* What the window shows instead of the software GS's picture (BGRA, as

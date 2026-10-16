@@ -885,7 +885,18 @@ Sound& S() {
     return sound;
 }
 
-Outcome SdInit(Vm&, Context& c) { return Ret(c, KE_OK); }
+Outcome SdQuit(Vm&, Context& c) { return Ret(c, KE_OK); }
+
+// sceSdInit: libsd leaves every voice of both cores mixed, dry and into the
+// effect (VMIXL, VMIXR, VMIXEL, VMIXER all 24 bits; PCSX2's SPU2 resets so).
+// A driver that only clears the effect mix and never sets the dry one -
+// Mister Mosquito's SNDN2DRV - relies on it: at 0 its narration and music
+// voice went nowhere.
+Outcome SdInit(Vm&, Context& c) {
+    for (u32 core = 0; core < 2; ++core)
+        for (u32 which : {0x18u, 0x19u, 0x1Au, 0x1Bu}) S().spu.SetSwitch((which << 8) | core, 0xFFFFFF);
+    return Ret(c, KE_OK);
+}
 
 Outcome SdSetParam(Vm&, Context& c) { S().spu.SetParam(c.r[4] & 0xFFFF, c.r[5] & 0xFFFF); return Ret(c, 0); }
 Outcome SdGetParam(Vm&, Context& c) { return Ret(c, S().spu.GetParam(c.r[4] & 0xFFFF)); }
@@ -1128,7 +1139,7 @@ const Map& Table() {
         {{"sifcmd", 23}, SifGetOtherData},
         {{"sysclib", 8}, LookCtypeTable},
         {{"vblank", 4}, WaitVblank}, {{"vblank", 5}, WaitVblank},
-        {{"libsd", 2}, SdInit}, {{"libsd", 4}, SdInit},
+        {{"libsd", 2}, SdQuit}, {{"libsd", 4}, SdInit},
         {{"libsd", 5}, SdSetParam}, {{"libsd", 6}, SdGetParam},
         {{"libsd", 7}, SdSetSwitch}, {{"libsd", 8}, SdGetSwitch},
         {{"libsd", 9}, SdSetAddr}, {{"libsd", 10}, SdGetAddr},
@@ -1179,6 +1190,8 @@ std::string ExportName(const std::string& library, u32 index) {
     const auto found = names.find({library, index});
     return found == names.end() ? "?" : found->second;
 }
+
+void SetPcmInputVolume(u32 core, u32 percent) { S().spu.SetInputVolume(core, percent); }
 
 void EnableSound() {
     S().spu.SetOutput([](const Spu2::s16* frames, u32 count) { AudioFrames(frames, count); });

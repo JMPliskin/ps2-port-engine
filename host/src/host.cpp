@@ -649,6 +649,11 @@ int Run(const Options& options) {
     }
     g_fast_disc = options.fast_disc || (!options.virtual_time && SettingOn("fast_loading", g_fast_loading_default));
     if (g_fast_disc) std::fprintf(stderr, "[host] disc reads fast (no drive time)\n");
+    // --setting KEY=VALUE: a scripted run's own (a wider picture), for this run.
+    for (const std::string& setting : options.settings) {
+        const auto equals = setting.find('=');
+        if (equals != std::string::npos) RunSetting(setting.substr(0, equals), setting.substr(equals + 1));
+    }
     if (options.window) OpenWindow(L"PS2 port", 1280, 896);      // or the game's title (SetGameTitle)
     iop::SetTrace(options.iop_trace);
     gs::TheGs().trace = options.gs_trace;
@@ -785,6 +790,7 @@ int Main(int argc, char** argv) {
         else if (arg == "--vu-interpret") options.vu_interpret = true;
         else if (arg == "--vu-fast") options.vu_fast = true;
         else if (arg == "--memcard" && i + 1 < argc) options.memcard = argv[++i];
+        else if (arg == "--setting" && i + 1 < argc) options.settings.push_back(argv[++i]);
         else if (arg == "--audio") options.audio = true;
         else if (arg == "--audio-wav" && i + 1 < argc) options.audio_wav = argv[++i];
         else if (arg == "--press" && i + 1 < argc) {

@@ -19,11 +19,19 @@
  * output joins the core's at EVOL. The algorithm is the PS1 SPU's, which the
  * SPU2 kept (no-cash psx-spx, "SPU Reverb Formula").
  *
- * Sound-data input (a core's block transfer, sceSdBlockTrans - how CRI's ADX
- * streams its music): PCM in IOP memory, played a stereo sample per 48 kHz
- * tick in the SPU2's layout - 0x200 bytes of left samples, then 0x200 of
- * right - looping over the buffer, at the core's BVOL and into its dry and
- * wet mixes as MMIX bits 0-3 say (wet right, wet left, dry right, dry left).
+ * Sound-data input: a core's ring in SPU RAM - planar 16-bit PCM, 512 left
+ * samples at 0x4000 then 512 right at 0x4400 (core 0), 0x4800/0x4C00 (core
+ * 1) - read a stereo sample per 48 kHz tick at the core's BVOL, into its dry
+ * and wet mixes as MMIX bits 4-7 say. A driver writes it itself (Burnout 3's
+ * engine sound), or a block transfer (sceSdBlockTrans - how CRI's ADX streams
+ * its music) fills it from IOP memory a sample a tick, as the hardware's
+ * AutoDMA does: 0x200 bytes of left samples, then 0x200 of right, looping
+ * over the buffer.
+ *
+ * Capture: the SPU2 writes what it mixes back into SPU RAM, 512-sample rings
+ * - voices 1 and 3 of each core, core 0's output, each core's dry and wet
+ * mixes - and the writes raise IRQA, so a driver can read the sound back to
+ * process it.
  *
  * The cores (PCSX2's mixer): each sums its voices (VMIX), its sound-data
  * input (BVOL) and its external input into a dry and a wet mix, as MMIX lets
@@ -61,6 +69,9 @@ public:
         cores_[1].mmix = 0xFFC;
     }
 
+    // Host gain for a core's PCM input, applied after the game's own volume.
+    // A 5 ms ramp makes live menu changes click-free; capture RAM is unchanged.
+    void SetInputVolume(u32 core, u32 percent);
     void SetParam(u32 entry, u32 value);
     u32 GetParam(u32 entry) const;
     void SetSwitch(u32 entry, u32 value);
@@ -148,6 +159,8 @@ private:
         Voice voices[24];
         u32 endx = 0, irqa = 0, attr = 0, esa = 0, eea = 0, tsa = 0;
         u32 switches[16] = {};          // by switch number - 0x13
+        s32 input_gain = 65536, input_gain_target = 65536;   // SetInputVolume's, 16.16
+        u32 input_gain_remaining = 0;
         u32 mvoll = 0x3FFF, mvolr = 0x3FFF;
         // The inputs' volumes: AVOL the external input's (core 1's: core 0's
         // output), BVOL the sound-data input's - at their maximum until set.
