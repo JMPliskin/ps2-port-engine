@@ -270,6 +270,25 @@ enum : int { kDApf1 = 0, kDApf2 = 1, kVIir = 2, kVComb1 = 3, kVComb2 = 4, kVComb
              kMLComb4 = 22, kMRComb4 = 23, kDLDiff = 24, kDRDiff = 25, kMLApf1 = 26, kMRApf1 = 27, kMLApf2 = 28,
              kMRApf2 = 29, kVLIn = 30, kVRIn = 31 };
 
+/* The reverb runs at 24 kHz: what goes in is filtered down to it, what comes
+   out filtered up from it, by the same 39-tap half-band FIR (psx-spx, "SPU
+   Reverb Buffer Resampling"; the SPU2 kept the PS1's) - every other tap 0
+   but the middle one's, the sum 32,766. Taken a pair a step and its output
+   held for both, the reverb's tail had the 24 kHz images of everything in
+   it (a metallic hiss). Here the taps from the middle out: kReverbFir[0] is
+   the middle's, [1] the next ones' (the samples 1 from it either side), ... */
+const Spu2::s32 kReverbFir[20] = {0x4000, 0x2806, 0, -0x0B90, 0, 0x0534, 0, -0x0268, 0, 0x010A,
+                                  0, -0x0067, 0, 0x0023, 0, -0x000A, 0, 0x0002, 0, -0x0001};
+
+// The FIR over a ring's last 39 (ending at `at`), its middle 19 back.
+Spu2::s32 ReverbFir(const Spu2::s32* ring, Spu2::u32 at) {
+    const Spu2::u32 middle = at - 19;
+    std::int64_t sum = std::int64_t(ring[middle & 63]) * kReverbFir[0];
+    for (Spu2::u32 k = 1; k < 20; k += 2)
+        sum += std::int64_t(ring[(middle - k) & 63] + ring[(middle + k) & 63]) * kReverbFir[k];
+    return Spu2::s32(sum >> 15);
+}
+
 Spu2::s32 Mul(Spu2::s32 a, Spu2::u16 coefficient) {
     return Spu2::s32((std::int64_t(a) * Spu2::s16(coefficient)) >> 15);
 }
@@ -672,11 +691,24 @@ void Spu2::Advance(u64 now_us, const std::function<void(u32 core)>& irq,
             // the pair.
             static const bool no_reverb = std::getenv("PS2HOST_SPU_NO_REVERB") != nullptr;   // to hear without it
             if ((c.attr & 4) && !no_reverb) {
-                if ((clock_ + n) & 1) Reverb(c, Clamp16(c.reverb_in_left), Clamp16(c.reverb_in_right));
-                else { c.reverb_in_left = wet_left; c.reverb_in_right = wet_right; }
-                if (log) c.peak_reverb = std::max(c.peak_reverb, std::max(std::abs(c.reverb_out_left), std::abs(c.reverb_out_right)));
-                core_left += (c.reverb_out_left * Volume(c.evoll)) >> 15;
-                core_right += (c.reverb_out_right * Volume(c.evolr)) >> 15;
+                // In at 48 kHz; every other sample a step of the reverb on the
+                // input filtered down; out its steps filtered up (a zero
+                // between each: twice the filter's gain).
+                const u32 at = ++c.reverb_at;
+                c.reverb_in[0][at & 63] = Clamp16(wet_left);
+                c.reverb_in[1][at & 63] = Clamp16(wet_right);
+                if ((clock_ + n) & 1) {
+                    Reverb(c, Clamp16(ReverbFir(c.reverb_in[0], at)), Clamp16(ReverbFir(c.reverb_in[1], at)));
+                    c.reverb_up[0][at & 63] = c.reverb_out_left;
+                    c.reverb_up[1][at & 63] = c.reverb_out_right;
+                } else {
+                    c.reverb_up[0][at & 63] = c.reverb_up[1][at & 63] = 0;
+                }
+                const s32 wet_out_left = Clamp16(ReverbFir(c.reverb_up[0], at) * 2);
+                const s32 wet_out_right = Clamp16(ReverbFir(c.reverb_up[1], at) * 2);
+                if (log) c.peak_reverb = std::max(c.peak_reverb, std::max(std::abs(wet_out_left), std::abs(wet_out_right)));
+                core_left += (wet_out_left * Volume(c.evoll)) >> 15;
+                core_right += (wet_out_right * Volume(c.evolr)) >> 15;
             }
             c.main_left.Step();
             c.main_right.Step();

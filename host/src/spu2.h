@@ -161,8 +161,11 @@ private:
         u32 effect_mode = 0, effect_delay = 0, effect_feedback = 0;
         s32 effect_depth_left = 0, effect_depth_right = 0;
         u32 reverb_position = 0;        // bytes into the work area
-        s32 reverb_in_left = 0, reverb_in_right = 0;     // the first of each pair of samples
-        s32 reverb_out_left = 0, reverb_out_right = 0;   // held for the pair
+        s32 reverb_out_left = 0, reverb_out_right = 0;   // the last step's
+        // The reverb's resampling (ReverbResample): the last 64 samples into
+        // it at 48 kHz, and out of it - its steps, a zero between each.
+        s32 reverb_in[2][64] = {}, reverb_up[2][64] = {};
+        u32 reverb_at = 0;
     };
     Core cores_[2];
     std::vector<u8> ram_;

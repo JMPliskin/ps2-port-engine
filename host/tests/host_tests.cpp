@@ -1226,6 +1226,45 @@ void SpuPlaysItsSoundDataInput() {
     Check(!stopped.empty() && stopped.back() == 0, "SPU2: a stopped input is silent");
 }
 
+// The reverb runs at 24 kHz, its input and output resampled by the hardware's
+// half-band FIR: a 1.5 kHz tone through it, its 24 kHz image (22.5 kHz) below
+// -40 dB of the tone. A step's output held for two samples left it at -20 dB.
+void SpuReverbHasNoImage() {
+    using ps2host::iop::Spu2;
+    std::vector<Spu2::u8> pcm(0x1000);              // 1,024 samples: 32 periods of 1.5 kHz
+    for (int block = 0; block < 4; ++block)
+        for (int i = 0; i < 256; ++i) {
+            const double t = double(block * 256 + i) / 48000.0;
+            const Spu2::s16 s = Spu2::s16(8000.0 * std::sin(2.0 * 3.14159265358979 * 1500.0 * t));
+            std::memcpy(&pcm[block * 0x400 + i * 2], &s, 2);
+            std::memcpy(&pcm[block * 0x400 + 0x200 + i * 2], &s, 2);
+        }
+    Spu2 spu;
+    std::vector<Spu2::s16> heard;
+    spu.SetOutput([&](const Spu2::s16* frames, Spu2::u32 count) { heard.insert(heard.end(), frames, frames + 2 * count); });
+    spu.SetParam(0x0801, 0x0003);                   // MMIX, core 1: the input, wet only
+    spu.SetParam(0x0F01, 0x7FFF);
+    spu.SetParam(0x1001, 0x7FFF);
+    Check(spu.SetEffectAttr(1, 0x101, 0x3FFF, 0x3FFF, 0, 0) == 0, "SPU2: the Room preset on core 1");
+    spu.SetCoreAttr(0x3, 1);                        // SD_CORE_EFFECT_ENABLE, core 1
+    spu.SetInput(1, pcm.data(), Spu2::u32(pcm.size()));
+    spu.Advance(1000, [](Spu2::u32) {});
+    spu.Advance(1000 + 300000, [](Spu2::u32) {});   // 300 ms
+    auto bin = [&](double hz) {
+        double re = 0, im = 0;
+        const std::size_t from = heard.size() / 2 - 9600;
+        for (std::size_t k = 0; k < 9600; ++k) {
+            const double w = 2.0 * 3.14159265358979 * hz * double(k) / 48000.0;
+            re += heard[2 * (from + k)] * std::cos(w);
+            im += heard[2 * (from + k)] * std::sin(w);
+        }
+        return std::sqrt(re * re + im * im);
+    };
+    const double tone = bin(1500), image = bin(22500);
+    Check(tone > 1e5, "SPU2: the reverb passes the tone");
+    Check(image < tone * 0.01, "SPU2: the reverb's output has no 24 kHz image");
+}
+
 // The input's half-buffer interrupt comes from where the SPU2 plays: each half
 // begun stops the Advance there (the IOP refills the half before it is read
 // again), InputHalf says which half plays, and PlayedUs where it stopped.
@@ -1402,6 +1441,7 @@ int main() {
     SpuDecodesAdpcmAndPlaysAVoice();
     SpuPlaysItsSoundDataInput();
     SpuInputInterruptsAtEachHalf();
+    SpuReverbHasNoImage();
     std::printf(g_failures ? "host tests: %d failed\n" : "host tests: all passed\n", g_failures);
     return g_failures ? EXIT_FAILURE : EXIT_SUCCESS;
 }
