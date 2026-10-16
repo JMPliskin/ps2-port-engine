@@ -46,6 +46,7 @@
 #include <vector>
 
 #include "ps2host/run.h"
+#include "ps2host/timeline.h"
 
 #pragma comment(lib, "winmm.lib")
 #pragma comment(lib, "ole32.lib")
@@ -384,6 +385,7 @@ bool OpenAudio() {
         d.target_frames = unsigned(kRate * std::clamp(std::atoi(ms), 20, 250) / 1000);
     const bool wave_only = std::getenv("PS2HOST_AUDIO_WAVEOUT") != nullptr;
     d.thread = std::thread([&d, wave_only] {
+        timeline::NameThread("audio");
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
         if (wave_only || !RunWasapi(d)) RunWaveOut(d);
     });

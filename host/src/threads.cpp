@@ -837,7 +837,13 @@ void RunThreads(const lifted::Context& initial, u32 entry, s64 loop_budget) {
                         iop::Run(50'000);           // a short slice: the blank may come meanwhile
                     }
                     if (IopReplyPending()) break;
-                    SleepUntil(std::chrono::steady_clock::now() + std::chrono::microseconds(200));    // (precise: SleepUntil)
+                    // Asleep until the timer marks a blank or an interrupt due
+                    // (TimerTick wakes this at once), or a millisecond: the
+                    // IOP's next slice. A fixed 200 us sleep was 5,000 wakes a
+                    // second - half a core in the kernel through gameplay -
+                    // and a longer one took the blanks late.
+                    u32 seen = g_timer_seq.load(std::memory_order_acquire);
+                    if (!s.vblank_due && !s.timer_due) WaitOnAddress(&g_timer_seq, &seen, sizeof seen, 1);
                 }
                 g_idle_ns.fetch_add(u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                             std::chrono::steady_clock::now() - idle_from).count()),
