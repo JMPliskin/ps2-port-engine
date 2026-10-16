@@ -482,6 +482,11 @@ bool FastDisc();
    once (a scripted run's stays the drive's). */
 void SetFastDisc(bool on);
 void SetFastLoadingDefault(bool on);
+/* VU1's fast mode (--vu-fast: no MAC/STATUS flags where nothing can read
+   them - the same pictures, less VU1 time) as the default, for a game whose
+   scripted runs draw every picture the same with it; --vu-exact turns it
+   off again. */
+void SetVuFastDefault(bool on);
 void AdvanceClock(u64 ns);
 /* Run the INTC handlers for `cause`, if it is enabled (threads.cpp). */
 void RaiseIntc(u32 cause);
