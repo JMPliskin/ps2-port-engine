@@ -25,6 +25,47 @@ constexpr Spu2::u32 kVmixel = 0x19 - 0x13, kVmixer = 0x1B - 0x13;   // into the 
 
 Spu2::s32 Clamp16(Spu2::s32 v) { return std::min(32767, std::max(-32768, v)); }
 
+/* A voice's samples are interpolated as the hardware does, from the four
+   latest by a 512-entry Gaussian table indexed by the pitch counter's bits
+   4-11 (psx-spx, "4-Point Gaussian Interpolation"; the SPU2 kept the PS1
+   SPU's): a gentle low-pass the console's sound has, where linear
+   interpolation was brighter and aliased more. Any four taps used together
+   sum to 0x7F7F-0x7F81. */
+const Spu2::s16 kGauss[512] = {
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 3, 3,
+    3, 4, 4, 5, 5, 6, 7, 7, 8, 9, 9, 10, 11, 12, 13, 14,
+    15, 16, 17, 18, 19, 21, 22, 24, 25, 27, 28, 30, 32, 33, 35, 37,
+    39, 41, 44, 46, 48, 51, 53, 56, 58, 61, 64, 67, 70, 73, 77, 80,
+    84, 87, 91, 95, 99, 103, 107, 111, 116, 120, 125, 130, 135, 140, 145, 150,
+    156, 161, 167, 173, 179, 186, 192, 199, 205, 212, 219, 227, 234, 242, 250, 257,
+    266, 274, 283, 291, 300, 309, 319, 328, 338, 348, 358, 369, 379, 390, 401, 412,
+    424, 436, 448, 460, 473, 485, 498, 512, 525, 539, 553, 567, 582, 597, 612, 627,
+    643, 659, 675, 692, 708, 726, 743, 761, 779, 797, 816, 835, 854, 874, 894, 914,
+    935, 956, 977, 999, 1020, 1043, 1066, 1089, 1112, 1136, 1160, 1184, 1209, 1234, 1260, 1286,
+    1312, 1339, 1366, 1394, 1422, 1450, 1479, 1508, 1537, 1567, 1598, 1628, 1660, 1691, 1723, 1756,
+    1789, 1822, 1856, 1890, 1924, 1959, 1995, 2031, 2067, 2104, 2141, 2179, 2217, 2256, 2295, 2334,
+    2374, 2415, 2456, 2497, 2539, 2582, 2624, 2668, 2712, 2756, 2801, 2846, 2892, 2938, 2985, 3032,
+    3079, 3128, 3176, 3225, 3275, 3325, 3376, 3427, 3479, 3531, 3584, 3637, 3691, 3745, 3799, 3855,
+    3910, 3967, 4023, 4081, 4138, 4197, 4255, 4315, 4374, 4435, 4495, 4557, 4619, 4681, 4744, 4807,
+    4871, 4935, 5000, 5065, 5131, 5197, 5264, 5332, 5399, 5468, 5536, 5606, 5676, 5746, 5817, 5888,
+    5959, 6032, 6104, 6177, 6251, 6325, 6400, 6475, 6550, 6626, 6702, 6779, 6856, 6934, 7012, 7091,
+    7170, 7249, 7329, 7409, 7490, 7571, 7653, 7735, 7817, 7900, 7983, 8066, 8150, 8234, 8319, 8404,
+    8489, 8575, 8661, 8748, 8834, 8922, 9009, 9097, 9185, 9273, 9362, 9451, 9541, 9630, 9720, 9811,
+    9901, 9992, 10083, 10174, 10266, 10358, 10450, 10542, 10635, 10727, 10820, 10913, 11007, 11100, 11194, 11288,
+    11382, 11476, 11571, 11665, 11760, 11855, 11950, 12045, 12140, 12236, 12331, 12427, 12522, 12618, 12714, 12809,
+    12905, 13001, 13097, 13193, 13289, 13385, 13481, 13577, 13673, 13769, 13865, 13961, 14056, 14152, 14248, 14343,
+    14439, 14534, 14630, 14725, 14820, 14915, 15010, 15104, 15199, 15293, 15387, 15481, 15575, 15669, 15762, 15855,
+    15948, 16041, 16133, 16226, 16317, 16409, 16500, 16592, 16682, 16773, 16863, 16953, 17042, 17131, 17220, 17308,
+    17396, 17484, 17571, 17658, 17744, 17830, 17916, 18001, 18086, 18170, 18254, 18337, 18420, 18502, 18584, 18665,
+    18746, 18826, 18905, 18985, 19063, 19141, 19219, 19295, 19372, 19447, 19522, 19597, 19671, 19744, 19816, 19888,
+    19959, 20030, 20100, 20169, 20238, 20306, 20373, 20439, 20505, 20570, 20634, 20698, 20760, 20822, 20884, 20944,
+    21004, 21063, 21121, 21178, 21235, 21290, 21345, 21399, 21452, 21505, 21556, 21607, 21657, 21706, 21754, 21801,
+    21848, 21893, 21938, 21982, 22025, 22066, 22107, 22148, 22187, 22225, 22262, 22299, 22334, 22369, 22402, 22435,
+    22467, 22498, 22527, 22556, 22584, 22611, 22637, 22662, 22686, 22709, 22731, 22752, 22772, 22791, 22809, 22826,
+    22842, 22857, 22872, 22885, 22897, 22908, 22918, 22927, 22935, 22942, 22948, 22953, 22957, 22960, 22962, 22963
+};
+
 // A volume register's fixed value (bit 15 clear: 15 bits, signed). A sweep's
 // (bit 15 set) is where it has brought the volume: Spu2::Level. Reverb's EVOL
 // has no sweep.
@@ -140,7 +181,8 @@ Spu2::u32 Spu2::GetParam(u32 entry) const {
 void Spu2::Start(Voice& v) {
     v.nax = v.ssa & ~15u;
     v.counter = 0;
-    v.older = v.old = v.previous = 0;
+    v.older = v.old = 0;
+    v.history[0] = v.history[1] = v.history[2] = 0;
     v.playing = true;
     v.phase = Phase::Attack;
     v.level = 0;
@@ -440,6 +482,10 @@ void Spu2::Read(u32 address, u8* data, u32 size) const {
 // voices.
 void Spu2::NextBlock(Core& c, u32 index, const std::function<void(u32)>& irq) {
     Voice& v = c.voices[index];
+    // The block's last three: the interpolation's history into the next.
+    v.history[0] = v.samples[kSamplesPerBlock - 3];
+    v.history[1] = v.samples[kSamplesPerBlock - 2];
+    v.history[2] = v.samples[kSamplesPerBlock - 1];
     const u32 block = v.nax & kRamMask & ~15u;
     const u8 flags = ram_[(block + 1) & kRamMask];
     CheckIrq(0, block, block + kBlockBytes, irq);
@@ -625,9 +671,13 @@ void Spu2::Advance(u64 now_us, const std::function<void(u32 core)>& irq,
                 v.right.Step();
                 if (!v.pitch) continue;
                 if (v.phase != Phase::Off) {
-                    const u32 index = v.counter >> 12;
-                    const s32 current = v.samples[index];
-                    const s32 sample = v.previous + ((current - v.previous) * s32(v.counter & 0xFFF) >> 12);
+                    // new, old, older, oldest: the sample at the counter and
+                    // the three before it (from the last block's history).
+                    const int at = int(v.counter >> 12);
+                    auto s = [&v](int k) { return k >= 0 ? v.samples[k] : v.history[3 + k]; };
+                    const u32 f = (v.counter >> 4) & 0xFF;
+                    const s32 sample = ((kGauss[0x0FF - f] * s(at - 3)) >> 15) + ((kGauss[0x1FF - f] * s(at - 2)) >> 15) +
+                                       ((kGauss[0x100 + f] * s(at - 1)) >> 15) + ((kGauss[f] * s(at)) >> 15);
                     const s32 shaped = (sample * v.level) >> 15;
                     const s32 sent_left = (shaped * v.left.now) >> 15, sent_right = (shaped * v.right.now) >> 15;
                     if (log) c.voice_peak[i] = std::max(c.voice_peak[i], std::max(std::abs(sent_left), std::abs(sent_right)));
@@ -637,19 +687,11 @@ void Spu2::Advance(u64 now_us, const std::function<void(u32 core)>& irq,
                     if (c.switches[kVmixer] & (1u << i)) wet_right += sent_right;
                     Envelope(v);
                 }
-                const u32 before_index = v.counter >> 12;
-                s32 last = v.samples[before_index];
-                bool crossed = false;
                 v.counter += v.pitch;
                 while (v.counter >= kBlockSpan) {
                     v.counter -= kBlockSpan;
-                    last = v.samples[kSamplesPerBlock - 1];
                     NextBlock(c, i, irq);
-                    crossed = true;
                 }
-                const u32 index = v.counter >> 12;
-                if (crossed || index != before_index)
-                    v.previous = index ? v.samples[index - 1] : last;
             }
             if (log) c.peak_voices = std::max(c.peak_voices, std::max(std::abs(core_left), std::abs(core_right)));
             // The sound-data input: a stereo sample from the block, at BVOL.

@@ -126,7 +126,7 @@ private:
         u32 counter = 0;                // 4.12 fixed point: samples into the block
         s32 samples[28] = {};           // the current block, decoded
         s32 older = 0, old = 0;         // the decoder's history
-        s32 previous = 0;               // the sample before the current one
+        s32 history[3] = {};            // the last block's last three samples (Gaussian interpolation's)
         Phase phase = Phase::Off;
         s32 level = 0;                  // the envelope, 0-0x7FFF
         u32 envelope_counter = 0;
