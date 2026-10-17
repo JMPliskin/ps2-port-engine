@@ -39,6 +39,20 @@ python engine/tools/port.py --game games/<g>                      # build and ru
 python engine/tools/port.py --game games/<g> run -- --trace       # log every call
 ```
 
+A port is built for processors with AVX2 (`PS2HOST_AVX2`, on by default:
+the VU's lanes and the rest in three-operand SIMD, 6% of a race). For those
+without it - Intel's Pentium and Celeron of before 2021 (Pentium Silver,
+Celeron N, the Pentium Gold of desktops) - `port.py --game games/<g> --sse4
+build` builds `<name>-sse4.exe` (SSE4.1, in `build/port/cmake-sse4`, copied
+beside the main one); a release ships both. The executable's entry
+(`src/cpu_check.cpp`, a library of its own built without AVX) checks the
+processor before anything else runs - the runtime's start and static
+constructors are AVX2 code too - and on one without AVX2 starts the SSE4
+build beside it with the same command line, or says what is needed
+(`PS2HOST_TEST_NO_AVX2=1` takes that way on a processor with it). `port.py`
+builds with a compiler per 2.5 GB of memory: a file of compiled VU code
+takes one 2 GB and more.
+
 Options for finding out why boot stops, passed after `run --`:
 
 | option | what it shows |
