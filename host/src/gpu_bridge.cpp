@@ -73,6 +73,12 @@
 
 namespace ps2host {
 
+namespace {
+std::vector<u32> g_pipeline_hints;      // SetGpuPipelineHints
+}  // namespace
+
+void SetGpuPipelineHints(const u32* keys, std::size_t count) { g_pipeline_hints.assign(keys, keys + count); }
+
 #if PS2HOST_VULKAN
 
 ps2gpu::Gpu* WindowGpu();       // window.cpp: the window's device, when there is one
@@ -1615,6 +1621,7 @@ bool StartGpuRenderer(std::string* error, GpuMode mode, bool show) {
         if (!bridge.gpu) return false;
         device = bridge.gpu.get();
     }
+    ps2gpu::SetPipelineHints(g_pipeline_hints.data(), g_pipeline_hints.size());
     // The pipeline cache beside the PC settings (none in a scripted run).
     if (!SettingsPath().empty())
         ps2gpu::SetPipelineCacheDir(std::filesystem::path(SettingsPath()).parent_path().u8string());

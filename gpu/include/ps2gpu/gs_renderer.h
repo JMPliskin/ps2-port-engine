@@ -303,6 +303,11 @@ std::unique_ptr<GsRenderer> CreateGsRenderer(Gpu& gpu, std::string* error);
    start, from the cache, so none is built in the middle of a race. Set
    before CreateGsRenderer; "" (a scripted run) keeps nothing. */
 void SetPipelineCacheDir(const std::string& dir);
+/* Pipelines a game is known to draw with (keys as gpu_pipelines.txt has
+   them), made by the renderer's worker from the start as the last runs'
+   are - a player's first run then makes none in the middle of a race. Keys
+   of an older engine are only made in vain. Set before CreateGsRenderer. */
+void SetPipelineHints(const std::uint32_t* keys, std::size_t count);
 
 /* How often the CPU has waited for the GPU to finish what was submitted, and
    for how long in all: "N submissions, S s waiting". */

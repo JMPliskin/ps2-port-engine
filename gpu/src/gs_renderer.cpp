@@ -1586,6 +1586,7 @@ void VulkanGsRenderer::SetScale(std::uint32_t scale) {
 
 namespace {
 std::string g_pipeline_cache_dir;       // SetPipelineCacheDir
+std::vector<std::uint32_t> g_pipeline_hints;    // SetPipelineHints
 std::string CacheFile(const char* name) { return g_pipeline_cache_dir + "/" + name; }
 }  // namespace
 
@@ -1616,15 +1617,19 @@ void VulkanGsRenderer::WarmPipelines() {
     if (g_pipeline_cache_dir.empty()) return;
     async_pipelines_ = true;            // (a run that keeps a cache is a player's)
     std::ifstream in(CacheFile("gpu_pipelines.txt"));
-    if (!in) return;
     std::string word;
     std::vector<std::uint32_t> keys;
-    while (in >> word) {
+    while (in && in >> word) {
         const std::uint32_t key = std::uint32_t(std::strtoul(word.c_str(), nullptr, 16));
         if (pipelines_.count(key) || !pipelines_asked_.insert(key).second) continue;
         known_keys_.insert(key);
         keys.push_back(key);
     }
+    // The game's own list after (SetPipelineHints): kept in the file only
+    // once drawn with.
+    for (std::uint32_t key : g_pipeline_hints)
+        if (!pipelines_.count(key) && pipelines_asked_.insert(key).second) keys.push_back(key);
+    if (keys.empty()) return;
     warm_began_ = std::chrono::steady_clock::now();
     warm_left_ = keys.size();
     for (std::uint32_t key : keys) AskWorker(key, false);
@@ -1737,7 +1742,7 @@ void VulkanGsRenderer::TakeMadePipelines() {
     for (const auto& [key, pipeline] : made) {
         pipelines_asked_.erase(key);
         if (warm_left_ && --warm_left_ == 0)
-            std::fprintf(stderr, "[gpu] the pipelines of the last runs made ready in %.0f ms\n",
+            std::fprintf(stderr, "[gpu] the pipelines known from the start (the last runs', the game's) made ready in %.0f ms\n",
                          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - warm_began_).count());
         if (!pipeline) continue;
         if (pipelines_.count(key)) vkDestroyPipeline(g_.device, pipeline, nullptr);
@@ -3186,6 +3191,7 @@ std::string SubmitStats() {
 }
 
 void SetPipelineCacheDir(const std::string& dir) { g_pipeline_cache_dir = dir; }
+void SetPipelineHints(const std::uint32_t* keys, std::size_t count) { g_pipeline_hints.assign(keys, keys + count); }
 
 std::unique_ptr<GsRenderer> CreateGsRenderer(Gpu& gpu, std::string* error) {
     auto renderer = std::make_unique<VulkanGsRenderer>(static_cast<VulkanGpu&>(gpu));
