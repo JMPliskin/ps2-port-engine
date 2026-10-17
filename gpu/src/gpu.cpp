@@ -5,17 +5,31 @@
 
 #include "gpu_internal.h"
 
-#include <algorithm>
 #include <cctype>
-#include <cstdlib>
-
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
 namespace ps2gpu {
 
 void SetGpuWaitObserver(GpuWaitObserver observer) { g_wait_observer = observer; }
+
+namespace {
+/* A GPU's preference: PS2HOST_GPU=<part of its name> (any case: "intel",
+   "4070") first - a laptop's integrated GPU measured beside its discrete
+   one - then a discrete GPU. */
+int DeviceScore(const VkPhysicalDeviceProperties& p) {
+    int score = p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? 2 : 1;
+    if (const char* want = std::getenv("PS2HOST_GPU")) {
+        std::string name = p.deviceName, part = want;
+        for (char& ch : name) ch = char(std::tolower(static_cast<unsigned char>(ch)));
+        for (char& ch : part) ch = char(std::tolower(static_cast<unsigned char>(ch)));
+        if (!part.empty() && name.find(part) != std::string::npos) score += 10;
+    }
+    return score;
+}
+}  // namespace
 
 bool VulkanGpu::Init(std::string* error) {
     auto fail = [&](const char* what, VkResult r) {
@@ -39,26 +53,17 @@ bool VulkanGpu::Init(std::string* error) {
     std::vector<VkPhysicalDevice> list(n);
     vkEnumeratePhysicalDevices(instance, &n, list.data());
     int best = -1;
-    // PS2HOST_GPU_DEVICE: only a device whose name holds this (any case) -
-    // a laptop's integrated GPU rather than its discrete one, say.
-    std::string wanted = std::getenv("PS2HOST_GPU_DEVICE") ? std::getenv("PS2HOST_GPU_DEVICE") : "";
-    std::transform(wanted.begin(), wanted.end(), wanted.begin(), [](unsigned char ch) { return char(std::tolower(ch)); });
     for (VkPhysicalDevice candidate : list) {
         VkPhysicalDeviceProperties p;
         vkGetPhysicalDeviceProperties(candidate, &p);
         if (p.apiVersion < VK_API_VERSION_1_3) continue;
-        if (!wanted.empty()) {
-            std::string name = p.deviceName;
-            std::transform(name.begin(), name.end(), name.begin(), [](unsigned char ch) { return char(std::tolower(ch)); });
-            if (name.find(wanted) == std::string::npos) continue;
-        }
         std::uint32_t families = 0;
         vkGetPhysicalDeviceQueueFamilyProperties(candidate, &families, nullptr);
         std::vector<VkQueueFamilyProperties> props(families);
         vkGetPhysicalDeviceQueueFamilyProperties(candidate, &families, props.data());
         for (std::uint32_t f = 0; f < families; ++f) {
             if (!(props[f].queueFlags & VK_QUEUE_GRAPHICS_BIT)) continue;
-            const int score = p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? 2 : 1;
+            const int score = DeviceScore(p);
             if (score > best) {
                 best = score;
                 gpu = candidate;

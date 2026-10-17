@@ -22,6 +22,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <functional>
@@ -202,8 +203,12 @@ struct Feed {
                 // pause is up to 140 cycles (Skylake on), and 200 of them each
                 // time the ring ran dry were a third of the thread's time in
                 // gameplay (20-26% of a core -> 14-16% with 16, the pictures'
-                // pacing the same).
-                for (int spins = 0; spins < 16 && t == h; ++spins) {
+                // pacing the same). PS2HOST_GS_SPIN to measure another.
+                static const int kSpins = [] {
+                    const char* n = std::getenv("PS2HOST_GS_SPIN");
+                    return n ? std::atoi(n) : 16;
+                }();
+                for (int spins = 0; spins < kSpins && t == h; ++spins) {
                     Pause();
                     h = head.load(std::memory_order_acquire);
                 }

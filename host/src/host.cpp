@@ -670,8 +670,8 @@ int Run(const Options& options) {
     if (!options.vu_record.empty()) Vu::RecordPrograms(options.vu_record);
     if (!options.memcard.empty()) mc2::SetCardDirectory(options.memcard);
     if (options.vu_interpret) Vu1().use_compiled = Vu0().use_compiled = false;
-    Vu1().fast = options.vu_fast || (!options.virtual_time && SettingOn("vu_fast", g_vu_fast_default));
-    if (Vu1().fast && !options.vu_fast) std::fprintf(stderr, "[host] VU1 without the flags no one reads (vu_fast)\n");
+    Vu1().fast = options.vu_fast || (g_vu_fast_default && !options.vu_exact && SettingOn("vu_fast", true));
+    if (Vu1().fast && !options.vu_fast) std::fprintf(stderr, "[host] VU1 fast mode (the game's default; --vu-exact for the exact flags)\n");
     SetUntilFrame(options.until_frame);
     SetFrameTimes(options.frame_times);
     if (options.gpu || options.gpu_shadow) {
@@ -751,6 +751,22 @@ int Run(const Options& options) {
 }
 
 int Main(int argc, char** argv) {
+    // PS2HOST_CORES=N: the process held to its first N logical cores from
+    // the start, before any thread (the GPU driver's pools too) is made - a
+    // machine with that many, to measure a low-end one on a big one. Or a
+    // mask (0x5: logical cores 0 and 2 - two physical cores where the first
+    // ones are hyperthreaded pairs).
+    if (const char* cores = std::getenv("PS2HOST_CORES")) {
+        DWORD_PTR mask = 0;
+        if (cores[0] == '0' && (cores[1] == 'x' || cores[1] == 'X')) {
+            mask = DWORD_PTR(std::strtoull(cores + 2, nullptr, 16));
+        } else {
+            const int n = std::atoi(cores);
+            if (n > 0 && n < int(8 * sizeof(DWORD_PTR))) mask = (DWORD_PTR(1) << n) - 1;
+        }
+        if (mask && SetProcessAffinityMask(GetCurrentProcess(), mask))
+            std::fprintf(stderr, "[host] held to cores 0x%llX (PS2HOST_CORES)\n", (unsigned long long)mask);
+    }
     Options options;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -792,6 +808,7 @@ int Main(int argc, char** argv) {
         else if (arg == "--vu-record" && i + 1 < argc) options.vu_record = argv[++i];
         else if (arg == "--vu-interpret") options.vu_interpret = true;
         else if (arg == "--vu-fast") options.vu_fast = true;
+        else if (arg == "--vu-exact") options.vu_exact = true;
         else if (arg == "--memcard" && i + 1 < argc) options.memcard = argv[++i];
         else if (arg == "--setting" && i + 1 < argc) options.settings.push_back(argv[++i]);
         else if (arg == "--audio") options.audio = true;
@@ -812,6 +829,20 @@ int Main(int argc, char** argv) {
                 const u64 to = dash == std::string::npos ? from + 5 : std::stoull(when.substr(dash + 1));
                 options.presses.push_back({spec.substr(0, at), from, to, pressure});
             }
+        }
+        else if (arg == "--key" && i + 1 < argc) {
+            // --key NAME@FROM[-TO]: a key held (six frames without TO).
+            const std::string spec = argv[++i];
+            const std::size_t at = spec.find('@');
+            bool ok = at != std::string::npos;
+            if (ok) {
+                const std::string when = spec.substr(at + 1);
+                const std::size_t dash = when.find('-');
+                const u64 from = std::stoull(when.substr(0, dash));
+                const u64 to = dash == std::string::npos ? from + 5 : std::stoull(when.substr(dash + 1));
+                ok = ScriptKey(spec.substr(0, at), from, to);
+            }
+            if (!ok) std::fprintf(stderr, "--key %s: KEY@FROM[-TO]\n", spec.c_str());
         }
         else if (arg == "--record-input" && i + 1 < argc) options.record_input = argv[++i];
         else if (arg == "--replay-input" && i + 1 < argc) options.replay_input = argv[++i];
