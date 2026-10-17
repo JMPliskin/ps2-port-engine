@@ -181,7 +181,7 @@ vec4 Sample(vec2 uv, int n, bool linear) {
     if (at.y == at.x + 1 && at.w == at.z + 1) {
         // Side by side in the image (almost always - not where a wrap or a
         // clamp parts them): gathered at the corner they share.
-        const uvec4 w = textureGather(texture_words, vec2(at.yw) / vec2(textureSize(texture_words, 0)), 0);
+        const uvec4 w = textureGather(texture_words, vec2(at.yw) / vec2(textureSize(texture_image, 0)), 0);
         c01 = Unpack(w.x);
         c11 = Unpack(w.y);
         c10 = Unpack(w.z);
