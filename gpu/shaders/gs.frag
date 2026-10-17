@@ -78,7 +78,10 @@ uint Scale() { return Has(kFine) ? p.scale : 1u; }
 // region's bounds scaled; REGION_REPEAT's masks do not scale (Texel takes
 // those in GS texels).
 int Wrap(int i, int size, uint mode, uint lo, uint hi, int k) {
-    if (mode == 0u) return k == 1 ? (i & (size - 1)) : ((i % size) + size) % size;
+    // (A power of two - TEX0's sizes are, and a target drawn at 2x or 4x -
+    // wraps by its mask, the same for negative i: two integer divisions a
+    // call otherwise, four calls a bilinear pixel.)
+    if (mode == 0u) return k == 1 || (size & (size - 1)) == 0 ? (i & (size - 1)) : ((i % size) + size) % size;
     if (mode == 1u) return clamp(i, 0, size - 1);
     if (mode == 2u) return clamp(i, int(lo) * k, int(hi) * k + k - 1);
     return (i & int(lo)) | int(hi);
