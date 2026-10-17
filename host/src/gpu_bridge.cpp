@@ -953,7 +953,10 @@ u64 CachedTexture(Bridge& b, const gs::Context& c, u64 texa, u32 tw, u32 th) {
         // PS2HOST_GPU_TEXDUMP=TBP (hex): each decode of a texture there, as the
         // GPU has it, to gpu_tex_<n>_<primitive>.bmp (the CPU's beside it as
         // cpu_tex_<n>.bmp) - what a draw sampled, against the GS model.
-        if (const char* want = std::getenv("PS2HOST_GPU_TEXDUMP")) {
+        // (The switches read once: a decode is dozens of times a frame.)
+        static const char* const texdump = std::getenv("PS2HOST_GPU_TEXDUMP");
+        static const bool count_decodes = std::getenv("PS2HOST_GPU_COUNT") != nullptr;
+        if (const char* want = texdump) {
             static int dumped = 0;
             if (tbp == u32(std::strtoul(want, nullptr, 16)) && dumped < 64) {
                 std::vector<u32> pixels;
@@ -967,7 +970,7 @@ u64 CachedTexture(Bridge& b, const gs::Context& c, u64 texa, u32 tw, u32 th) {
                 ++dumped;
             }
         }
-        if (std::getenv("PS2HOST_GPU_COUNT")) {
+        if (count_decodes) {
             char key[96];
             std::snprintf(key, sizeof key, "psm %02X tbp %04X tbw %u %ux%u clutrows %d", unsigned(psm), unsigned(tbp),
                           unsigned(tbw), unsigned(tw), unsigned(th), int((clut_rows & ~b.clut_cpu) != 0));
@@ -1747,7 +1750,8 @@ void GpuShadowFrame(u64 frame, const std::string& dump_dir) {
                 std::fprintf(stderr, "[gpu]     GPU decodes %llu: %s\n", (unsigned long long)kinds[i].first, kinds[i].second.c_str());
             g_decode_kinds.clear();
         }
-        if (std::getenv("PS2HOST_GPU_LOG")) {
+        static const bool gpu_log = std::getenv("PS2HOST_GPU_LOG") != nullptr;
+        if (gpu_log) {
             std::fprintf(stderr, "[gpu]   KB to the CPU: %llu for textures, %llu for reads, %llu for writes;",
                          static_cast<unsigned long long>(s.downloads_by[0] / 4),
                          static_cast<unsigned long long>(s.downloads_by[1] / 4),
@@ -1757,7 +1761,7 @@ void GpuShadowFrame(u64 frame, const std::string& dump_dir) {
                              static_cast<unsigned long long>(blocks / 4));
             std::fprintf(stderr, "\n");
         }
-        if (std::getenv("PS2HOST_GPU_LOG"))
+        if (gpu_log)
             for (const auto& [key, o] : s.owned)
                 std::fprintf(stderr, "[gpu]   %s %X/%u/%02X blocks %X-%X drawn to %X, %ux%u; reloads new %llu memory %llu draw %llu write-back %llu\n",
                              o.depth ? "Z" : "C", unsigned(o.fbp), unsigned(o.fbw), unsigned(o.psm), unsigned(o.begin),
