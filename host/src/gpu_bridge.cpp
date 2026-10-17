@@ -1612,6 +1612,9 @@ bool StartGpuRenderer(std::string* error, GpuMode mode, bool show) {
         if (!bridge.gpu) return false;
         device = bridge.gpu.get();
     }
+    // The pipeline cache beside the PC settings (none in a scripted run).
+    if (!SettingsPath().empty())
+        ps2gpu::SetPipelineCacheDir(std::filesystem::path(SettingsPath()).parent_path().u8string());
     bridge.renderer = ps2gpu::CreateGsRenderer(*device, error);
     if (!bridge.renderer) return false;
     g_bridge = &bridge;

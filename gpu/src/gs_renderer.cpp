@@ -15,7 +15,13 @@
  */
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdio>
+#include <fstream>
+#include <set>
+#include <string>
+#include <thread>
 #include <cstdlib>
 #include <cstring>
 #include <map>
@@ -312,6 +318,7 @@ public:
         g_.Flush();
         ++frame_;
         EvictReplacements();
+        SavePipelineCache();
     }
     void TargetRowsFromMemory(std::uint32_t fbp, std::uint32_t fbw, std::uint32_t psm, std::uint32_t width,
                               std::uint32_t height, std::uint32_t first_row, std::uint32_t rows) override;
@@ -376,6 +383,18 @@ private:
     std::vector<VkDeviceMemory> image_blocks_;
     void Fill(Texture& texture, const std::uint32_t* pixels);
     VkPipeline PipelineFor(std::uint32_t key);
+    /* The pipeline cache (SetPipelineCacheDir): every pipeline is made
+       through it; the keys PipelineFor has made, kept to make again at the
+       next start (WarmPipelines); written back now and then as they grow
+       (SavePipelineCache: on a thread of its own, the frame not waiting). */
+    VkPipelineCache cache_ = VK_NULL_HANDLE;
+    std::set<std::uint32_t> known_keys_;
+    bool cache_dirty_ = false;
+    std::chrono::steady_clock::time_point cache_saved_{};
+    std::atomic<bool> cache_saving_{false};
+    void OpenPipelineCache();
+    void WarmPipelines();
+    void SavePipelineCache();
     /* The destination alpha test's setup pass: stencil 1 where the target's
        alpha bit equals DATM. */
     bool MakeDatePipeline();
@@ -809,6 +828,7 @@ void VulkanGsRenderer::FreeImageMemory(VkDeviceMemory memory, VkDeviceSize offse
 }
 
 bool VulkanGsRenderer::Init(std::string* error) {
+    OpenPipelineCache();
     auto module = [&](const std::uint32_t* code, std::size_t bytes) {
         VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
         ci.codeSize = bytes;
@@ -877,7 +897,9 @@ bool VulkanGsRenderer::Init(std::string* error) {
     }
     Fill(blank_, &white);
     g_.end_pass = [this](VkCommandBuffer cmd) { EndPass(cmd); };
-    return InitMemory(error);
+    if (!InitMemory(error)) return false;
+    WarmPipelines();
+    return true;
 }
 
 bool VulkanGsRenderer::DeviceBuffer(VkDeviceSize bytes, VkBufferUsageFlags usage, VkBuffer* buffer,
@@ -977,7 +999,7 @@ bool VulkanGsRenderer::InitMemory(std::string* error) {
     cpi.stage.pName = "main";
     cpi.layout = swizzle_layout_;
     if (!swizzle_ ||
-        vkCreateComputePipelines(g_.device, VK_NULL_HANDLE, 1, &cpi, nullptr, &swizzle_pipeline_) != VK_SUCCESS) {
+        vkCreateComputePipelines(g_.device, cache_, 1, &cpi, nullptr, &swizzle_pipeline_) != VK_SUCCESS) {
         if (error) *error = "the swizzle shader did not load";
         return false;
     }
@@ -1009,7 +1031,7 @@ bool VulkanGsRenderer::InitMemory(std::string* error) {
         pi.stage.module = swizzle_image_;
         pi.layout = swizzle_image_layout_;
         if (!swizzle_image_ ||
-            vkCreateComputePipelines(g_.device, VK_NULL_HANDLE, 1, &pi, nullptr, &swizzle_image_pipeline_) !=
+            vkCreateComputePipelines(g_.device, cache_, 1, &pi, nullptr, &swizzle_image_pipeline_) !=
                 VK_SUCCESS) {
             if (error) *error = "the swizzle shader (images) did not load";
             return false;
@@ -1026,7 +1048,7 @@ bool VulkanGsRenderer::InitMemory(std::string* error) {
                     const std::uint32_t values[] = {kSpecialisedFormats[f], direction, scale, 0};
                     const VkSpecializationInfo info{4, entries, sizeof values, values};
                     pi.stage.pSpecializationInfo = &info;
-                    vkCreateComputePipelines(g_.device, VK_NULL_HANDLE, 1, &pi, nullptr,
+                    vkCreateComputePipelines(g_.device, cache_, 1, &pi, nullptr,
                                              &swizzle_image_specialised_[f][direction][scale - 1]);
                 }
     }
@@ -1049,7 +1071,7 @@ bool VulkanGsRenderer::InitMemory(std::string* error) {
         VkComputePipelineCreateInfo pp = cpi;
         pp.stage.module = patch_;
         pp.layout = patch_layout_;
-        if (!patch_ || vkCreateComputePipelines(g_.device, VK_NULL_HANDLE, 1, &pp, nullptr, &patch_pipeline_) != VK_SUCCESS) {
+        if (!patch_ || vkCreateComputePipelines(g_.device, cache_, 1, &pp, nullptr, &patch_pipeline_) != VK_SUCCESS) {
             if (error) *error = "the memory patch shader did not load";
             return false;
         }
@@ -1059,7 +1081,7 @@ bool VulkanGsRenderer::InitMemory(std::string* error) {
     vkCreateShaderModule(g_.device, &ci, nullptr, &decode_);
     cpi.stage.module = decode_;
     if (!decode_ ||
-        vkCreateComputePipelines(g_.device, VK_NULL_HANDLE, 1, &cpi, nullptr, &decode_pipeline_) != VK_SUCCESS) {
+        vkCreateComputePipelines(g_.device, cache_, 1, &cpi, nullptr, &decode_pipeline_) != VK_SUCCESS) {
         if (error) *error = "the texture decode shader did not load";
         return false;
     }
@@ -1072,7 +1094,7 @@ bool VulkanGsRenderer::InitMemory(std::string* error) {
         dp.stage.module = decode_image_;
         dp.layout = swizzle_image_layout_;
         if (!decode_image_ ||
-            vkCreateComputePipelines(g_.device, VK_NULL_HANDLE, 1, &dp, nullptr, &decode_image_pipeline_) != VK_SUCCESS)
+            vkCreateComputePipelines(g_.device, cache_, 1, &dp, nullptr, &decode_image_pipeline_) != VK_SUCCESS)
             decode_image_pipeline_ = VK_NULL_HANDLE;
         // A set for every texture there may be: the bridge's cache, the pool of
         // spare images, and room.
@@ -1135,7 +1157,7 @@ bool VulkanGsRenderer::MakeDepthPipelines() {
     cpi.stage.module = swizzle_depth_;
     cpi.stage.pName = "main";
     cpi.layout = swizzle_depth_layout_;
-    if (vkCreateComputePipelines(g_.device, VK_NULL_HANDLE, 1, &cpi, nullptr, &swizzle_depth_pipeline_) !=
+    if (vkCreateComputePipelines(g_.device, cache_, 1, &cpi, nullptr, &swizzle_depth_pipeline_) !=
         VK_SUCCESS)
         return false;
     // Back: drawn, Z from memory as the depth, every pixel (ALWAYS) - the
@@ -1192,7 +1214,7 @@ bool VulkanGsRenderer::MakeDepthPipelines() {
     pci.pDepthStencilState = &depth;
     pci.pDynamicState = &dynamic;
     pci.layout = depth_load_layout_;
-    return vkCreateGraphicsPipelines(g_.device, VK_NULL_HANDLE, 1, &pci, nullptr, &depth_load_pipeline_) ==
+    return vkCreateGraphicsPipelines(g_.device, cache_, 1, &pci, nullptr, &depth_load_pipeline_) ==
            VK_SUCCESS;
 }
 
@@ -1515,6 +1537,90 @@ void VulkanGsRenderer::SetScale(std::uint32_t scale) {
     scale_ = scale;
 }
 
+namespace {
+std::string g_pipeline_cache_dir;       // SetPipelineCacheDir
+std::string CacheFile(const char* name) { return g_pipeline_cache_dir + "/" + name; }
+}  // namespace
+
+void VulkanGsRenderer::OpenPipelineCache() {
+    // What a last run left (the driver checks it is its own, and ignores it
+    // if not - another GPU, another driver).
+    std::vector<char> data;
+    if (!g_pipeline_cache_dir.empty()) {
+        std::ifstream in(CacheFile("gpu_pipeline_cache.bin"), std::ios::binary);
+        if (in) data.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    }
+    VkPipelineCacheCreateInfo ci{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
+    ci.initialDataSize = data.size();
+    ci.pInitialData = data.empty() ? nullptr : data.data();
+    if (vkCreatePipelineCache(g_.device, &ci, nullptr, &cache_) != VK_SUCCESS) {
+        ci.initialDataSize = 0;
+        ci.pInitialData = nullptr;
+        if (vkCreatePipelineCache(g_.device, &ci, nullptr, &cache_) != VK_SUCCESS) cache_ = VK_NULL_HANDLE;
+    }
+    cache_saved_ = std::chrono::steady_clock::now();
+}
+
+/* The pipelines the game drew with before, made now (from the cache: a
+   fraction of a millisecond each) rather than when a race first needs one. */
+void VulkanGsRenderer::WarmPipelines() {
+    if (g_pipeline_cache_dir.empty()) return;
+    std::ifstream in(CacheFile("gpu_pipelines.txt"));
+    if (!in) return;
+    const auto began = std::chrono::steady_clock::now();
+    std::string word;
+    std::size_t made = 0;
+    while (in >> word) {
+        const std::uint32_t key = std::uint32_t(std::strtoul(word.c_str(), nullptr, 16));
+        if (PipelineFor(key)) ++made;
+    }
+    cache_dirty_ = false;               // nothing new yet
+    std::fprintf(stderr, "[gpu] %zu pipelines made ready in %.0f ms\n", made,
+                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - began).count());
+}
+
+/* The cache and the keys, written when new pipelines came, at most every
+   five seconds, by a thread of their own; a run ends by being ended
+   (TerminateProcess), not by a destructor, so this is where they are kept. */
+void VulkanGsRenderer::SavePipelineCache() {
+    if (!cache_dirty_ || !cache_ || g_pipeline_cache_dir.empty() || cache_saving_.load()) return;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - cache_saved_ < std::chrono::seconds(5)) return;
+    cache_saved_ = now;
+    cache_dirty_ = false;
+    std::string keys;
+    for (std::uint32_t key : known_keys_) {
+        char text[12];
+        std::snprintf(text, sizeof text, "%08X\n", unsigned(key));
+        keys += text;
+    }
+    cache_saving_ = true;
+    std::thread([this, device = g_.device, cache = cache_, keys = std::move(keys)] {
+        std::size_t size = 0;
+        std::vector<char> data;
+        if (vkGetPipelineCacheData(device, cache, &size, nullptr) == VK_SUCCESS && size) {
+            data.resize(size);
+            if (vkGetPipelineCacheData(device, cache, &size, data.data()) != VK_SUCCESS) data.clear();
+            data.resize(size);
+        }
+        // Each written beside, then put in place: a run ended halfway leaves
+        // the last whole one.
+        auto write = [](const std::string& path, const char* bytes, std::size_t count) {
+            {
+                std::ofstream out(path + ".new", std::ios::binary | std::ios::trunc);
+                if (!out) return;
+                out.write(bytes, std::streamsize(count));
+                if (!out) return;
+            }
+            std::remove(path.c_str());
+            std::rename((path + ".new").c_str(), path.c_str());
+        };
+        if (!data.empty()) write(CacheFile("gpu_pipeline_cache.bin"), data.data(), data.size());
+        write(CacheFile("gpu_pipelines.txt"), keys.data(), keys.size());
+        cache_saving_ = false;
+    }).detach();
+}
+
 VkPipeline VulkanGsRenderer::PipelineFor(std::uint32_t key) {
     // Batch after batch asks for the same one.
     if (key == last_pipeline_key_ && last_pipeline_) return last_pipeline_;
@@ -1595,9 +1701,17 @@ VkPipeline VulkanGsRenderer::PipelineFor(std::uint32_t key) {
     pci.pDynamicState = &dynamic;
     pci.layout = layout_;
     VkPipeline pipeline = VK_NULL_HANDLE;
-    if (vkCreateGraphicsPipelines(g_.device, VK_NULL_HANDLE, 1, &pci, nullptr, &pipeline) != VK_SUCCESS)
+    const auto began = std::chrono::steady_clock::now();
+    if (vkCreateGraphicsPipelines(g_.device, cache_, 1, &pci, nullptr, &pipeline) != VK_SUCCESS)
         return VK_NULL_HANDLE;
     pipelines_[key] = pipeline;
+    // PS2HOST_PIPELINE_LOG=1: each pipeline made, and how long it took.
+    static const bool log = std::getenv("PS2HOST_PIPELINE_LOG") != nullptr;
+    if (log)
+        std::fprintf(stderr, "[gpu] pipeline %08X made in %.2f ms (%zu)\n", unsigned(key),
+                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - began).count(),
+                     pipelines_.size());
+    if (known_keys_.insert(key).second) cache_dirty_ = true;
     return pipeline;
 }
 
@@ -1657,7 +1771,7 @@ bool VulkanGsRenderer::MakeDatePipeline() {
     pci.pColorBlendState = &blending;
     pci.pDynamicState = &dynamic;
     pci.layout = layout_;
-    const VkResult r = vkCreateGraphicsPipelines(g_.device, VK_NULL_HANDLE, 1, &pci, nullptr, &date_pipeline_);
+    const VkResult r = vkCreateGraphicsPipelines(g_.device, cache_, 1, &pci, nullptr, &date_pipeline_);
     vkDestroyShaderModule(g_.device, vert, nullptr);
     vkDestroyShaderModule(g_.device, frag, nullptr);
     return r == VK_SUCCESS;
@@ -2820,6 +2934,7 @@ bool VulkanGsRenderer::ReadTarget(std::uint32_t fbp, std::uint32_t fbw, std::uin
 }
 
 VulkanGsRenderer::~VulkanGsRenderer() {
+    while (cache_saving_.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
     g_.Submit();
     {
         std::lock_guard<std::mutex> hold(g_queue_lock);
@@ -2865,6 +2980,7 @@ VulkanGsRenderer::~VulkanGsRenderer() {
     if (swizzle_layout_) vkDestroyPipelineLayout(g_.device, swizzle_layout_, nullptr);
     if (swizzle_pool_) vkDestroyDescriptorPool(g_.device, swizzle_pool_, nullptr);
     if (texture_storage_pool_) vkDestroyDescriptorPool(g_.device, texture_storage_pool_, nullptr);
+    if (cache_) vkDestroyPipelineCache(g_.device, cache_, nullptr);
     if (swizzle_set_layout_) vkDestroyDescriptorSetLayout(g_.device, swizzle_set_layout_, nullptr);
     if (swizzle_) vkDestroyShaderModule(g_.device, swizzle_, nullptr);
     if (decode_pipeline_) vkDestroyPipeline(g_.device, decode_pipeline_, nullptr);
@@ -2922,6 +3038,8 @@ std::string SubmitStats() {
     }
     return out;
 }
+
+void SetPipelineCacheDir(const std::string& dir) { g_pipeline_cache_dir = dir; }
 
 std::unique_ptr<GsRenderer> CreateGsRenderer(Gpu& gpu, std::string* error) {
     auto renderer = std::make_unique<VulkanGsRenderer>(static_cast<VulkanGpu&>(gpu));

@@ -297,6 +297,12 @@ public:
     }
 };
 std::unique_ptr<GsRenderer> CreateGsRenderer(Gpu& gpu, std::string* error);
+/* Where the renderer keeps what it learns between runs: a folder (the PC
+   settings'), for its pipeline cache (gpu_pipeline_cache.bin) and the
+   pipelines the game has drawn with (gpu_pipelines.txt) - made again at the
+   start, from the cache, so none is built in the middle of a race. Set
+   before CreateGsRenderer; "" (a scripted run) keeps nothing. */
+void SetPipelineCacheDir(const std::string& dir);
 
 /* How often the CPU has waited for the GPU to finish what was submitted, and
    for how long in all: "N submissions, S s waiting". */
