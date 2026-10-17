@@ -26,6 +26,7 @@
 #include <windows.h>
 #endif
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -34,6 +35,7 @@
 #include <condition_variable>
 #include <deque>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -317,6 +319,22 @@ Gpu* VulkanDisplay::SharedGpu() {
     return shared_.get();
 }
 
+namespace {
+/* A GPU's preference: PS2HOST_GPU=<part of its name> (any case: "intel",
+   "4070") first - a laptop's integrated GPU measured beside its discrete
+   one - then a discrete GPU. */
+int DeviceScore(const VkPhysicalDeviceProperties& p) {
+    int score = p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? 2 : 1;
+    if (const char* want = std::getenv("PS2HOST_GPU")) {
+        std::string name = p.deviceName, part = want;
+        for (char& ch : name) ch = char(std::tolower(static_cast<unsigned char>(ch)));
+        for (char& ch : part) ch = char(std::tolower(static_cast<unsigned char>(ch)));
+        if (!part.empty() && name.find(part) != std::string::npos) score += 10;
+    }
+    return score;
+}
+}  // namespace
+
 bool VulkanDisplay::Check(VkResult result, const char* what) {
     if (result == VK_SUCCESS) return true;
     char text[160];
@@ -388,7 +406,7 @@ bool VulkanDisplay::Init(const char* title, int width, int height) {
             if (!(props[f].queueFlags & VK_QUEUE_GRAPHICS_BIT) || !present) continue;
             VkPhysicalDeviceProperties p;
             vkGetPhysicalDeviceProperties(candidate, &p);
-            const int score = p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? 2 : 1;
+            const int score = DeviceScore(p);
             if (score > best) {
                 best = score;
                 gpu_ = candidate;

@@ -34,6 +34,7 @@
 #include "swizzle_depth_comp.h"
 #include "depth_load_frag.h"
 #include "decode_comp.h"
+#include "decode_image_comp.h"
 #include "patch_comp.h"
 
 namespace ps2gpu {
@@ -79,6 +80,7 @@ struct Image {
     std::uint32_t pw() const { return width * scale; }
     std::uint32_t ph() const { return height * scale; }
     VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkImageUsageFlags usage = 0;                 /* as made (MakeImage) */
     VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT;
     VkDescriptorSet sampled = VK_NULL_HANDLE;   /* a target read by the DATE setup pass */
     VkDescriptorSet storage = VK_NULL_HANDLE;   /* a target as the swizzle's storage image */
@@ -135,6 +137,7 @@ void MemoryBarrier(VkCommandBuffer cmd) {
 struct DecodeParams {
     std::uint32_t tbp, tbw, psm, tw, th, wms, wmt, minu, maxu, minv, maxv, texa_lo, ta1, csa;
     std::uint32_t mode = 0;     // 0 a texture, 1 a CLUT load
+    std::uint32_t row0 = 0;     // into the image (decode_image_pipeline_): the level's first row
 };
 
 /* swizzle.comp's push constants. */
@@ -560,9 +563,17 @@ private:
     // The CLUT for the draws (gs.frag's set 1): a target read as PSMT8H.
     VkDescriptorSetLayout clut_set_layout_ = VK_NULL_HANDLE;
     VkDescriptorSet clut_set_ = VK_NULL_HANDLE;
-    VkBuffer gsmem_ = VK_NULL_HANDLE, linear_ = VK_NULL_HANDLE, clut_ = VK_NULL_HANDLE;
-    VkDeviceMemory gsmem_memory_ = VK_NULL_HANDLE, linear_memory_ = VK_NULL_HANDLE, clut_memory_ = VK_NULL_HANDLE;
+    VkBuffer gsmem_ = VK_NULL_HANDLE, linear_ = VK_NULL_HANDLE, clut_ = VK_NULL_HANDLE, tables_ = VK_NULL_HANDLE;
+    VkDeviceMemory gsmem_memory_ = VK_NULL_HANDLE, linear_memory_ = VK_NULL_HANDLE, clut_memory_ = VK_NULL_HANDLE,
+                   tables_memory_ = VK_NULL_HANDLE;     // decode.comp's layout tables
     VkShaderModule decode_ = VK_NULL_HANDLE;
+    /* The decode into a texture's own image (storage image, set 1 - the
+       swizzle's image layout), each texture's set from texture_storage_pool_;
+       null where it would not build: the staging buffer and a copy then. */
+    VkShaderModule decode_image_ = VK_NULL_HANDLE;
+    VkPipeline decode_image_pipeline_ = VK_NULL_HANDLE;
+    VkDescriptorPool texture_storage_pool_ = VK_NULL_HANDLE;
+    VkDescriptorSet TextureStorageSet(Image& image);
     VkPipeline decode_pipeline_ = VK_NULL_HANDLE;
     VkShaderModule swizzle_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout swizzle_set_layout_ = VK_NULL_HANDLE;
@@ -730,6 +741,7 @@ bool VulkanGsRenderer::MakeImage(Image& t, std::uint32_t width, std::uint32_t he
     ici.samples = VK_SAMPLE_COUNT_1_BIT;
     ici.tiling = VK_IMAGE_TILING_OPTIMAL;
     ici.usage = usage;
+    t.usage = usage;
     if (vkCreateImage(g_.device, &ici, nullptr, &t.image) != VK_SUCCESS) return false;
     VkMemoryRequirements req;
     vkGetImageMemoryRequirements(g_.device, t.image, &req);
@@ -888,7 +900,8 @@ bool VulkanGsRenderer::InitMemory(std::string* error) {
                                      VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     if (!DeviceBuffer(kLocalMemory, usage, &gsmem_, &gsmem_memory_) ||
         !DeviceBuffer(kLinear, usage, &linear_, &linear_memory_) ||
-        !DeviceBuffer(1024, usage, &clut_, &clut_memory_)) {
+        !DeviceBuffer(1024, usage, &clut_, &clut_memory_) ||
+        !DeviceBuffer(4096, usage, &tables_, &tables_memory_)) {
         if (error) *error = "no GPU memory for GS local memory";
         return false;
     }
@@ -914,15 +927,16 @@ bool VulkanGsRenderer::InitMemory(std::string* error) {
     ci.pCode = spirv_swizzle_comp;
     vkCreateShaderModule(g_.device, &ci, nullptr, &swizzle_);
     const VkShaderStageFlags memory_stages = VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-    VkDescriptorSetLayoutBinding bindings[3] = {
+    VkDescriptorSetLayoutBinding bindings[4] = {
         {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, memory_stages, nullptr},
         {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, memory_stages, nullptr},
-        {2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, memory_stages, nullptr}};
+        {2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, memory_stages, nullptr},
+        {3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, memory_stages, nullptr}};     // decode.comp's tables
     VkDescriptorSetLayoutCreateInfo dli{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    dli.bindingCount = 3;
+    dli.bindingCount = 4;
     dli.pBindings = bindings;
     vkCreateDescriptorSetLayout(g_.device, &dli, nullptr, &swizzle_set_layout_);
-    VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3};
+    VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4};
     VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     dpi.maxSets = 1;
     dpi.poolSizeCount = 1;
@@ -936,10 +950,10 @@ bool VulkanGsRenderer::InitMemory(std::string* error) {
         if (error) *error = "no descriptor set for GS local memory";
         return false;
     }
-    VkDescriptorBufferInfo infos[3] = {{gsmem_, 0, VK_WHOLE_SIZE}, {linear_, 0, VK_WHOLE_SIZE},
-                                       {clut_, 0, VK_WHOLE_SIZE}};
-    VkWriteDescriptorSet writes[3] = {};
-    for (int i = 0; i < 3; ++i) {
+    VkDescriptorBufferInfo infos[4] = {{gsmem_, 0, VK_WHOLE_SIZE}, {linear_, 0, VK_WHOLE_SIZE},
+                                       {clut_, 0, VK_WHOLE_SIZE}, {tables_, 0, VK_WHOLE_SIZE}};
+    VkWriteDescriptorSet writes[4] = {};
+    for (int i = 0; i < 4; ++i) {
         writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[i].dstSet = swizzle_set_;
         writes[i].dstBinding = std::uint32_t(i);
@@ -947,7 +961,7 @@ bool VulkanGsRenderer::InitMemory(std::string* error) {
         writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         writes[i].pBufferInfo = &infos[i];
     }
-    vkUpdateDescriptorSets(g_.device, 3, writes, 0, nullptr);
+    vkUpdateDescriptorSets(g_.device, 4, writes, 0, nullptr);
     VkPushConstantRange push{VK_SHADER_STAGE_COMPUTE_BIT, 0,
                              std::uint32_t(std::max(sizeof(SwizzleParams), sizeof(DecodeParams)))};
     VkPipelineLayoutCreateInfo lci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
@@ -1049,9 +1063,38 @@ bool VulkanGsRenderer::InitMemory(std::string* error) {
         if (error) *error = "the texture decode shader did not load";
         return false;
     }
-    // Local memory starts as zeros, the CPU's copy too.
+    if (swizzle_image_layout_) {
+        VkShaderModuleCreateInfo di{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+        di.codeSize = sizeof spirv_decode_image_comp;
+        di.pCode = spirv_decode_image_comp;
+        vkCreateShaderModule(g_.device, &di, nullptr, &decode_image_);
+        VkComputePipelineCreateInfo dp = cpi;
+        dp.stage.module = decode_image_;
+        dp.layout = swizzle_image_layout_;
+        if (!decode_image_ ||
+            vkCreateComputePipelines(g_.device, VK_NULL_HANDLE, 1, &dp, nullptr, &decode_image_pipeline_) != VK_SUCCESS)
+            decode_image_pipeline_ = VK_NULL_HANDLE;
+        // A set for every texture there may be: the bridge's cache, the pool of
+        // spare images, and room.
+        VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 8192};
+        VkDescriptorPoolCreateInfo tp{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+        tp.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+        tp.maxSets = 8192;
+        tp.poolSizeCount = 1;
+        tp.pPoolSizes = &size;
+        if (vkCreateDescriptorPool(g_.device, &tp, nullptr, &texture_storage_pool_) != VK_SUCCESS)
+            decode_image_pipeline_ = VK_NULL_HANDLE;
+    }
+    // Local memory starts as zeros, the CPU's copy too; decode.comp's
+    // tables copied to their buffer (mode 2), once.
     g_.Record([&](VkCommandBuffer cmd) {
         vkCmdFillBuffer(cmd, gsmem_, 0, kLocalMemory, 0);
+        DecodeParams params{};
+        params.mode = 2;
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, decode_pipeline_);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, swizzle_layout_, 0, 1, &swizzle_set_, 0, nullptr);
+        vkCmdPushConstants(cmd, swizzle_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof params, &params);
+        vkCmdDispatch(cmd, 768 / 8, 1, 1);
         MemoryBarrier(cmd);
     });
     return true;
@@ -1223,6 +1266,24 @@ VkDescriptorSet VulkanGsRenderer::StorageSet(Image& image) {
     ai.descriptorSetCount = 1;
     ai.pSetLayouts = &image_set_layout_;
     if (vkAllocateDescriptorSets(g_.device, &ai, &image.storage) != VK_SUCCESS) return VK_NULL_HANDLE;
+    VkDescriptorImageInfo info{VK_NULL_HANDLE, image.view, VK_IMAGE_LAYOUT_GENERAL};
+    VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    write.dstSet = image.storage;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    write.pImageInfo = &info;
+    vkUpdateDescriptorSets(g_.device, 1, &write, 0, nullptr);
+    return image.storage;
+}
+
+/* A texture's image as the decode's storage image (TextureFromMemory). */
+VkDescriptorSet VulkanGsRenderer::TextureStorageSet(Image& image) {
+    if (image.storage) return image.storage;
+    VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    ai.descriptorPool = texture_storage_pool_;
+    ai.descriptorSetCount = 1;
+    ai.pSetLayouts = &image_set_layout_;
+    if (vkAllocateDescriptorSets(g_.device, &ai, &image.storage) != VK_SUCCESS) return image.storage = VK_NULL_HANDLE;
     VkDescriptorImageInfo info{VK_NULL_HANDLE, image.view, VK_IMAGE_LAYOUT_GENERAL};
     VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
     write.dstSet = image.storage;
@@ -1791,6 +1852,7 @@ void VulkanGsRenderer::DestroyTexture(Texture texture) {
     g_.AfterSubmit([this, device, pool, texture]() mutable {
         for (VkDescriptorSet& set : texture.sets)
             if (set) vkFreeDescriptorSets(device, pool, 1, &set);
+        if (texture.image.storage) vkFreeDescriptorSets(device, texture_storage_pool_, 1, &texture.image.storage);
         if (texture.image.view) vkDestroyImageView(device, texture.image.view, nullptr);
         if (texture.image.image) vkDestroyImage(device, texture.image.image, nullptr);
         if (texture.image.memory)
@@ -1808,6 +1870,8 @@ Texture* VulkanGsRenderer::TextureImage(std::uint64_t key, std::uint32_t width, 
                 vkFreeDescriptorSets(g_.device, pool_, 1, &set);
                 set = VK_NULL_HANDLE;
             }
+        if (texture.image.storage) vkFreeDescriptorSets(g_.device, texture_storage_pool_, 1, &texture.image.storage);
+        texture.image.storage = VK_NULL_HANDLE;
         DestroyImage(texture.image);
         auto pooled = texture_pool_.find(std::uint64_t(width) << 32 | height);
         if (pooled != texture_pool_.end() && !pooled->second.empty()) {
@@ -1817,7 +1881,8 @@ Texture* VulkanGsRenderer::TextureImage(std::uint64_t key, std::uint32_t width, 
             return &texture;
         }
         if (!MakeImage(texture.image, width, height,
-                       VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT))
+                       VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                           (decode_image_pipeline_ ? VK_IMAGE_USAGE_STORAGE_BIT : 0)))
             return nullptr;
     }
     return &texture;
@@ -1833,6 +1898,43 @@ void VulkanGsRenderer::TextureFromMemory(std::uint64_t key, const GsTextureDecod
     if (!texture) return;
     texture->replacement = 0;
     Image& t = texture->image;
+    // Straight into the image where it can be (see decode_image_pipeline_):
+    // one barrier for what wrote local memory and the CLUT before, the
+    // image's layout changes around the levels' dispatches - not a staging
+    // buffer, a copy and two full barriers a level, which on an integrated
+    // GPU were more than half its frame.
+    const VkDescriptorSet direct =
+        decode_image_pipeline_ && (t.usage & VK_IMAGE_USAGE_STORAGE_BIT) ? TextureStorageSet(t) : VK_NULL_HANDLE;
+    if (direct) {
+        g_.Record([&](VkCommandBuffer cmd) {
+            MemoryBarrier(cmd);
+            if (d.clut) {
+                vkCmdUpdateBuffer(cmd, clut_, 0, 1024, d.clut);
+                MemoryBarrier(cmd);
+            }
+            drawn_ = DrawState{};
+            Transition(cmd, t, VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+            const VkDescriptorSet sets[2] = {swizzle_set_, direct};
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, decode_image_pipeline_);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, swizzle_image_layout_, 0, 2, sets, 0, nullptr);
+            std::uint32_t y = 0;
+            for (std::uint32_t n = 0; n < levels; ++n) {
+                const std::uint32_t w = std::max(1u, d.tw >> n), h = std::max(1u, d.th >> n);
+                DecodeParams params{n ? d.level_tbp[n] : d.tbp, n ? std::max(1u, d.level_tbw[n]) : d.tbw, d.psm,
+                                    w, h, d.wms, d.wmt, d.minu >> n, d.maxu >> n, d.minv >> n, d.maxv >> n,
+                                    d.texa_lo, d.ta1, d.csa};
+                params.row0 = y;
+                vkCmdPushConstants(cmd, swizzle_image_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof params, &params);
+                ++g_dispatches;
+                vkCmdDispatch(cmd, (w + 7) / 8, (h + 7) / 8, 1);
+                g_.Mark(cmd, kProfDecode);
+                y += h;
+            }
+            Transition(cmd, t, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_SHADER_READ_BIT,
+                       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        });
+        return;
+    }
     g_.Record([&](VkCommandBuffer cmd) {
         MemoryBarrier(cmd);
         if (d.clut) vkCmdUpdateBuffer(cmd, clut_, 0, 1024, d.clut);
@@ -1961,6 +2063,7 @@ void VulkanGsRenderer::ReleaseTexture(std::uint64_t key) {
     g_.AfterSubmit([this, device, pool, texture]() mutable {
         for (VkDescriptorSet& set : texture.sets)
             if (set) vkFreeDescriptorSets(device, pool, 1, &set);
+        if (texture.image.storage) vkFreeDescriptorSets(device, texture_storage_pool_, 1, &texture.image.storage);
         if (texture.image.view) vkDestroyImageView(device, texture.image.view, nullptr);
         if (texture.image.image) vkDestroyImage(device, texture.image.image, nullptr);
         if (texture.image.memory)
@@ -2761,12 +2864,13 @@ VulkanGsRenderer::~VulkanGsRenderer() {
                 if (pipeline) vkDestroyPipeline(g_.device, pipeline, nullptr);
     if (swizzle_layout_) vkDestroyPipelineLayout(g_.device, swizzle_layout_, nullptr);
     if (swizzle_pool_) vkDestroyDescriptorPool(g_.device, swizzle_pool_, nullptr);
+    if (texture_storage_pool_) vkDestroyDescriptorPool(g_.device, texture_storage_pool_, nullptr);
     if (swizzle_set_layout_) vkDestroyDescriptorSetLayout(g_.device, swizzle_set_layout_, nullptr);
     if (swizzle_) vkDestroyShaderModule(g_.device, swizzle_, nullptr);
     if (decode_pipeline_) vkDestroyPipeline(g_.device, decode_pipeline_, nullptr);
     if (decode_) vkDestroyShaderModule(g_.device, decode_, nullptr);
     for (auto [buffer, memory] : {std::pair{gsmem_, gsmem_memory_}, std::pair{linear_, linear_memory_},
-                                  std::pair{clut_, clut_memory_}}) {
+                                  std::pair{clut_, clut_memory_}, std::pair{tables_, tables_memory_}}) {
         if (buffer) vkDestroyBuffer(g_.device, buffer, nullptr);
         if (memory) vkFreeMemory(g_.device, memory, nullptr);
     }
