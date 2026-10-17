@@ -63,7 +63,7 @@ layout(constant_id = 0) const uint kFeatures = 0xFFFFFFFFu;
 const uint kTextured = 1u, kReplaced = 2u, kMip = 4u, kLinear = 8u, kExpand = 16u, kFine = 32u, kSnap = 64u,
            kFog = 128u, kAlphaTest = 256u, kPabe = 512u, kLogic = 1024u, kSixteen = 2048u;
 bool Has(uint feature) { return (kFeatures & feature) != 0u; }
-const float kEdge = 1.0 / 1024.0;       // Sample's nudge past a texel's edge
+const float kEdge = 1.0 / 16384.0;       // Sample's nudge past a texel's edge
 
 float Ta0() { return float(p.texa & 255u); }
 float Ta1() { return float((p.texa >> 8) & 255u); }
@@ -180,8 +180,10 @@ vec4 Sample(vec2 uv, int n, bool linear) {
     uv /= float(1 << n);
     // A coordinate the GS has on a texel's edge (its fixed point: sprites'
     // texels one to a pixel) comes out of the GPU's interpolation a hair to
-    // either side, as the GPU rounds: a thousandth of a texel on, every GPU
-    // takes the same texel.
+    // either side, as the GPU rounds: nudged on (kEdge: about a float's
+    // last bit at a coordinate of 1024 - larger nudges took coordinates
+    // genuinely just short of an edge over it too), every GPU takes the same
+    // texel.
     if (!linear) return Texel(int(floor(uv.x + kEdge)), int(floor(uv.y + kEdge)), n);
     const ivec2 xy = ivec2(floor((uv - 0.5) * 16.0 + kEdge * 16.0));
     const ivec2 i0 = xy >> 4;
