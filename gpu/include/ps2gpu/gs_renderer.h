@@ -193,6 +193,14 @@ public:
     virtual void UseReplacement(std::uint64_t key, std::uint64_t id) { (void)key, (void)id; }
     /* Whether block-compressed replacements can be uploaded as they are. */
     virtual bool BlockCompression() const { return false; }
+    /* Pipelines made ahead, on a thread of their own, for these keys (what
+       PipelineKeys gave in earlier runs): a draw that needs one finds it
+       made, where making it there and then stalled the drawing - up to two
+       thirds of a second each on an integrated GPU whose driver had not
+       cached it yet. */
+    virtual void WarmPipelines(const std::vector<std::uint32_t>& keys) { (void)keys; }
+    /* The keys of the pipelines the draws have used so far. */
+    virtual std::vector<std::uint32_t> PipelineKeys() const { return {}; }
     /* A depth buffer's contents, one Z per pixel, rows top-down: what local
        memory holds there (the GS's Z, unsigned). */
     virtual void UploadDepth(std::uint32_t zbp, std::uint32_t width, std::uint32_t height,

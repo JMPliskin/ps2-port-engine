@@ -198,8 +198,12 @@ struct Feed {
             u64 t = tail.load(std::memory_order_relaxed);
             u64 h = head.load(std::memory_order_acquire);
             if (t == h) {
-                // Briefly busy, then asleep until there is more.
-                for (int spins = 0; spins < 200 && t == h; ++spins) {
+                // Briefly busy, then asleep until there is more. Briefly: a
+                // pause is up to 140 cycles (Skylake on), and 200 of them each
+                // time the ring ran dry were a third of the thread's time in
+                // gameplay (20-26% of a core -> 14-16% with 16, the pictures'
+                // pacing the same).
+                for (int spins = 0; spins < 16 && t == h; ++spins) {
                     Pause();
                     h = head.load(std::memory_order_acquire);
                 }

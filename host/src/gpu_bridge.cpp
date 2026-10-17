@@ -49,6 +49,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <list>
 #include <map>
 #include <memory>
@@ -1583,6 +1584,56 @@ void PresentGpuPicture(ps2gpu::Display& display, u64 due_ns) {
     if (gs::TheGs().Picture(&pixels, &w, &h)) display.Present(pixels.data(), w, h);
 }
 
+/* Pipelines made ahead of the draws that need them (WarmPipelines): those
+   the scripted runs' draws use, and those earlier sessions' draws used -
+   "pipelines.txt" beside the PC settings, added to as the draws make new
+   ones. A pipeline the driver has not compiled before took an integrated
+   GPU (Intel UHD) up to 670 ms - a freeze the first time each effect was
+   drawn; made ahead, during the logos, none is left for the draws. */
+// (PipelineKey's, made in this order: the runs' own - the logos' and menus'
+// masked draws first - then those learned, then the blends games use most:
+// (Cs - Cd) * FIX + Cd, Cs * FIX + Cd, (Cs - Cd) * Ad + Cd, Cs * Ad + Cd,
+// (Cd - Cs) * As.)
+const u32 kKnownPipelines[] = {0x2000, 0x3E00, 0x4000, 0x5E00, 0x0089, 0x0091};
+const u32 kLikelyPipelines[] = {0x00C9, 0x00D1, 0x00A9, 0x00B1, 0x0103};
+std::set<u32> g_known_pipelines;
+std::size_t g_pipelines_used = 0;
+std::string g_pipelines_path;       // none for a scripted run (it starts in virtual time): it keeps to its own
+
+void WarmPipelines(Bridge& bridge) {
+    std::vector<u32> keys(std::begin(kKnownPipelines), std::end(kKnownPipelines));
+    if (!SettingsPath().empty() && !VirtualClock())
+        g_pipelines_path = (std::filesystem::path(SettingsPath()).parent_path() / "pipelines.txt").u8string();
+    const std::string& path = g_pipelines_path;
+    std::ifstream in(path.empty() ? std::string() : path);
+    for (std::string line; std::getline(in, line);) {
+        unsigned key = 0;
+        if (!line.empty() && line[0] != '#' && std::sscanf(line.c_str(), "%x", &key) == 1) keys.push_back(key);
+    }
+    keys.insert(keys.end(), std::begin(kLikelyPipelines), std::end(kLikelyPipelines));
+    g_known_pipelines.insert(keys.begin(), keys.end());
+    g_known_pipelines.insert(0);        // the plain one, made with the renderer
+    bridge.renderer->WarmPipelines(keys);
+}
+
+// At a frame's end (the GS thread's): the pipelines the draws made that no
+// earlier session had, onto the list.
+void LearnPipelines(Bridge& bridge) {
+    const std::vector<u32> keys = bridge.renderer->PipelineKeys();
+    if (keys.size() == g_pipelines_used) return;
+    g_pipelines_used = keys.size();
+    const std::string& path = g_pipelines_path;
+    for (u32 key : keys) {
+        if (!g_known_pipelines.insert(key).second || path.empty()) continue;
+        const bool fresh = !std::filesystem::exists(std::filesystem::u8path(path));
+        if (std::FILE* out = std::fopen(path.c_str(), "a")) {
+            if (fresh) std::fprintf(out, "# GPU pipelines the game has drawn with, made as it starts (delete to forget)\n");
+            std::fprintf(out, "%04X\n", unsigned(key));
+            std::fclose(out);
+        }
+    }
+}
+
 /* The texture pack (texture_pack.h): the "texture pack" folder beside the PC
    settings - the release's own folder - or the "texture_pack_dir" setting's,
    or PS2HOST_TEXTURE_PACK's; on unless "texture_pack" is off (Tab). Not for a
@@ -1615,6 +1666,7 @@ bool StartGpuRenderer(std::string* error, GpuMode mode, bool show) {
     bridge.renderer = ps2gpu::CreateGsRenderer(*device, error);
     if (!bridge.renderer) return false;
     g_bridge = &bridge;
+    WarmPipelines(bridge);
     OpenTexturePack();
     bridge.primary = mode == GpuMode::Primary;
     // The CPU's waits for the GPU, on the profiler's timeline, by why.
@@ -1670,6 +1722,7 @@ bool StartGpuRenderer(std::string* error, GpuMode mode, bool show) {
         // displayed target (no read-back); the EE goes on meanwhile.
         SetGsFrameHandler([](u64 frame) {
             GpuShadowFrame(frame, std::string());
+            LearnPipelines(*g_bridge);
             // The internal resolution, between frames (the GS thread's).
             const u32 scale = WantedScale(WindowDisplay());
             if (scale != g_bridge->renderer->Scale()) Rescale(*g_bridge, scale);
@@ -1838,6 +1891,12 @@ std::string GpuShadowSummary() {
                       static_cast<unsigned long long>(g_bridge->gpu_decodes),
                       static_cast<unsigned long long>(g_bridge->gpu_clut_loads));
         std::string summary = std::string(text) + "\ngpu: " + ps2gpu::SubmitStats();
+        summary += "\ngpu: pipelines used:";
+        for (u32 key : g_bridge->renderer->PipelineKeys()) {
+            char hex[16];
+            std::snprintf(hex, sizeof hex, " %04X", unsigned(key));
+            summary += hex;
+        }
         if (texture_pack::Count())
             summary += "\ngpu: texture pack of " + std::to_string(texture_pack::Count()) + " files, " +
                        std::to_string(g_bridge->replacements) + " textures replaced";

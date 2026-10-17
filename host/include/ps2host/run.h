@@ -464,6 +464,12 @@ bool FastDisc();
    once (a scripted run's stays the drive's). */
 void SetFastDisc(bool on);
 void SetFastLoadingDefault(bool on);
+/* VU1's compiled programs without the MAC and STATUS flags no later run can
+   read (--vu-fast; vu.h's Vu::fast) in real time, unless the player's
+   "vu_fast" setting is off - for a port whose scripted runs draw the same
+   pictures with them as without (regress.py --vu-fast). Scripted runs keep
+   the exact VU. */
+void SetVuFastDefault(bool on);
 void AdvanceClock(u64 ns);
 /* Run the INTC handlers for `cause`, if it is enabled (threads.cpp). */
 void RaiseIntc(u32 cause);

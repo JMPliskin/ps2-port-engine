@@ -15,10 +15,16 @@
  */
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <mutex>
+#include <deque>
+#include <thread>
 #include <tuple>
 #include <unordered_map>
 
@@ -104,6 +110,13 @@ struct Texture {
 
 // What the frames' command buffers hold (RendererCounters, PS2HOST_GPU_LOG).
 std::uint64_t g_barriers = 0, g_transitions = 0, g_dispatches = 0, g_draws = 0, g_passes = 0, g_feedback = 0;
+// Pipelines made as a draw needed them, not ahead (SubmitStats): each a stall
+// of the GS thread.
+std::uint64_t g_pipelines_made = 0;
+double g_pipeline_seconds = 0, g_pipeline_longest = 0;
+// ...and made ahead (WarmPipelines; the warming thread's), and the draws' waits for it.
+std::atomic<std::uint64_t> g_pipelines_warmed{0}, g_warm_ns{0};
+double g_warm_wait_seconds = 0;
 
 void Transition(VkCommandBuffer cmd, Image& t, VkImageLayout to, VkAccessFlags dst_access,
                 VkPipelineStageFlags dst_stage) {
@@ -294,6 +307,8 @@ public:
                            std::uint32_t levels, const std::uint8_t* data, std::size_t bytes) override;
     bool HasReplacement(std::uint64_t id) const override { return replacements_.count(id) != 0; }
     void UseReplacement(std::uint64_t key, std::uint64_t id) override { textures_[key].replacement = id; }
+    void WarmPipelines(const std::vector<std::uint32_t>& keys) override;
+    std::vector<std::uint32_t> PipelineKeys() const override;
     bool BlockCompression() const override { return g_.bc; }
     void UploadDepth(std::uint32_t zbp, std::uint32_t width, std::uint32_t height, const std::uint32_t* z) override;
     void UploadTarget(std::uint32_t fbp, std::uint32_t fbw, std::uint32_t psm, const std::uint32_t* pixels,
@@ -373,6 +388,9 @@ private:
     std::vector<VkDeviceMemory> image_blocks_;
     void Fill(Texture& texture, const std::uint32_t* pixels);
     VkPipeline PipelineFor(std::uint32_t key);
+    /* A pipeline for `key`, made now - on any thread: it reads only what
+       Init made. */
+    VkPipeline MakePipeline(std::uint32_t key) const;
     /* The destination alpha test's setup pass: stencil 1 where the target's
        alpha bit equals DATM. */
     bool MakeDatePipeline();
@@ -473,6 +491,16 @@ private:
     VkSampler samplers_[8] = {};    /* bilinear << 2 | clamp_s << 1 | clamp_t */
     VkPipelineLayout layout_ = VK_NULL_HANDLE;
     std::map<std::uint32_t, VkPipeline> pipelines_;
+    // WarmPipelines: the keys still to make, the one being made, and those
+    // made and not yet taken into pipelines_ by a draw.
+    std::mutex warm_mutex_;
+    std::condition_variable warm_made_;
+    std::deque<std::uint32_t> warm_queue_;     // in the order given
+    std::uint32_t warm_making_ = ~0u;
+    std::map<std::uint32_t, VkPipeline> warmed_;
+    bool warm_stop_ = false, warm_running_ = false;
+    std::atomic<bool> warm_used_{false};
+    std::thread warm_thread_;
     std::uint32_t last_pipeline_key_ = ~0u;
     VkPipeline last_pipeline_ = VK_NULL_HANDLE;
     std::map<Key, Image> targets_;
@@ -1463,6 +1491,84 @@ VkPipeline VulkanGsRenderer::PipelineFor(std::uint32_t key) {
         last_pipeline_ = found->second;
         return found->second;
     }
+    // Made ahead (WarmPipelines); being made, and waited for - it is on its
+    // way; or only queued, and then made here rather than after the rest.
+    if (warm_used_.load(std::memory_order_acquire)) {
+        std::unique_lock<std::mutex> lock(warm_mutex_);
+        if (warm_making_ == key) {
+            const auto waited = std::chrono::steady_clock::now();
+            warm_made_.wait(lock, [&] { return warm_making_ != key; });
+            g_warm_wait_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - waited).count();
+        }
+        warm_queue_.erase(std::remove(warm_queue_.begin(), warm_queue_.end(), key), warm_queue_.end());
+        auto made = warmed_.find(key);
+        if (made != warmed_.end()) {
+            const VkPipeline pipeline = made->second;
+            warmed_.erase(made);
+            if (pipeline) {
+                pipelines_[key] = pipeline;
+                return pipeline;
+            }
+        }
+    }
+    const auto began = std::chrono::steady_clock::now();
+    const VkPipeline pipeline = MakePipeline(key);
+    if (!pipeline) return VK_NULL_HANDLE;
+    const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - began).count();
+    ++g_pipelines_made;
+    g_pipeline_seconds += took;
+    g_pipeline_longest = std::max(g_pipeline_longest, took);
+    pipelines_[key] = pipeline;
+    return pipeline;
+}
+
+void VulkanGsRenderer::WarmPipelines(const std::vector<std::uint32_t>& keys) {
+    {
+        std::lock_guard<std::mutex> lock(warm_mutex_);
+        for (std::uint32_t key : keys)
+            if (!warmed_.count(key) && key != warm_making_ &&
+                std::find(warm_queue_.begin(), warm_queue_.end(), key) == warm_queue_.end())
+                warm_queue_.push_back(key);
+        if (warm_queue_.empty() || warm_running_) return;     // (a running thread takes them too)
+        warm_running_ = true;
+        warm_used_ = true;
+    }
+    if (warm_thread_.joinable()) warm_thread_.join();
+    warm_thread_ = std::thread([this] {
+        for (;;) {
+            std::uint32_t key;
+            {
+                std::lock_guard<std::mutex> lock(warm_mutex_);
+                if (warm_stop_ || warm_queue_.empty()) {
+                    warm_running_ = false;
+                    break;
+                }
+                key = warm_queue_.front();
+                warm_queue_.pop_front();
+                warm_making_ = key;
+            }
+            const auto began = std::chrono::steady_clock::now();
+            const VkPipeline pipeline = MakePipeline(key);
+            g_warm_ns += std::uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                           std::chrono::steady_clock::now() - began).count());
+            ++g_pipelines_warmed;
+            {
+                std::lock_guard<std::mutex> lock(warm_mutex_);
+                warmed_[key] = pipeline;
+                warm_making_ = ~0u;
+            }
+            warm_made_.notify_all();
+        }
+    });
+}
+
+std::vector<std::uint32_t> VulkanGsRenderer::PipelineKeys() const {
+    std::vector<std::uint32_t> keys;
+    for (const auto& [key, pipeline] : pipelines_) keys.push_back(key);
+    return keys;
+}
+
+VkPipeline VulkanGsRenderer::MakePipeline(std::uint32_t key) const {
     VkPipelineShaderStageCreateInfo stages[2] = {{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO},
                                                  {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}};
     stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
@@ -1536,7 +1642,6 @@ VkPipeline VulkanGsRenderer::PipelineFor(std::uint32_t key) {
     VkPipeline pipeline = VK_NULL_HANDLE;
     if (vkCreateGraphicsPipelines(g_.device, VK_NULL_HANDLE, 1, &pci, nullptr, &pipeline) != VK_SUCCESS)
         return VK_NULL_HANDLE;
-    pipelines_[key] = pipeline;
     return pipeline;
 }
 
@@ -2717,6 +2822,15 @@ bool VulkanGsRenderer::ReadTarget(std::uint32_t fbp, std::uint32_t fbw, std::uin
 }
 
 VulkanGsRenderer::~VulkanGsRenderer() {
+    if (warm_thread_.joinable()) {
+        {
+            std::lock_guard<std::mutex> lock(warm_mutex_);
+            warm_stop_ = true;
+        }
+        warm_thread_.join();
+    }
+    for (auto& [key, pipeline] : warmed_)
+        if (pipeline) vkDestroyPipeline(g_.device, pipeline, nullptr);
     g_.Submit();
     {
         std::lock_guard<std::mutex> hold(g_queue_lock);
@@ -2806,10 +2920,15 @@ std::string RendererCounters() {
 }
 
 std::string SubmitStats() {
-    char text[160];
+    char text[256];
     std::snprintf(text, sizeof text, "%llu submissions, the GPU busy %.1f s, %.1f s waiting for them",
                   static_cast<unsigned long long>(g_submits), double(g_gpu_ns.load()) / 1e9, g_wait_seconds);
     std::string out = text;
+    std::snprintf(text, sizeof text, "; %llu pipelines made as drawn, %.1f ms (the longest %.1f ms), %llu ahead in %.1f ms (%.1f ms waited for)",
+                  static_cast<unsigned long long>(g_pipelines_made), g_pipeline_seconds * 1e3, g_pipeline_longest * 1e3,
+                  static_cast<unsigned long long>(g_pipelines_warmed.load()), double(g_warm_ns.load()) / 1e6,
+                  g_warm_wait_seconds * 1e3);
+    out += text;
     for (const WaitReason& w : g_waits) {
         if (!w.why || !w.count) continue;
         std::snprintf(text, sizeof text, "; %s %llu, %.1f s", w.why, static_cast<unsigned long long>(w.count),

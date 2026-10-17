@@ -337,6 +337,8 @@ bool g_fast_disc = false, g_fast_loading_default = false;
 bool FastDisc() { return g_fast_disc; }
 void SetFastDisc(bool on) { g_fast_disc = on; }
 void SetFastLoadingDefault(bool on) { g_fast_loading_default = on; }
+bool g_vu_fast_default = false;
+void SetVuFastDefault(bool on) { g_vu_fast_default = on; }
 
 Stats& RunStats() {
     static Stats stats;
@@ -668,7 +670,8 @@ int Run(const Options& options) {
     if (!options.vu_record.empty()) Vu::RecordPrograms(options.vu_record);
     if (!options.memcard.empty()) mc2::SetCardDirectory(options.memcard);
     if (options.vu_interpret) Vu1().use_compiled = Vu0().use_compiled = false;
-    Vu1().fast = options.vu_fast;
+    Vu1().fast = options.vu_fast || (!options.virtual_time && SettingOn("vu_fast", g_vu_fast_default));
+    if (Vu1().fast && !options.vu_fast) std::fprintf(stderr, "[host] VU1 without the flags no one reads (vu_fast)\n");
     SetUntilFrame(options.until_frame);
     SetFrameTimes(options.frame_times);
     if (options.gpu || options.gpu_shadow) {

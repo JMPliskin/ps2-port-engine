@@ -768,6 +768,13 @@ void StartRealTimeThreads() {
     process.StateMask = 0;
     SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &process, sizeof process);
     FastThread();
+    // The EE above the threads it feeds (VIF1's worker, the GS thread): it
+    // takes the blanks, and what they do waits for it - queued, at most two
+    // frames ahead. At one priority, with fewer cores than busy threads, a
+    // blank waited for the EE's turn behind them: on two cores (Resident
+    // Evil Outbreak, J's Bar, 30 s) 200 blanks taken late and 82 pictures a
+    // period late; above them, 14-23 and 1-6. No change with cores to spare.
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
     if (!TimerThread().joinable()) {
         TimerThread() = std::thread([] {
             timeline::NameThread("vertical blank timer");

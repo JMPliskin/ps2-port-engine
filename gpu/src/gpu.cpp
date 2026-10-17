@@ -5,9 +5,12 @@
 
 #include "gpu_internal.h"
 
+#include <algorithm>
+#include <cctype>
 #include <cstdlib>
 
 #include <cstdio>
+#include <string>
 #include <vector>
 
 namespace ps2gpu {
@@ -36,10 +39,19 @@ bool VulkanGpu::Init(std::string* error) {
     std::vector<VkPhysicalDevice> list(n);
     vkEnumeratePhysicalDevices(instance, &n, list.data());
     int best = -1;
+    // PS2HOST_GPU_DEVICE: only a device whose name holds this (any case) -
+    // a laptop's integrated GPU rather than its discrete one, say.
+    std::string wanted = std::getenv("PS2HOST_GPU_DEVICE") ? std::getenv("PS2HOST_GPU_DEVICE") : "";
+    std::transform(wanted.begin(), wanted.end(), wanted.begin(), [](unsigned char ch) { return char(std::tolower(ch)); });
     for (VkPhysicalDevice candidate : list) {
         VkPhysicalDeviceProperties p;
         vkGetPhysicalDeviceProperties(candidate, &p);
         if (p.apiVersion < VK_API_VERSION_1_3) continue;
+        if (!wanted.empty()) {
+            std::string name = p.deviceName;
+            std::transform(name.begin(), name.end(), name.begin(), [](unsigned char ch) { return char(std::tolower(ch)); });
+            if (name.find(wanted) == std::string::npos) continue;
+        }
         std::uint32_t families = 0;
         vkGetPhysicalDeviceQueueFamilyProperties(candidate, &families, nullptr);
         std::vector<VkQueueFamilyProperties> props(families);

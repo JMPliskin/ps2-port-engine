@@ -200,9 +200,14 @@ void Spu2::Start(Voice& v) {
 
 void Spu2::Decode(Voice& v) {
     const u32 block = v.nax & kRamMask & ~15u;
+    if (ram_[(block + 1) & kRamMask] & 4) v.lsax = block;    // loop start: where a repeat returns
+    // A silent voice runs on through its blocks (their flags, IRQA), but its
+    // samples are never heard - a key-on starts it afresh (Start: the
+    // decoder's history cleared, its block decoded again). Most of the 48
+    // voices are silent most of the time.
+    if (v.phase == Phase::Off) return;
     u8 bytes[kBlockBytes];
     for (u32 i = 0; i < kBlockBytes; ++i) bytes[i] = ram_[(block + i) & kRamMask];
-    if (bytes[1] & 4) v.lsax = block;               // loop start: where a repeat returns
     DecodeBlock(bytes, v.samples, &v.older, &v.old);
 }
 
