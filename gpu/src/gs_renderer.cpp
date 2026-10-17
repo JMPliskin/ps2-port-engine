@@ -17,7 +17,9 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
+#include <deque>
 #include <fstream>
 #include <set>
 #include <string>
@@ -25,6 +27,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <mutex>
 #include <tuple>
 #include <unordered_map>
 
@@ -71,6 +74,31 @@ struct FragmentParams {
                                 // 8-15: a sprite on a target drawn larger, the target's scale (0: none)
 };
 constexpr std::uint32_t kFragmentOffset = 16;
+
+/* gs.frag's kFeatures: what a draw with these parameters may use (each bit
+   as the shader has it), for a pipeline made without the rest. Kept in a
+   pipeline key's bits 16-27, inverted: a key without them is the whole
+   shader. */
+constexpr int kFeatureShift = 16;
+constexpr std::uint32_t kFeatureBits = 0xFFFu;
+std::uint32_t Features(const FragmentParams& p) {
+    std::uint32_t f = 0;
+    if (p.textured) {
+        f |= 1u;                                                    // kTextured
+        if (p.tex_format & 0x100u) f |= 2u;                         // kReplaced
+        if (p.bilinear & 2u) f |= 4u | 8u;                          // kMip (its levels may be bilinear)
+        if (p.bilinear & 1u) f |= 8u;                               // kLinear
+        if (p.tex_format & 0xFFu) f |= 16u;                         // kExpand
+        if (p.scale > 1u) f |= 32u;                                 // kFine
+        if (((p.blend_ops >> 8) & 255u) > 1u) f |= 64u;             // kSnap
+    }
+    if (p.fge) f |= 128u;                                           // kFog
+    if (p.atst != 1u || p.afail == 1u) f |= 256u;                   // kAlphaTest: anything discarded by it
+    if (p.pabe) f |= 512u;                                          // kPabe
+    if (p.logic) f |= 1024u;                                        // kLogic
+    if ((p.blend_ops >> 16) & 1u) f |= 2048u;                       // kSixteen
+    return f;
+}
 
 struct Image {
     VkImage image = VK_NULL_HANDLE;
@@ -497,6 +525,25 @@ private:
     std::map<std::uint32_t, VkPipeline> pipelines_;
     std::uint32_t last_pipeline_key_ = ~0u;
     VkPipeline last_pipeline_ = VK_NULL_HANDLE;
+    /* A pipeline for a kind of draw (a key with features, Features) made by
+       a thread of its own while playing: until it is ready the batch draws
+       with the whole shader (the same pictures) - none made in the middle of
+       a frame. Scripted runs (no pipeline cache) make them at once. */
+    bool async_pipelines_ = false;
+    std::thread pipeline_worker_;
+    std::mutex pipeline_lock_;
+    std::condition_variable pipeline_wake_;
+    std::deque<std::uint32_t> pipeline_queue_;
+    std::vector<std::pair<std::uint32_t, VkPipeline>> pipelines_made_;
+    std::set<std::uint32_t> pipelines_asked_;
+    std::atomic<bool> pipelines_ready_{false};
+    bool pipeline_stop_ = false;
+    VkPipeline MakePipeline(std::uint32_t key);
+    void AskWorker(std::uint32_t key, bool soon);
+    std::size_t warm_left_ = 0;         // WarmPipelines' still to come
+    std::chrono::steady_clock::time_point warm_began_{};
+    void KeepPipeline(std::uint32_t key, VkPipeline pipeline, double ms);
+    void TakeMadePipelines();
     std::map<Key, Image> targets_;
     std::map<Key, Image> depths_;   /* by (ZBP or a target's own, width, height) */
     std::map<std::uint64_t, Texture> textures_;
@@ -1561,22 +1608,52 @@ void VulkanGsRenderer::OpenPipelineCache() {
     cache_saved_ = std::chrono::steady_clock::now();
 }
 
-/* The pipelines the game drew with before, made now (from the cache: a
-   fraction of a millisecond each) rather than when a race first needs one. */
+/* The pipelines the game drew with before, made by the worker from the
+   start (from the cache: a fraction of a millisecond each; after a new
+   driver or shader, tens of milliseconds - seconds in all, which the start
+   does not wait for) rather than when a race first needs one. */
 void VulkanGsRenderer::WarmPipelines() {
     if (g_pipeline_cache_dir.empty()) return;
+    async_pipelines_ = true;            // (a run that keeps a cache is a player's)
     std::ifstream in(CacheFile("gpu_pipelines.txt"));
     if (!in) return;
-    const auto began = std::chrono::steady_clock::now();
     std::string word;
-    std::size_t made = 0;
+    std::vector<std::uint32_t> keys;
     while (in >> word) {
         const std::uint32_t key = std::uint32_t(std::strtoul(word.c_str(), nullptr, 16));
-        if (PipelineFor(key)) ++made;
+        if (pipelines_.count(key) || !pipelines_asked_.insert(key).second) continue;
+        known_keys_.insert(key);
+        keys.push_back(key);
     }
-    cache_dirty_ = false;               // nothing new yet
-    std::fprintf(stderr, "[gpu] %zu pipelines made ready in %.0f ms\n", made,
-                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - began).count());
+    warm_began_ = std::chrono::steady_clock::now();
+    warm_left_ = keys.size();
+    for (std::uint32_t key : keys) AskWorker(key, false);
+}
+
+/* A pipeline for the worker to make: a player's draw first (`soon`), the
+   start's list after. */
+void VulkanGsRenderer::AskWorker(std::uint32_t key, bool soon) {
+    if (!pipeline_worker_.joinable())
+        pipeline_worker_ = std::thread([this] {
+            std::unique_lock<std::mutex> hold(pipeline_lock_);
+            for (;;) {
+                pipeline_wake_.wait(hold, [this] { return pipeline_stop_ || !pipeline_queue_.empty(); });
+                if (pipeline_stop_) return;
+                const std::uint32_t next = pipeline_queue_.front();
+                pipeline_queue_.pop_front();
+                hold.unlock();
+                const VkPipeline made = MakePipeline(next);
+                hold.lock();
+                pipelines_made_.emplace_back(next, made);
+                pipelines_ready_.store(true, std::memory_order_release);
+            }
+        });
+    {
+        std::lock_guard<std::mutex> hold(pipeline_lock_);
+        if (soon) pipeline_queue_.push_front(key);
+        else pipeline_queue_.push_back(key);
+    }
+    pipeline_wake_.notify_one();
 }
 
 /* The cache and the keys, written when new pipelines came, at most every
@@ -1624,12 +1701,67 @@ void VulkanGsRenderer::SavePipelineCache() {
 VkPipeline VulkanGsRenderer::PipelineFor(std::uint32_t key) {
     // Batch after batch asks for the same one.
     if (key == last_pipeline_key_ && last_pipeline_) return last_pipeline_;
+    if (pipelines_ready_.load(std::memory_order_acquire)) TakeMadePipelines();
     auto found = pipelines_.find(key);
     if (found != pipelines_.end()) {
         last_pipeline_key_ = key;
         last_pipeline_ = found->second;
         return found->second;
     }
+    // A kind of draw's own, while playing: asked of the worker, the whole
+    // shader's meanwhile (made now if it is not yet: one for many kinds - a
+    // kind's own made here instead, the first time a player meets each, took
+    // up to 0.7 s on an integrated GPU's cold driver).
+    if (async_pipelines_ && (key >> kFeatureShift)) {
+        const VkPipeline stand_in = PipelineFor(key & ((1u << kFeatureShift) - 1));
+        if (stand_in) {
+            if (pipelines_asked_.insert(key).second) AskWorker(key, true);
+            return stand_in;
+        }
+    }
+    const auto began = std::chrono::steady_clock::now();
+    const VkPipeline pipeline = MakePipeline(key);
+    if (!pipeline) return VK_NULL_HANDLE;
+    KeepPipeline(key, pipeline, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - began).count());
+    return pipeline;
+}
+
+/* The worker's pipelines into the renderer's (the GS thread's) own. */
+void VulkanGsRenderer::TakeMadePipelines() {
+    std::vector<std::pair<std::uint32_t, VkPipeline>> made;
+    {
+        std::lock_guard<std::mutex> hold(pipeline_lock_);
+        made.swap(pipelines_made_);
+        pipelines_ready_.store(false, std::memory_order_relaxed);
+    }
+    for (const auto& [key, pipeline] : made) {
+        pipelines_asked_.erase(key);
+        if (warm_left_ && --warm_left_ == 0)
+            std::fprintf(stderr, "[gpu] the pipelines of the last runs made ready in %.0f ms\n",
+                         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - warm_began_).count());
+        if (!pipeline) continue;
+        if (pipelines_.count(key)) vkDestroyPipeline(g_.device, pipeline, nullptr);
+        else KeepPipeline(key, pipeline, -1.0);
+    }
+    last_pipeline_key_ = ~0u;           // (it may have been the whole shader's, standing in)
+}
+
+void VulkanGsRenderer::KeepPipeline(std::uint32_t key, VkPipeline pipeline, double ms) {
+    pipelines_[key] = pipeline;
+    // PS2HOST_PIPELINE_LOG=1: each pipeline made, and how long it took.
+    static const bool log = std::getenv("PS2HOST_PIPELINE_LOG") != nullptr;
+    if (log) {
+        if (ms >= 0.0)
+            std::fprintf(stderr, "[gpu] pipeline %08X made in %.2f ms (%zu)\n", unsigned(key), ms, pipelines_.size());
+        else
+            std::fprintf(stderr, "[gpu] pipeline %08X made by the worker (%zu)\n", unsigned(key), pipelines_.size());
+    }
+    if (known_keys_.insert(key).second) cache_dirty_ = true;
+}
+
+/* A pipeline for a key: blending and the write mask (PipelineKey), the
+   shader's features (Features) as its specialisation. Any thread. */
+VkPipeline VulkanGsRenderer::MakePipeline(std::uint32_t key) {
     VkPipelineShaderStageCreateInfo stages[2] = {{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO},
                                                  {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}};
     stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
@@ -1638,6 +1770,10 @@ VkPipeline VulkanGsRenderer::PipelineFor(std::uint32_t key) {
     stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
     stages[1].module = key & kShaderBlend ? frag_blend_ : frag_;
     stages[1].pName = "main";
+    const std::uint32_t features = ~(key >> kFeatureShift);     // all of them for a key without
+    const VkSpecializationMapEntry feature_entry{0, 0, sizeof features};
+    VkSpecializationInfo specialisation{1, &feature_entry, sizeof features, &features};
+    stages[1].pSpecializationInfo = &specialisation;
     VkVertexInputBindingDescription binding{0, sizeof(PackedVertex), VK_VERTEX_INPUT_RATE_VERTEX};
     VkVertexInputAttributeDescription attributes[6] = {
         {0, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(PackedVertex, x)},
@@ -1701,17 +1837,8 @@ VkPipeline VulkanGsRenderer::PipelineFor(std::uint32_t key) {
     pci.pDynamicState = &dynamic;
     pci.layout = layout_;
     VkPipeline pipeline = VK_NULL_HANDLE;
-    const auto began = std::chrono::steady_clock::now();
     if (vkCreateGraphicsPipelines(g_.device, cache_, 1, &pci, nullptr, &pipeline) != VK_SUCCESS)
         return VK_NULL_HANDLE;
-    pipelines_[key] = pipeline;
-    // PS2HOST_PIPELINE_LOG=1: each pipeline made, and how long it took.
-    static const bool log = std::getenv("PS2HOST_PIPELINE_LOG") != nullptr;
-    if (log)
-        std::fprintf(stderr, "[gpu] pipeline %08X made in %.2f ms (%zu)\n", unsigned(key),
-                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - began).count(),
-                     pipelines_.size());
-    if (known_keys_.insert(key).second) cache_dirty_ = true;
     return pipeline;
 }
 
@@ -2529,7 +2656,6 @@ void VulkanGsRenderer::Flush() {
     // target is twice as tall: the same memory), so it is one image.
     Image* depth = DepthFor(state_.depth ? state_.zbp : 0x10000u + state_.fbp, t->width,
                             state_.depth ? std::min(t->height, kDepthRows) : t->height);
-    const VkPipeline pipeline = PipelineFor(PipelineKey(state_));
     Texture* texture = &blank_;
     if (state_.textured) {
         auto found = textures_.find(state_.texture);
@@ -2643,11 +2769,11 @@ void VulkanGsRenderer::Flush() {
     if (Is16Bit(state_.psm)) params.blend_ops |= 1u << 16;    // gs.frag: colour cut to five bits a channel
     const std::uint32_t count = std::uint32_t(pending_.size());
     static int complaints = 0;
-    if ((!pipeline || !set) && complaints < 5) {
+    if (!set && complaints < 5) {
         ++complaints;
-        std::fprintf(stderr, "[ps2gpu] a batch was dropped: %s\n", pipeline ? "no descriptor set" : "no pipeline");
+        std::fprintf(stderr, "[ps2gpu] a batch was dropped: no descriptor set\n");
     }
-    if (pipeline && set) {
+    if (set) {
         g_.RecordInPass([&](VkCommandBuffer cmd) {
             // Barriers and copies cannot go inside a rendering pass: a batch
             // needing one, or drawing elsewhere, ends the open pass first.
@@ -2774,8 +2900,21 @@ void VulkanGsRenderer::Flush() {
                         if (!(pass.write_mask >> channel & 1)) keep |= 0xFFu << (8 * channel);
                     for (std::uint32_t op = logic ? 1 : 0; op <= (logic ? 2u : 0u); ++op) {
                         const std::uint32_t op_key = op ? ((key & (0xFu << 9)) | op << 13) : key;
-                        const VkPipeline chosen = op_key == PipelineKey(state_) ? pipeline : PipelineFor(op_key);
-                        if (!chosen) continue;
+                        params.afail = pass.mode;
+                        params.pabe = half;
+                        params.logic = op;
+                        // PS2HOST_GPU_UBERSHADER=1: every draw with the whole shader.
+                        static const bool whole = std::getenv("PS2HOST_GPU_UBERSHADER") != nullptr;
+                        const std::uint32_t full_key =
+                            whole ? op_key : op_key | ((~Features(params) & kFeatureBits) << kFeatureShift);
+                        const VkPipeline chosen = PipelineFor(full_key);
+                        if (!chosen) {
+                            if (complaints < 5) {
+                                ++complaints;
+                                std::fprintf(stderr, "[ps2gpu] a batch was dropped: no pipeline\n");
+                            }
+                            continue;
+                        }
                         if (d.pipeline != chosen) {
                             d.pipeline = chosen;
                             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, chosen);
@@ -2783,9 +2922,6 @@ void VulkanGsRenderer::Flush() {
                         const int depth_write = pass.depth_write && op != 1 ? 1 : 0;
                         if (d.depth_write != depth_write)
                             vkCmdSetDepthWriteEnable(cmd, VkBool32(d.depth_write = depth_write));
-                        params.afail = pass.mode;
-                        params.pabe = half;
-                        params.logic = op;
                         params.keep = keep;
                         vkCmdPushConstants(cmd, layout_, VK_SHADER_STAGE_FRAGMENT_BIT, kFragmentOffset,
                                            sizeof params, &params);
@@ -2934,6 +3070,16 @@ bool VulkanGsRenderer::ReadTarget(std::uint32_t fbp, std::uint32_t fbw, std::uin
 }
 
 VulkanGsRenderer::~VulkanGsRenderer() {
+    if (pipeline_worker_.joinable()) {
+        {
+            std::lock_guard<std::mutex> hold(pipeline_lock_);
+            pipeline_stop_ = true;
+        }
+        pipeline_wake_.notify_one();
+        pipeline_worker_.join();
+    }
+    for (const auto& [key, pipeline] : pipelines_made_)
+        if (pipeline) pipelines_.emplace(key, pipeline);
     while (cache_saving_.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
     g_.Submit();
     {
