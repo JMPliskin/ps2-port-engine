@@ -108,6 +108,7 @@ struct Image {
     VkDeviceSize offset = 0;
     std::uint32_t piece_class = 0, memory_type = 0;
     VkImageView view = VK_NULL_HANDLE;
+    VkImageView words = VK_NULL_HANDLE;     /* an RGBA8 image's texels as 32-bit words (gs.frag's gather) */
     std::uint32_t width = 0, height = 0;    // in GS pixels
     std::uint32_t scale = 1;                // the image's pixels to a GS pixel, each way (targets, depth)
     std::uint32_t levels = 1;               // mipmap levels (a texture pack's replacements)
@@ -513,6 +514,7 @@ private:
     }
     VkPipeline date_pipeline_ = VK_NULL_HANDLE;
     VkDescriptorSet SetFor(Texture& texture, int sampler);
+    void WriteTextureSet(VkDescriptorSet set, VkSampler sampler, const Image& image);
     bool Buffer(VkDeviceSize bytes, VkBufferUsageFlags usage, VkBuffer* buffer, VkDeviceMemory* memory, void** mapped);
 
     VulkanGpu& g_;
@@ -808,6 +810,18 @@ bool VulkanGsRenderer::MakeImage(Image& t, std::uint32_t width, std::uint32_t he
     ici.tiling = VK_IMAGE_TILING_OPTIMAL;
     ici.usage = usage;
     t.usage = usage;
+    // An RGBA8 image a draw reads is read as 32-bit words as well: four
+    // texels in one gather (gs.frag's Sample). The two formats named, so a
+    // driver can keep its compression.
+    const bool words = format == VK_FORMAT_R8G8B8A8_UNORM && (usage & VK_IMAGE_USAGE_SAMPLED_BIT);
+    const VkFormat both[2] = {VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R32_UINT};
+    VkImageFormatListCreateInfo formats{VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO};
+    formats.viewFormatCount = 2;
+    formats.pViewFormats = both;
+    if (words) {
+        ici.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+        ici.pNext = &formats;
+    }
     if (vkCreateImage(g_.device, &ici, nullptr, &t.image) != VK_SUCCESS) return false;
     VkMemoryRequirements req;
     vkGetImageMemoryRequirements(g_.device, t.image, &req);
@@ -819,6 +833,11 @@ bool VulkanGsRenderer::MakeImage(Image& t, std::uint32_t width, std::uint32_t he
     vci.format = format;
     vci.subresourceRange = {t.aspect, 0, t.levels, 0, 1};
     if (vkCreateImageView(g_.device, &vci, nullptr, &t.view) != VK_SUCCESS) return false;
+    if (words) {
+        vci.format = VK_FORMAT_R32_UINT;
+        if (vkCreateImageView(g_.device, &vci, nullptr, &t.words) != VK_SUCCESS) return false;
+        vci.format = format;
+    }
     if (format == kDepthFormat && (usage & VK_IMAGE_USAGE_SAMPLED_BIT)) {
         vci.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
         if (vkCreateImageView(g_.device, &vci, nullptr, &t.depth_view) != VK_SUCCESS) return false;
@@ -828,6 +847,7 @@ bool VulkanGsRenderer::MakeImage(Image& t, std::uint32_t width, std::uint32_t he
 
 void VulkanGsRenderer::DestroyImage(Image& t) {
     if (t.view) vkDestroyImageView(g_.device, t.view, nullptr);
+    if (t.words) vkDestroyImageView(g_.device, t.words, nullptr);
     if (t.depth_view) vkDestroyImageView(g_.device, t.depth_view, nullptr);
     if (t.image) vkDestroyImage(g_.device, t.image, nullptr);
     if (t.memory) FreeImageMemory(t.memory, t.offset, t.piece_class, t.memory_type);
@@ -892,11 +912,14 @@ bool VulkanGsRenderer::Init(std::string* error) {
         if (error) *error = "the GS shaders did not load";
         return false;
     }
-    VkDescriptorSetLayoutBinding binding{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
-                                         VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+    // The image a draw reads, and the same as 32-bit words (an image that
+    // has none: the blank texture's).
+    VkDescriptorSetLayoutBinding bindings[2] = {
+        {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+        {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}};
     VkDescriptorSetLayoutCreateInfo dli{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    dli.bindingCount = 1;
-    dli.pBindings = &binding;
+    dli.bindingCount = 2;
+    dli.pBindings = bindings;
     vkCreateDescriptorSetLayout(g_.device, &dli, nullptr, &set_layout_);
     VkDescriptorSetLayoutBinding clut_binding{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT,
                                               nullptr};
@@ -904,7 +927,7 @@ bool VulkanGsRenderer::Init(std::string* error) {
     cli.bindingCount = 1;
     cli.pBindings = &clut_binding;
     vkCreateDescriptorSetLayout(g_.device, &cli, nullptr, &clut_set_layout_);
-    VkDescriptorPoolSize sizes[2] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 8192},
+    VkDescriptorPoolSize sizes[2] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 * 8192},
                                      {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4}};
     VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     dpi.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
@@ -1916,14 +1939,25 @@ VkDescriptorSet VulkanGsRenderer::SampledSet(Image& image) {
     ai.descriptorSetCount = 1;
     ai.pSetLayouts = &set_layout_;
     if (vkAllocateDescriptorSets(g_.device, &ai, &image.sampled) != VK_SUCCESS) return VK_NULL_HANDLE;
-    VkDescriptorImageInfo info{samplers_[3], image.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    write.dstSet = image.sampled;
-    write.descriptorCount = 1;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    write.pImageInfo = &info;
-    vkUpdateDescriptorSets(g_.device, 1, &write, 0, nullptr);
+    WriteTextureSet(image.sampled, samplers_[3], image);
     return image.sampled;
+}
+
+/* A set of set_layout_: the image with its sampler, and its words (the
+   blank texture's for an image without: a texture pack's compressed one). */
+void VulkanGsRenderer::WriteTextureSet(VkDescriptorSet set, VkSampler sampler, const Image& image) {
+    const VkImageView words = image.words ? image.words : blank_.image.words;
+    VkDescriptorImageInfo info[2] = {{sampler, image.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+                                     {samplers_[3], words, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
+    VkWriteDescriptorSet writes[2] = {{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}, {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}};
+    for (int i = 0; i < 2; ++i) {
+        writes[i].dstSet = set;
+        writes[i].dstBinding = std::uint32_t(i);
+        writes[i].descriptorCount = 1;
+        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[i].pImageInfo = &info[i];
+    }
+    vkUpdateDescriptorSets(g_.device, words ? 2 : 1, writes, 0, nullptr);
 }
 
 void VulkanGsRenderer::DateSetup(VkCommandBuffer cmd, Image& target, Image& depth, std::uint32_t datm) {
@@ -1970,13 +2004,7 @@ VkDescriptorSet VulkanGsRenderer::SetFor(Texture& texture, int sampler) {
     ai.descriptorSetCount = 1;
     ai.pSetLayouts = &set_layout_;
     if (vkAllocateDescriptorSets(g_.device, &ai, &set) != VK_SUCCESS) return VK_NULL_HANDLE;
-    VkDescriptorImageInfo info{samplers_[sampler], texture.image.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    write.dstSet = set;
-    write.descriptorCount = 1;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    write.pImageInfo = &info;
-    vkUpdateDescriptorSets(g_.device, 1, &write, 0, nullptr);
+    WriteTextureSet(set, samplers_[sampler], texture.image);
     return set;
 }
 

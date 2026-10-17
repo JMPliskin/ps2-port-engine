@@ -19,6 +19,10 @@ layout(location = 2) noperspective in float fog;
 layout(location = 3) flat in vec4 range;   // a sprite's S, T at its first and last pixels (gs.vert)
 
 layout(set = 0, binding = 0) uniform sampler2D texture_image;
+// The same image's texels as 32-bit words (R in bits 0-7, A in 24-31): the
+// four texels a bilinear sample mixes in one gather - one read of the
+// texture rather than four (Sample).
+layout(set = 0, binding = 1) uniform usampler2D texture_words;
 // The GPU's CLUT (decode.comp's), 256 entries as the GS expands them: a target
 // read as PSMT8H (tex_format 4) indexes it by its alpha byte.
 layout(std430, set = 1, binding = 0) readonly buffer Clut { uint clut[256]; };
@@ -100,6 +104,7 @@ vec4 Expand(vec4 t) {
 }
 
 vec4 Fetch(ivec2 at) { return Expand(floor(texelFetch(texture_image, at, 0) * 255.0 + 0.5)); }
+vec4 Unpack(uint w) { return Expand(vec4(float(w & 255u), float((w >> 8) & 255u), float((w >> 16) & 255u), float(w >> 24))); }
 
 vec4 Texel(int u, int v) {
     const int k = Fine() ? int(Scale()) : 1;
@@ -167,7 +172,21 @@ vec4 Sample(vec2 uv, int n, bool linear) {
     const ivec2 i0 = xy >> 4;
     const vec4 f = vec4(xy & 15, 0, 0);
     const ivec4 at = Neighbours(i0, n);
-    const vec4 c00 = Fetch(at.xz), c10 = Fetch(at.yz), c01 = Fetch(at.xw), c11 = Fetch(at.yw);
+    vec4 c00, c10, c01, c11;
+    if (at.y == at.x + 1 && at.w == at.z + 1) {
+        // Side by side in the image (almost always - not where a wrap or a
+        // clamp parts them): gathered at the corner they share.
+        const uvec4 w = textureGather(texture_words, vec2(at.yw) / vec2(textureSize(texture_words, 0)), 0);
+        c01 = Unpack(w.x);
+        c11 = Unpack(w.y);
+        c10 = Unpack(w.z);
+        c00 = Unpack(w.w);
+    } else {
+        c00 = Fetch(at.xz);
+        c10 = Fetch(at.yz);
+        c01 = Fetch(at.xw);
+        c11 = Fetch(at.yw);
+    }
     const vec4 top = c00 + floor((c10 - c00) * f.x / 16.0), bottom = c01 + floor((c11 - c01) * f.x / 16.0);
     return top + floor((bottom - top) * f.y / 16.0);
 }
