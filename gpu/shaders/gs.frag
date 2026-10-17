@@ -44,7 +44,9 @@ layout(push_constant) uniform Params {
     uint minu, maxu, minv, maxv;
     uint tw, th;        // TEX0's size (0: the image's own)
     uint tex_format;    // a target read as 0 32-bit, 1 24-bit, 2 16-bit texels, 4 PSMT8H through the CLUT
-    uint ta0, ta1, aem; // TEXA
+    uint texa;          // TEXA: TA0 in bits 0-7, TA1 8-15, AEM 16
+    uint image_size;    // the bound image's size in its pixels, width in bits 0-15, height 16-31 - not
+                        // asked of the image (textureSize: a sampler's message per pixel on some GPUs)
     uint logic;         // FBMSK masking part of a channel: 1 the AND pass, 2 the OR pass, 0 neither
     uint keep;          // ...the bits FBMSK keeps, RGBA bytes as the target holds them
     uint scale;         // a target drawn larger (the internal resolution): its pixels to a GS texel
@@ -62,6 +64,11 @@ const uint kTextured = 1u, kReplaced = 2u, kMip = 4u, kLinear = 8u, kExpand = 16
            kFog = 128u, kAlphaTest = 256u, kPabe = 512u, kLogic = 1024u, kSixteen = 2048u;
 bool Has(uint feature) { return (kFeatures & feature) != 0u; }
 const float kEdge = 1.0 / 1024.0;       // Sample's nudge past a texel's edge
+
+float Ta0() { return float(p.texa & 255u); }
+float Ta1() { return float((p.texa >> 8) & 255u); }
+bool Aem() { return ((p.texa >> 16) & 1u) != 0u; }
+ivec2 ImageSize() { return ivec2(int(p.image_size & 0xFFFFu), int(p.image_size >> 16)); }
 
 // A target drawn larger: its pixels to a GS texel (1 where none can be).
 uint Scale() { return Has(kFine) ? p.scale : 1u; }
@@ -81,7 +88,7 @@ int Wrap(int i, int size, uint mode, uint lo, uint hi, int k) {
 bool Fine() { return Scale() > 1u && p.wms != 3u && p.wmt != 3u; }
 
 ivec2 TextureSize() {
-    return p.tw != 0u ? ivec2(int(p.tw), int(p.th)) : textureSize(texture_image, 0);
+    return p.tw != 0u ? ivec2(int(p.tw), int(p.th)) : ImageSize();
 }
 
 // A texel as the GS expands it: TEXA's alpha for 24- and 16-bit texels, a
@@ -94,12 +101,12 @@ vec4 Expand(vec4 t) {
     }
     bool black = t.r + t.g + t.b == 0.0;
     if (p.tex_format == 1u) {                       // 24-bit: TEXA's alpha
-        t.a = (p.aem != 0u && black) ? 0.0 : float(p.ta0);
+        t.a = (Aem() && black) ? 0.0 : Ta0();
     } else if (p.tex_format == 2u) {                // 16-bit: 5 bits a channel, alpha by its bit
         bool bit = t.a >= 128.0;
         t.rgb = floor(t.rgb / 8.0) * 8.0;
         black = t.r + t.g + t.b == 0.0;
-        t.a = bit ? float(p.ta1) : ((p.aem != 0u && black) ? 0.0 : float(p.ta0));
+        t.a = bit ? Ta1() : ((Aem() && black) ? 0.0 : Ta0());
     }
     return t;
 }
@@ -116,7 +123,7 @@ vec4 Texel(int u, int v) {
     // of its square.
     if (k == 1 && Scale() > 1u) at = at * int(Scale()) + int(Scale() / 2u);
     // A target may be smaller than TEX0 says: what lies beyond is not drawn here.
-    at = min(at, textureSize(texture_image, 0) - 1);
+    at = min(at, ImageSize() - 1);
     return Fetch(at);
 }
 
@@ -147,8 +154,8 @@ ivec4 Neighbours(ivec2 i0, int n) {
     if (n == 0) {
         if (k == 1) { a &= 2047; b &= 2047; }
         if (k == 1 && Scale() > 1u) { a = a * int(Scale()) + int(Scale() / 2u); b = b * int(Scale()) + int(Scale() / 2u); }
-        a = min(a, textureSize(texture_image, 0) - 1);
-        b = min(b, textureSize(texture_image, 0) - 1);
+        a = min(a, ImageSize() - 1);
+        b = min(b, ImageSize() - 1);
     } else {
         a = clamp(a, ivec2(0), size - 1);
         b = clamp(b, ivec2(0), size - 1);
@@ -181,7 +188,7 @@ vec4 Sample(vec2 uv, int n, bool linear) {
     if (at.y == at.x + 1 && at.w == at.z + 1) {
         // Side by side in the image (almost always - not where a wrap or a
         // clamp parts them): gathered at the corner they share.
-        const uvec4 w = textureGather(texture_words, vec2(at.yw) / vec2(textureSize(texture_image, 0)), 0);
+        const uvec4 w = textureGather(texture_words, vec2(at.yw) / vec2(ImageSize()), 0);
         c01 = Unpack(w.x);
         c11 = Unpack(w.y);
         c10 = Unpack(w.z);

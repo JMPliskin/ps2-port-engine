@@ -67,7 +67,9 @@ static_assert(256 % sizeof(PackedVertex) == 0, "a vertex must divide the ring's 
 struct FragmentParams {
     std::uint32_t textured, tfx, tcc, atst, aref, fix_factor, fix, afail, fge, fogcol, pabe;
     std::uint32_t bilinear, wms, wmt, minu, maxu, minv, maxv;
-    std::uint32_t tw, th, tex_format, ta0, ta1, aem;
+    std::uint32_t tw, th, tex_format;
+    std::uint32_t texa;         // TA0 in bits 0-7, TA1 8-15, AEM 16
+    std::uint32_t image_size;   // the bound image's pixels: width in bits 0-15, height 16-31
     std::uint32_t logic, keep;
     std::uint32_t scale;        // the texture's pixels to a GS texel (a target drawn larger: the internal resolution)
     std::uint32_t blend_ops;    // bits 0-7: blending in the shader, ALPHA's A, B, C, D, two bits each;
@@ -2707,6 +2709,7 @@ void VulkanGsRenderer::Flush() {
     VkDescriptorSet set = SetFor(*texture, sampler);
     // Render to texture: the target itself, or a copy when it is also drawn into.
     Image* source = nullptr;
+    const Image* bound = &texture->image;   // what the shader reads (its size, gs.frag's ImageSize)
     bool copy_first = false;
     const bool shader_blend = ShaderBlend(state_);
     if (state_.textured && state_.texture_target) {
@@ -2721,8 +2724,10 @@ void VulkanGsRenderer::Flush() {
                 feedback_ = &copy;
                 copy_first = true;
                 set = SampledSet(copy);
+                bound = &copy;
             } else {
                 set = SampledSet(*source);
+                bound = source;
             }
         }
     }
@@ -2792,9 +2797,8 @@ void VulkanGsRenderer::Flush() {
     params.tw = state_.tw;
     params.th = state_.th;
     params.tex_format = source ? state_.tex_format : texture->replaced;     // gs.frag's Replaced
-    params.ta0 = state_.ta0;
-    params.ta1 = state_.ta1;
-    params.aem = state_.aem;
+    params.texa = (state_.ta0 & 0xFFu) | (state_.ta1 & 0xFFu) << 8 | (state_.aem ? 1u : 0u) << 16;
+    params.image_size = (bound->pw() & 0xFFFFu) | bound->ph() << 16;
     params.scale = source ? source->scale : 1;
     params.blend_ops = std::uint32_t(state_.a) | std::uint32_t(state_.b) << 2 | std::uint32_t(state_.c) << 4 |
                        std::uint32_t(state_.d) << 6;
