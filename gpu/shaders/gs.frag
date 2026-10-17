@@ -61,6 +61,7 @@ layout(constant_id = 0) const uint kFeatures = 0xFFFFFFFFu;
 const uint kTextured = 1u, kReplaced = 2u, kMip = 4u, kLinear = 8u, kExpand = 16u, kFine = 32u, kSnap = 64u,
            kFog = 128u, kAlphaTest = 256u, kPabe = 512u, kLogic = 1024u, kSixteen = 2048u;
 bool Has(uint feature) { return (kFeatures & feature) != 0u; }
+const float kEdge = 1.0 / 1024.0;       // Sample's nudge past a texel's edge
 
 // A target drawn larger: its pixels to a GS texel (1 where none can be).
 uint Scale() { return Has(kFine) ? p.scale : 1u; }
@@ -167,8 +168,12 @@ ivec4 Neighbours(ivec2 i0, int n) {
 vec4 Sample(vec2 uv, int n, bool linear) {
     if (Fine()) uv *= float(Scale());               // in the target's own pixels
     uv /= float(1 << n);
-    if (!linear) return Texel(int(floor(uv.x)), int(floor(uv.y)), n);
-    const ivec2 xy = ivec2(floor((uv - 0.5) * 16.0));
+    // A coordinate the GS has on a texel's edge (its fixed point: sprites'
+    // texels one to a pixel) comes out of the GPU's interpolation a hair to
+    // either side, as the GPU rounds: a thousandth of a texel on, every GPU
+    // takes the same texel.
+    if (!linear) return Texel(int(floor(uv.x + kEdge)), int(floor(uv.y + kEdge)), n);
+    const ivec2 xy = ivec2(floor((uv - 0.5) * 16.0 + kEdge * 16.0));
     const ivec2 i0 = xy >> 4;
     const vec4 f = vec4(xy & 15, 0, 0);
     const ivec4 at = Neighbours(i0, n);
