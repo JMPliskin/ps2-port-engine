@@ -104,6 +104,15 @@ engine is checked against every game's scripted runs
 (`engine/tools/regress.py`) before it is tagged: those need the games' discs,
 so they run on a developer's machine, not in CI.
 
+## Credits
+
+- **PaPe** ([@nynjardin](https://github.com/nynjardin)): Sony's inet on the
+  PC's sockets and the IOP's fixes for EA's network module (Burnout 3's LAN
+  play), the GPU renderer on a thread of its own, the sampler's fix
+  ([#1](https://github.com/danielgomesvieira2000/ps2-port-engine/pull/1)).
+- [SMAA](https://github.com/iryoku/smaa) (Jimenez et al., MIT licence) in
+  `gpu/third_party/smaa`, with its licence.
+
 ## Legal
 
 This repository contains original tooling only - no game code, assets or
