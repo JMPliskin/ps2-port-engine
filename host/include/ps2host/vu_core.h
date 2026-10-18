@@ -144,6 +144,10 @@ struct VuCore {
             v.LandNow();
         }
     }
+    /* Issue for a pair that neither reads Q or P nor starts what sets them
+       (vurecomp.py: they land at the next pair that does - the same values
+       wherever they are read). */
+    static PS2HOST_VU_INLINE void IssueAt(u64& cycle, u64 t) { cycle = t; }
     static PS2HOST_VU_INLINE void LandFlags(Vu& v, u64 cycle) {
         while (v.flag_count_ && v.flag_queue_[v.flag_head_].ready <= cycle) {
             const Vu::FlagWrite& f = v.flag_queue_[v.flag_head_];
@@ -371,21 +375,23 @@ struct VuCore {
         else b = _mm_set1_epi32(int(c.vf[ft][Operand]));
         // Cleaned here where the block does not know them clean and the run
         // has not found them clean (unclean_); LanesSse then cleans neither.
+        // A run has DAZ and FTZ on (VuRounding): clamped is clean enough
+        // (ClampLanes), here and for the result.
         // MAX and MINI take their operands as they are, and may leave a
         // field unclean.
         constexpr bool kRaw = Op == lifted::kMax_ || Op == lifted::kMini;
         if constexpr ((Known & 1) == 0 && !kRaw)
-            if ((v.unclean_ >> fs) & 1) a = lifted::CleanLanes(a);
+            if ((v.unclean_ >> fs) & 1) a = lifted::ClampLanes(a);
         if constexpr ((Known & 2) == 0 && !kRaw) {
-            if constexpr (Operand == 4 || Operand == 5) b = lifted::CleanLanes(b);
-            else if ((v.unclean_ >> ft) & 1) b = lifted::CleanLanes(b);
+            if constexpr (Operand == 4 || Operand == 5) b = lifted::ClampLanes(b);
+            else if ((v.unclean_ >> ft) & 1) b = lifted::ClampLanes(b);
         }
         // ACC as the operands: cleaned only where not known clean (MADD,
         // MSUB read it).
         __m128i acc = _mm_loadu_si128(reinterpret_cast<const __m128i*>(c.vacc));
         if constexpr ((Known & 4) == 0 && (Op == lifted::kMadd || Op == lifted::kMsub))
-            if (v.acc_unclean_) acc = lifted::CleanLanes(acc);
-        const __m128i result = lifted::LanesSse<Op, Known | 7>(a, b, acc);
+            if (v.acc_unclean_) acc = lifted::ClampLanes(acc);
+        const __m128i result = lifted::LanesSse<Op, Known | 7, true>(a, b, acc);
         // An FMAC's result is clean (MAX and MINI write no ACC): all four
         // fields of it make ACC clean.
         if constexpr (To < 0 && Dest == 15 && !kRaw) v.acc_unclean_ = false;
@@ -401,6 +407,10 @@ struct VuCore {
             return;
         } else {
             u32* to = To < 0 ? c.vacc : c.vf[To];
+            if constexpr (Dest == 15) {             // all four: no blend (MSVC kept it, a mask of all ones)
+                _mm_storeu_si128(reinterpret_cast<__m128i*>(to), result);
+                return;
+            }
             const __m128i mask = _mm_set_epi32((Dest & 1) ? -1 : 0, (Dest & 2) ? -1 : 0, (Dest & 4) ? -1 : 0,
                                                (Dest & 8) ? -1 : 0);
             const __m128i old = _mm_loadu_si128(reinterpret_cast<const __m128i*>(to));
@@ -435,7 +445,7 @@ struct VuCore {
         const __m128i b = _mm_shuffle_epi32(_mm_loadu_si128(reinterpret_cast<const __m128i*>(v.regs.vf[ft])),
                                             _MM_SHUFFLE(3, 1, 0, 2));
         __m128i* acc = reinterpret_cast<__m128i*>(v.regs.vacc);
-        const __m128i product = lifted::LanesSse<lifted::kMul>(a, b, _mm_setzero_si128());
+        const __m128i product = lifted::LanesSse<lifted::kMul, 0, true>(a, b, _mm_setzero_si128());
         _mm_storeu_si128(acc, Blend(LaneMask(Dest & 14), product, _mm_loadu_si128(acc)));
 #else
         const u32 *a = v.regs.vf[fs], *b = v.regs.vf[ft];
@@ -457,7 +467,7 @@ struct VuCore {
         const __m128i b = _mm_shuffle_epi32(_mm_loadu_si128(reinterpret_cast<const __m128i*>(v.regs.vf[ft])),
                                             _MM_SHUFFLE(3, 1, 0, 2));
         const __m128i acc = _mm_loadu_si128(reinterpret_cast<const __m128i*>(v.regs.vacc));
-        const __m128i result = lifted::LanesSse<lifted::kMsub>(a, b, acc);
+        const __m128i result = lifted::LanesSse<lifted::kMsub, 0, true>(a, b, acc);
         if (fd == 0) {                                  // the flags' alone
             _mm_storeu_si128(reinterpret_cast<__m128i*>(v.discarded_),
                              _mm_and_si128(result, _mm_set_epi32(0, -1, -1, -1)));
@@ -644,7 +654,7 @@ struct VuCore {
     /* As Run after the two halves: the lower's held writes (giving way to the
        upper's fields), when the fields land, the flags on their way, Q and P. */
     static PS2HOST_VU_INLINE void Finish(Vu& v, u64& cycle, Vu::Pending& pending, int written, u32 lanes,
-                                         bool set_flags, bool sets_mac, bool sets_clip) {
+                                         bool set_flags, bool sets_mac, bool sets_clip, bool vi0 = true) {
         const u64 ready = cycle + kFmacLatency;
         if (pending.vf > 0) {
             const u32 landing = pending.lanes & ~(written == pending.vf ? lanes : 0u);
@@ -687,7 +697,8 @@ struct VuCore {
             v.p_busy_ = true;
             v.qp_due_ = std::min(v.qp_due_, v.p_ready_);
         }
-        End(v, cycle);
+        if (vi0) End(v, cycle);
+        else Next(cycle);
     }
     /* The same for a pair whose lower left nothing (FinishUpper, then End). */
     static PS2HOST_VU_INLINE void FinishUpper(Vu& v, u64 cycle, int written, u32 lanes, bool set_flags,
@@ -717,6 +728,10 @@ struct VuCore {
         v.regs.vc[0] = 0;
         ++cycle;
     }
+    /* End where VI0 is known 0 still: a pair after a block's first (which
+       ends with End) whose lower is not one of macro mode's COP2 operations
+       - nothing else writes VI0 (SetVi leaves it out, Mtir copies it). */
+    static PS2HOST_VU_INLINE void Next(u64& cycle) { ++cycle; }
 };
 
 }  // namespace ps2host
