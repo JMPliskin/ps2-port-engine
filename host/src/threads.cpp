@@ -504,7 +504,13 @@ void VblankTimer() {
             TimerTick();
             continue;
         }
-        if (!SpareCores()) {
+        // A retry for what the EE has not taken is a look again, not a
+        // deadline: slept to (the precise sleep), not spun the last of -
+        // spinning a retry's every 700 us was this thread spinning all the
+        // time the EE could not take it (a third of a core in Burnout 3's
+        // garage, the EE waiting there for VIF1's worker).
+        const bool deadline = !(retrying && wake == retry_at);
+        if (!SpareCores() || !deadline) {
             SleepUntil(wake);
         } else {
             if (wake - clock::now() > margin) SleepUntil(wake - margin);
