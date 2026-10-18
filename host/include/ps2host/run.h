@@ -111,6 +111,11 @@ bool IopReplyPending();
 /* A packet from the IOP to the EE (a module's sceSifSendCmd): queued, and
    delivered as the SIF0 interrupt at the next safe point. */
 void QueueIopPacket(std::vector<u8> packet);
+/* A module's command sent from an IOP interrupt handler (sceSifSendCmd in
+   one): delivered now, with the answers due before it, unless the EE is in
+   an interrupt itself - so the EE's handler for it runs before the IOP goes
+   on, as on the console, where it takes microseconds. */
+void DeliverIopPacketNow();
 /* A host RPC server's: its answer (the RPC end) reaches the EE `ns` later, on
    the host clock (virtual under --virtual-time) - a device's time, such as a
    CD read's. */

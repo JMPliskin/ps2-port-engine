@@ -673,6 +673,15 @@ void Spu2::Advance(u64 now_us, const std::function<void(u32 core)>& irq,
     }
     mixed_.assign(std::size_t(count) * 2, 0);
     bool stop = false;
+    // An interrupt from the playback ends the batch at its sample: the IOP
+    // runs its handler - and the thread it wakes - before the SPU2 plays on,
+    // as on the hardware, where they run within microseconds. (Burnout 3's
+    // B3ROUTE refills core 1's input ring on each; mixed on past it, the
+    // input played the ring's last lap until the batch's end - crackle.)
+    const std::function<void(u32)> irq_stop = [&](u32 core) {
+        irq(core);
+        stop = true;
+    };
     u32 n = 0;
     for (; n < count && !stop; ++n) {
         // Core 0's output: core 1's external input.
@@ -688,7 +697,7 @@ void Spu2::Advance(u64 now_us, const std::function<void(u32 core)>& irq,
             const u16 value = u16(s16(Clamp16(sample)));
             ram_[address] = u8(value);
             ram_[address + 1] = u8(value >> 8);
-            CheckIrq(0, address, address + 2, irq);
+            CheckIrq(0, address, address + 2, irq_stop);
         };
         for (u32 core = 0; core < 2; ++core) {
             Core& c = cores_[core];
@@ -729,7 +738,7 @@ void Spu2::Advance(u64 now_us, const std::function<void(u32 core)>& irq,
                 v.counter += v.pitch;
                 while (v.counter >= kBlockSpan) {
                     v.counter -= kBlockSpan;
-                    NextBlock(c, i, irq);
+                    NextBlock(c, i, irq_stop);
                 }
             }
             if (log) c.peak_voices = std::max(c.peak_voices, std::max(std::abs(core_left), std::abs(core_right)));
@@ -778,7 +787,7 @@ void Spu2::Advance(u64 now_us, const std::function<void(u32 core)>& irq,
             }
             auto pcm = [&](u32 base) {
                 const u32 address = base + capture_offset;
-                CheckIrq(0, address, address + 2, irq);
+                CheckIrq(0, address, address + 2, irq_stop);
                 return s32(s16(u16(ram_[address]) | u16(ram_[address + 1]) << 8));
             };
             const s32 in_left = pcm(input_base), in_right = pcm(input_base + 0x400);

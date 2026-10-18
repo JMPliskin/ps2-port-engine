@@ -695,6 +695,15 @@ void PostDmac(u32 channel) {
     RequestDelivery();
 }
 
+void DeliverIopPacketNow() {
+    Scheduler& s = S();
+    // RunHandlers has one interrupt context: never inside a handler. The IOP
+    // answers in order: what is due before the packet goes first.
+    if (s.in_interrupt) return;
+    while (DeliverIopReply()) {
+    }
+}
+
 void RequestDelivery() {
     Scheduler& s = S();
     if (s.in_interrupt || !s.current || s.delivery_requested) return;
