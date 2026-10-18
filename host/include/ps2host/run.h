@@ -523,6 +523,11 @@ void SetFastLoadingDefault(bool on);
    scripted runs draw every picture the same with it; --vu-exact turns it
    off again. */
 void SetVuFastDefault(bool on);
+/* Frame pacing (the "frame_pacing" setting: pictures shown evenly spaced,
+   a little more delay) when the player has not chosen: on, unless the game's
+   port defaults it off. */
+void SetFramePacingDefault(bool on);
+bool FramePacingDefault();
 /* The GPU pipelines a game is known to draw with (the keys of a
    gpu_pipelines.txt a run kept beside its settings), made from the start in
    the background - none made in the middle of a player's first race

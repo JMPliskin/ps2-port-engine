@@ -339,6 +339,9 @@ void SetFastDisc(bool on) { g_fast_disc = on; }
 void SetFastLoadingDefault(bool on) { g_fast_loading_default = on; }
 bool g_vu_fast_default = false;
 void SetVuFastDefault(bool on) { g_vu_fast_default = on; }
+bool g_frame_pacing_default = true;
+void SetFramePacingDefault(bool on) { g_frame_pacing_default = on; }
+bool FramePacingDefault() { return g_frame_pacing_default; }
 
 Stats& RunStats() {
     static Stats stats;

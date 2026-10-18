@@ -1778,7 +1778,7 @@ bool StartGpuRenderer(std::string* error, GpuMode mode, bool show) {
             const u32 scale = WantedScale(WindowDisplay());
             if (scale != g_bridge->renderer->Scale()) Rescale(*g_bridge, scale);
             if (ps2gpu::Display* display = WindowDisplay()) {
-                const bool pace = !VirtualClock() && SettingOn("frame_pacing", true);    // (PC SETTINGS)
+                const bool pace = !VirtualClock() && SettingOn("frame_pacing", FramePacingDefault());    // (PC SETTINGS)
                 PresentGpuPicture(*display, pace ? FrameDue(frame) : 0);
             }
         });
