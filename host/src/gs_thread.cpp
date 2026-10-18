@@ -313,6 +313,18 @@ void GsDrain() {
 
 void StopGsThread() {
     if (!g_feed) return;
+    // VIF1's worker first: what it still has queued (a VU1 program's XGKICKs,
+    // DIRECT) feeds the GS thread, and a feed gone under it was a crash at the
+    // run's end (GsWords between its check of g_feed and its use; seen with
+    // the car select's garage at 60 pictures a second keeping VU1 busy). The
+    // EE has stopped: nothing more is queued. A failure of the worker's at
+    // this point changes nothing - the run is over.
+    if (Vif1Async() && !OnVif1Worker()) {
+        try {
+            JoinVif1("stop");
+        } catch (...) {
+        }
+    }
     g_feed->Sync();
     g_feed->Stop();
     g_feed = nullptr;
