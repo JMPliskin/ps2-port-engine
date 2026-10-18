@@ -617,12 +617,12 @@ Owned& Use(Bridge& b, u32 fbp, u32 fbw, u32 psm, bool depth, u32 width, u32 heig
    16-bit). */
 Pages PagesOf(const Owned& o, u32 x0, u32 x1, u32 y0, u32 y1) {
     Pages pages;
-    const u32 page_rows = Is16(o.psm) ? 64 : 32, fbw = std::max(1u, o.fbw);
+    const u32 shift = Is16(o.psm) ? 6 : 5, fbw = std::max(1u, o.fbw);       // a page's rows: 64 or 32
     x1 = std::min(x1, fbw * 64);
     x0 = std::min(x0, x1 ? x1 - 1 : 0);
     x1 = std::max(x1, x0 + 1);
     y1 = std::max(y1, y0 + 1);
-    for (u32 py = y0 / page_rows; py <= (y1 - 1) / page_rows; ++py)
+    for (u32 py = y0 >> shift; py <= (y1 - 1) >> shift; ++py)
         for (u32 px = x0 / 64; px <= (x1 - 1) / 64; ++px) {
             const u32 page = o.begin / 32 + py * fbw + px;
             if (page < 512) pages.set(page);
@@ -633,21 +633,29 @@ Pages PagesOf(const Owned& o, u32 x0, u32 x1, u32 y0, u32 y1) {
 /* After the GPU drew into `o`, pixels [x0, x1) x [y0, y1): memory and the
    other images over those blocks are behind. */
 void Drew(Bridge& b, Owned& o, u32 x0, u32 x1, u32 y1, u32 y0) {
-    const u32 page_rows = Is16(o.psm) ? 64 : 32, row_blocks = std::max(1u, o.fbw) * 32;
+    const u32 shift = Is16(o.psm) ? 6 : 5, fbw = std::max(1u, o.fbw), row_blocks = fbw * 32;    // a page's rows: 64 or 32
     y1 = std::min(std::max(y1, y0 + 1), o.height);
     y0 = std::min(y0, y1 - 1);
-    const u32 db = o.begin + (y0 / page_rows) * row_blocks;
-    const u32 de = o.begin + ((y1 + page_rows - 1) / page_rows) * row_blocks;
     // Already newer than memory over these pages: the others over them were
     // made stale then (any reloaded since wrote this one back first).
-    const u32 fbw = std::max(1u, o.fbw), cx1 = std::min(x1, fbw * 64);
+    const u32 cx1 = std::min(x1, fbw * 64);
     const u32 cx0 = std::min(x0, cx1 ? cx1 - 1 : 0);
-    const u32 r[4] = {cx0 / 64, (std::max(cx1, cx0 + 1) - 1) / 64, y0 / page_rows, (y1 - 1) / page_rows};
+    const u32 r[4] = {cx0 / 64, (std::max(cx1, cx0 + 1) - 1) / 64, y0 >> shift, (y1 - 1) >> shift};
     const bool in_rect = o.rect_dirty && r[0] >= o.rect[0] && r[1] <= o.rect[1] && r[2] >= o.rect[2] && r[3] <= o.rect[3];
-    Pages pages;
-    if (!in_rect) pages = PagesOf(o, x0, x1, y0, y1);
-    const bool inside = o.gpu_newer && db >= o.dirty_begin && de <= o.dirty_end &&
-                        (in_rect || (pages & ~o.dirty_pages).none());
+    // Inside the rectangle the last draw outside it marked (most primitives):
+    // newer than memory there already, its blocks and pages dirty, the rows
+    // it reaches drawn - only the pixels drawn so far and the serial move
+    // (as below, the rest unchanged; a write-back clears the rectangle).
+    if (in_rect) {
+        o.x1 = std::max(o.x1, std::min(x1, o.width));
+        o.y1 = std::max(o.y1, y1);
+        o.drawn_serial = ++b.serial;
+        return;
+    }
+    const u32 db = o.begin + r[2] * row_blocks;
+    const u32 de = o.begin + (r[3] + 1) * row_blocks;
+    const Pages pages = PagesOf(o, x0, x1, y0, y1);
+    const bool inside = o.gpu_newer && db >= o.dirty_begin && de <= o.dirty_end && (pages & ~o.dirty_pages).none();
     o.gpu_newer = true;
     o.x1 = std::max(o.x1, std::min(x1, o.width));
     o.y1 = std::max(o.y1, y1);
@@ -655,14 +663,11 @@ void Drew(Bridge& b, Owned& o, u32 x0, u32 x1, u32 y1, u32 y0) {
     o.end = std::max(o.end, o.drawn_end);
     o.dirty_begin = std::min(o.dirty_begin, db);
     o.dirty_end = std::max(o.dirty_end, de);
-    if (!in_rect) {
-        o.dirty_pages |= pages;
-        std::memcpy(o.rect, r, sizeof r);
-        o.rect_dirty = true;
-    }
+    o.dirty_pages |= pages;
+    std::memcpy(o.rect, r, sizeof r);
+    o.rect_dirty = true;
     o.drawn_serial = ++b.serial;    // textures over it decoded before this are out of date
     if (inside) return;
-    if (in_rect) pages = PagesOf(o, x0, x1, y0, y1);   // (not expected: inside whenever in the rectangle)
     ++g_mutations;
     ++b.newer_epoch;
     for (auto& [key, other] : b.owned) {
