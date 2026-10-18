@@ -1142,6 +1142,41 @@ void DumpPass(Bridge& s, const std::tuple<u32, u32, u32>& target) {
     WriteBmp(s.dump_passes + name, pixels, w, std::min(w, 640u), std::min(h, 512u));
 }
 
+/* A buffer starting inside another's drawing, at the same width and format
+   and a whole row of pages down: that one's image, `offset` rows lower -
+   drawn into and sampled at the internal resolution, not a second image
+   reconciled with it through memory (at 1x). Burnout 3's splitscreen draws
+   player 2's post effects into a frame based at the picture's row 224. */
+Owned* Containing(Bridge& b, u32 fbp, u32 fbw, u32 psm, u32* offset) {
+    // PS2HOST_GPU_NO_CONTAINING=1: each buffer an image of its own (comparisons).
+    static const bool off = std::getenv("PS2HOST_GPU_NO_CONTAINING") != nullptr;
+    if (off) return nullptr;
+    // Inside what a buffer of that width has drawn (in any format), not
+    // only its memory: buffers laid end to end (Burnout 3's glow chain,
+    // 128x128 each) stay apart.
+    const u32 block = fbp * 32;
+    bool inside = false;
+    for (const auto& [key, o] : b.owned)
+        if (!o.depth && o.fbw == fbw && o.begin <= block && block < o.drawn_end) {
+            inside = true;
+            break;
+        }
+    if (!inside) return nullptr;
+    Owned* best = nullptr;
+    for (auto& [key, o] : b.owned) {
+        if (o.depth || o.fbw != fbw || o.psm != psm || o.fbp >= fbp || (fbp - o.fbp) % std::max(1u, fbw)) continue;
+        const u32 rows = (fbp - o.fbp) / std::max(1u, fbw) * (Is16(psm) ? 64 : 32);
+        if (rows >= o.height || (best && o.fbp < best->fbp)) continue;
+        best = &o;
+        *offset = rows;
+    }
+    static std::set<std::tuple<u32, u32, u32>> told;
+    if (best && told.insert(std::make_tuple(fbp, fbw, psm)).second)
+        std::fprintf(stderr, "[gpu] %X/%u/%02X drawn inside %X, %u rows down\n", unsigned(fbp), unsigned(fbw),
+                     unsigned(psm), unsigned(best->fbp), unsigned(*offset));
+    return best;
+}
+
 void OnDraw(const gs::Gs::DrawCall& call) {
     // Timed only past the fast path below: two clock reads a primitive were
     // a twentieth of the GS thread.
@@ -1230,6 +1265,7 @@ void OnDraw(const gs::Gs::DrawCall& call) {
         Owned* depth = nullptr;
         Owned* source = nullptr;    // a target sampled as the texture: fast only while it is not stale
         bool draws_colour = false;
+        u32 y_offset = 0, t_offset = 0, th = 1;     // Containing's: the target's rows, the texture's
     };
     static Fast fast;
     const u64 regs[12] = {call.prim, c.frame, c.scissor, c.tex0, c.tex1, c.clamp, c.alpha, c.test, c.zbuf,
@@ -1240,6 +1276,13 @@ void OnDraw(const gs::Gs::DrawCall& call) {
         ps2gpu::GsDrawState st = fast.state;
         st.gouraud = gouraud;
         for (std::size_t i = 0; i < n; ++i) v[i].z = std::min(v[i].z, fast.zmax);
+        if (fast.y_offset) {
+            for (std::size_t i = 0; i < n; ++i) v[i].y += float(fast.y_offset);
+            y0 += fast.y_offset;
+            y1 += fast.y_offset;
+        }
+        if (fast.t_offset)
+            for (std::size_t i = 0; i < n; ++i) v[i].t += float(fast.t_offset) * v[i].q / float(fast.th);
         s.renderer->DrawTriangles(st, v, n);
         if (fast.draws_colour) Drew(s, *fast.target, x0, x1, y1, y0);
         if (fast.depth) Drew(s, *fast.depth, x0, x1, y1, y0);
@@ -1264,7 +1307,31 @@ void OnDraw(const gs::Gs::DrawCall& call) {
     }
     Owned* target = nullptr;
     Owned* tex_source = nullptr;
-    if (s.primary) target = &Use(s, state.fbp, state.fbw, state.psm, false, state.width, state.height, rows);
+    u32 y_offset = 0, t_offset = 0;
+    u32 draw_rows = rows;
+    u32 z_shift = 0;                    // the depth buffer's pages, moved with the target
+    if (s.primary && !s.owned.count(std::make_tuple(state.fbp, state.fbw, state.psm, false))) {
+        Owned* base = Containing(s, state.fbp, state.fbw, state.psm, &y_offset);
+        // Its depth buffer as far into the base's (Burnout 3's player 2 has
+        // its Z 224 rows into the picture's depth buffer too): there, or the
+        // buffer stays apart.
+        if (base && Bits(c.test, 16, 1)) {
+            const u32 pages = state.fbp - base->fbp, zbp = Bits(c.zbuf, 0, 9);
+            const u32 zpsm_early = 0x30 | Bits(c.zbuf, 24, 4);
+            if (zbp >= pages && s.owned.count(std::make_tuple(zbp - pages, state.fbw, zpsm_early, true))) z_shift = pages;
+            else base = nullptr, y_offset = 0;
+        }
+        if (base) {
+            state.fbp = base->fbp;
+            state.scissor_y0 += int(y_offset);
+            state.scissor_y1 += int(y_offset);
+            for (std::size_t i = 0; i < n; ++i) v[i].y += float(y_offset);
+            y0 += y_offset;
+            y1 += y_offset;
+            draw_rows = std::max(1u, y1);
+        }
+    }
+    if (s.primary) target = &Use(s, state.fbp, state.fbw, state.psm, false, state.width, state.height, draw_rows);
     if (state.textured) {
         const u32 tex_psm = Bits(c.tex0, 20, 6), tbp_blocks = Bits(c.tex0, 0, 14);
         // A target read as PSMT8H (Burnout 3's glow and blur passes, ~900 a
@@ -1281,11 +1348,26 @@ void OnDraw(const gs::Gs::DrawCall& call) {
         if ((s.primary || s.targets_as_textures) && tex_format != 3 && tbp_blocks % 32 == 0) {
             const u32 candidates[2] = {tex_format == 2 ? tex_psm : gs::PSMCT32,
                                        tex_format == 2 ? tex_psm : tex_format == 4 ? gs::PSMCT32 : gs::PSMCT24};
-            const u32 tex_fbp = tbp_blocks / 32, tex_fbw = Bits(c.tex0, 14, 6);
+            const u32 tex_fbw = Bits(c.tex0, 14, 6);
             for (u32 psm : candidates) {
+                u32 tex_fbp = tbp_blocks / 32;
+                // Inside another target (Containing): that one, its rows lower.
+                if (s.primary && !s.owned.count(std::make_tuple(tex_fbp, tex_fbw, psm, false))) {
+                    u32 offset = 0;
+                    if (Owned* base = Containing(s, tex_fbp, tex_fbw, psm, &offset)) {
+                        tex_fbp = base->fbp;
+                        t_offset = offset;
+                        for (std::size_t i = 0; i < n; ++i) v[i].t += float(offset) * v[i].q / float(th);
+                    }
+                }
                 const bool known = s.primary ? s.owned.count(std::make_tuple(tex_fbp, tex_fbw, psm, false)) != 0
                                              : s.renderer->HasTarget(tex_fbp, tex_fbw, psm);
-                if (!known) continue;
+                if (!known) {
+                    if (t_offset)
+                        for (std::size_t i = 0; i < n; ++i) v[i].t -= float(t_offset) * v[i].q / float(th);
+                    t_offset = 0;
+                    continue;
+                }
                 if (s.primary) {
                     Owned& source = s.owned[std::make_tuple(tex_fbp, tex_fbw, psm, false)];
                     Pages sampled;
@@ -1346,6 +1428,10 @@ void OnDraw(const gs::Gs::DrawCall& call) {
         state.maxu = Bits(c.clamp, 14, 10);
         state.minv = Bits(c.clamp, 24, 10);
         state.maxv = Bits(c.clamp, 34, 10);
+        if (t_offset && state.wmt == 2) {       // REGION_CLAMP's rows, as far down
+            state.minv += t_offset;
+            state.maxv += t_offset;
+        }
     }
     state.alpha_test = Bits(c.test, 0, 1) != 0;
     state.atst = Bits(c.test, 1, 3);
@@ -1367,7 +1453,7 @@ void OnDraw(const gs::Gs::DrawCall& call) {
     const u32 zmax = zpsm == gs::PSMZ32 ? 0xFFFFFFFFu : zpsm == gs::PSMZ24 ? 0xFFFFFFu : 0xFFFFu;
     state.depth = Bits(c.test, 16, 1) != 0;
     state.ztst = Bits(c.test, 17, 2);
-    state.zbp = Bits(c.zbuf, 0, 9);
+    state.zbp = Bits(c.zbuf, 0, 9) - z_shift;
     state.depth_write = Bits(c.zbuf, 32, 1) == 0;
     // An alpha test failing every pixel (ATST NEVER) writes Z only for AFAIL
     // ZB_ONLY: otherwise none, whatever ZMSK says. Burnout 3's glow passes
@@ -1439,7 +1525,7 @@ void OnDraw(const gs::Gs::DrawCall& call) {
             // Over the rows a fast primitive can draw (it reaches no further
             // than this one's rows), not all the target could hold: the
             // race keeps textures past its depth buffer's 448 rows.
-            const u32 colour_end = Blocks(state.fbp, state.fbw, state.psm, rows).second;
+            const u32 colour_end = Blocks(state.fbp, state.fbw, state.psm, draw_rows).second;
             if (target->begin < tend && tbp < colour_end) may = false;
             if (depth && depth->begin < tend && tbp < Blocks(depth->fbp, depth->fbw, depth->psm, rows).second)
                 may = false;
@@ -1456,6 +1542,9 @@ void OnDraw(const gs::Gs::DrawCall& call) {
             fast.depth = depth && state.depth_write ? depth : nullptr;
             fast.source = state.texture_target ? tex_source : nullptr;
             fast.draws_colour = draws_colour;
+            fast.y_offset = y_offset;
+            fast.t_offset = t_offset;
+            fast.th = th;
         }
         if (z_as_colour) {
             // The Z, as the bytes the Z format stores, into the Z-format view.
