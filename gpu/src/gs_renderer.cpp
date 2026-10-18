@@ -334,6 +334,9 @@ VkPipelineColorBlendAttachmentState Blending(std::uint32_t key, bool dual_source
 }
 
 bool SameBatch(const GsDrawState& x, const GsDrawState& y) {
+    // Most primitives come with the very state of the one before (the
+    // bridge's fast path): the same bytes are the same fields, at once.
+    if (std::memcmp(&x, &y, sizeof x) == 0) return true;
     return x.fbp == y.fbp && x.fbw == y.fbw && x.psm == y.psm && x.fbmsk == y.fbmsk && x.scissor_x0 == y.scissor_x0 &&
            x.scissor_y0 == y.scissor_y0 && x.scissor_x1 == y.scissor_x1 && x.scissor_y1 == y.scissor_y1 &&
            x.textured == y.textured && (!x.textured || (x.texture == y.texture && x.tfx == y.tfx &&
