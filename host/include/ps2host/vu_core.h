@@ -197,6 +197,12 @@ struct VuCore {
     static PS2HOST_VU_INLINE void Store(Vu& v, u32 address, int fs) {
         u32* q = Quad(v, address);
         const u32* from = v.regs.vf[fs];
+#if PS2RT_VU_SSE
+        if constexpr (Dest == 15) {             // the quadword in one move (MSVC made four of the fields)
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(q), _mm_loadu_si128(reinterpret_cast<const __m128i*>(from)));
+            return;
+        }
+#endif
         if constexpr ((Dest & 8) != 0) q[0] = from[0];
         if constexpr ((Dest & 4) != 0) q[1] = from[1];
         if constexpr ((Dest & 2) != 0) q[2] = from[2];
@@ -329,6 +335,28 @@ struct VuCore {
         out.q_value = q;
         out.q_latency = latency;
     }
+#if PS2RT_VU_SSE
+    /* DIV and SQRT in single precision: one operation on clean operands,
+       rounded once to single precision, is the model's double one narrowed
+       (53 bits >= 2 x 24 + 2 for the nearest; toward zero, twice is once),
+       and the result cleaned as Result does. Clamp: Clean of an operand
+       going into arithmetic under DAZ (a VU run: VuRounding). */
+    static PS2HOST_VU_INLINE u32 Clamp(u32 bits) {
+        return (bits & 0x7F800000u) == 0x7F800000u ? (bits & lifted::kSign) | lifted::kMax : bits;
+    }
+    static PS2HOST_VU_INLINE u32 Div(const Vu& v, int fs, int fsf, int ft, int ftf) {
+        const u32 num = v.regs.vf[fs][fsf], den = v.regs.vf[ft][ftf];
+        if ((den & 0x7F800000u) == 0) return ((num ^ den) & lifted::kSign) | lifted::kMax;   // Value(den) == 0
+        const __m128 q = _mm_div_ss(_mm_castsi128_ps(_mm_cvtsi32_si128(int(Clamp(num)))),
+                                    _mm_castsi128_ps(_mm_cvtsi32_si128(int(Clamp(den)))));
+        return lifted::Clean(u32(_mm_cvtsi128_si32(_mm_castps_si128(q))));
+    }
+    static PS2HOST_VU_INLINE u32 Sqrt(const Vu& v, int ft, int ftf) {
+        const u32 x = Clamp(v.regs.vf[ft][ftf]) & ~lifted::kSign;
+        const __m128 root = _mm_sqrt_ss(_mm_castsi128_ps(_mm_cvtsi32_si128(int(x))));
+        return lifted::Clean(u32(_mm_cvtsi128_si32(_mm_castps_si128(root))));
+    }
+#else
     static PS2HOST_VU_INLINE u32 Div(const Vu& v, int fs, int fsf, int ft, int ftf) {
         const u32 num = v.regs.vf[fs][fsf], den = v.regs.vf[ft][ftf];
         return lifted::Value(den) == 0.0 ? ((num ^ den) & lifted::kSign) | lifted::kMax
@@ -337,6 +365,7 @@ struct VuCore {
     static PS2HOST_VU_INLINE u32 Sqrt(const Vu& v, int ft, int ftf) {
         return lifted::Result(std::sqrt(std::fabs(lifted::Value(v.regs.vf[ft][ftf]))));
     }
+#endif
     static PS2HOST_VU_INLINE u32 Rsqrt(const Vu& v, int fs, int fsf, int ft, int ftf) {
         const u32 num = v.regs.vf[fs][fsf];
         const double root = std::sqrt(std::fabs(lifted::Value(v.regs.vf[ft][ftf])));
