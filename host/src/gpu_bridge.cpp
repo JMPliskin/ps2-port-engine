@@ -1191,51 +1191,42 @@ void OnDraw(const gs::Gs::DrawCall& call) {
     if (type == 7) return;
     if (!s.primary && type < 3) return;                 // the shadow compares what it has always drawn
     const gs::Context& c = *call.context;
-    ps2gpu::GsDrawState state;
-    state.fbp = Bits(c.frame, 0, 9);
-    state.fbw = std::max(1u, Bits(c.frame, 16, 6));
-    state.psm = Bits(c.frame, 24, 6);
-    state.fbmsk = u32(c.frame >> 32);
-    state.width = std::min(2048u, state.fbw * 64);
+    // The frame and scissor as the registers have them; the draw's whole
+    // state (a large struct) is made past the fast path below, which reuses
+    // the one before.
+    const u32 frame_psm = Bits(c.frame, 24, 6), frame_width = std::min(2048u, std::max(1u, Bits(c.frame, 16, 6)) * 64);
     // The rows a page holds twice over in a 16-bit format: a 16-bit view of a
     // 448-row picture is 896 rows (Burnout 3 writes its depth into the
     // picture's alpha through one - at 512 rows, the lower half went unwritten,
     // its haze and the sun's halo with it).
-    state.height = Is16(state.psm) ? 1024 : 512;
-    state.scissor_x0 = int(Bits(c.scissor, 0, 11));
-    state.scissor_x1 = int(Bits(c.scissor, 16, 11));
-    state.scissor_y0 = int(Bits(c.scissor, 32, 11));
-    state.scissor_y1 = int(Bits(c.scissor, 48, 11));
-    state.gouraud = (call.prim >> 3) & 1;
-    state.textured = (call.prim >> 4) & 1;
-    state.sprite = type == 6 && s.renderer->Scale() > 1;     // (at 1x it would only split batches)
-    state.sprite_prim = type == 6;
+    const u32 frame_height = Is16(frame_psm) ? 1024 : 512;
+    const int scissor_x0 = int(Bits(c.scissor, 0, 11)), scissor_x1 = int(Bits(c.scissor, 16, 11));
+    const int scissor_y0 = int(Bits(c.scissor, 32, 11)), scissor_y1 = int(Bits(c.scissor, 48, 11));
     const bool fst = (call.prim >> 8) & 1;
     const u32 tw = 1u << std::min(Bits(c.tex0, 26, 4), 10u), th = 1u << std::min(Bits(c.tex0, 30, 4), 10u);
     // The primitive as triangles, and the pixels it can reach.
     ps2gpu::GsVertex v[6];
-    bool gouraud = state.gouraud;
+    bool gouraud = (call.prim >> 3) & 1;
     const std::size_t n = Triangles(call, fst, tw, th, v, &gouraud);
-    state.gouraud = gouraud;
     if (!n) return;
     // The vertices' extremes, then rounded once (floor, ceil and the clamp
     // keep order: the same bounds as rounding each vertex).
-    float low_x = float(state.width), high_x = 0, low_y = float(state.height), high_y = 0;
+    float low_x = float(frame_width), high_x = 0, low_y = float(frame_height), high_y = 0;
     for (std::size_t i = 0; i < n; ++i) {
         low_x = std::min(low_x, v[i].x);
         high_x = std::max(high_x, v[i].x);
         low_y = std::min(low_y, v[i].y);
         high_y = std::max(high_y, v[i].y);
     }
-    u32 x0 = u32(std::clamp(std::floor(low_x), 0.0f, float(state.width)));
+    u32 x0 = u32(std::clamp(std::floor(low_x), 0.0f, float(frame_width)));
     // Exclusive: the GS draws the pixels whose centres lie before the far edge.
-    u32 x1 = u32(std::clamp(std::ceil(high_x), 0.0f, float(state.width)));
-    u32 y0 = u32(std::clamp(std::floor(low_y), 0.0f, float(state.height)));
-    u32 y1 = u32(std::clamp(std::ceil(high_y), 0.0f, float(state.height)));
-    y0 = std::max(y0, u32(std::max(state.scissor_y0, 0)));
-    x0 = std::max(x0, u32(std::max(state.scissor_x0, 0)));
-    x1 = std::min(x1, u32(state.scissor_x1 + 1));
-    y1 = std::min(y1, u32(state.scissor_y1 + 1));
+    u32 x1 = u32(std::clamp(std::ceil(high_x), 0.0f, float(frame_width)));
+    u32 y0 = u32(std::clamp(std::floor(low_y), 0.0f, float(frame_height)));
+    u32 y1 = u32(std::clamp(std::ceil(high_y), 0.0f, float(frame_height)));
+    y0 = std::max(y0, u32(std::max(scissor_y0, 0)));
+    x0 = std::max(x0, u32(std::max(scissor_x0, 0)));
+    x1 = std::min(x1, u32(scissor_x1 + 1));
+    y1 = std::min(y1, u32(scissor_y1 + 1));
     if (s.primary) {
         // Wholly outside the scissor (or the buffer): nothing to draw, and no
         // image to bring up to date for it. Burnout 3's garage sends thousands
@@ -1247,9 +1238,9 @@ void OnDraw(const gs::Gs::DrawCall& call) {
             hi_x = std::max(hi_x, v[i].x);
             hi_y = std::max(hi_y, v[i].y);
         }
-        const float left = float(std::max(state.scissor_x0, 0)), top = float(std::max(state.scissor_y0, 0));
-        const float right = float(std::min(state.scissor_x1, int(state.width) - 1));
-        const float bottom = float(std::min(state.scissor_y1, int(state.height) - 1));
+        const float left = float(std::max(scissor_x0, 0)), top = float(std::max(scissor_y0, 0));
+        const float right = float(std::min(scissor_x1, int(frame_width) - 1));
+        const float bottom = float(std::min(scissor_y1, int(frame_height) - 1));
         if (std::floor(hi_x) < left || std::ceil(lo_x) > right || std::floor(hi_y) < top || std::ceil(lo_y) > bottom)
             return;
         if (Bits(c.test, 16, 1) && Bits(c.test, 17, 2) == 0) return;    // ZTST NEVER: every pixel fails
@@ -1278,7 +1269,7 @@ void OnDraw(const gs::Gs::DrawCall& call) {
     if (s.primary && fast.valid && fast.mutations == g_mutations && fast.context == call.context &&
         rows <= fast.rows && std::memcmp(regs, fast.regs, sizeof regs) == 0 && !s.Dumping() &&
         (!fast.source || !fast.source->stale)) {
-        ps2gpu::GsDrawState st = fast.state;
+        ps2gpu::GsDrawState& st = fast.state;      // (the renderer copies what it keeps)
         st.gouraud = gouraud;
         for (std::size_t i = 0; i < n; ++i) v[i].z = std::min(v[i].z, fast.zmax);
         if (fast.y_offset) {
@@ -1295,6 +1286,21 @@ void OnDraw(const gs::Gs::DrawCall& call) {
     }
     fast.valid = false;
     timed.emplace(Section::GpuBridge);
+    ps2gpu::GsDrawState state;
+    state.fbp = Bits(c.frame, 0, 9);
+    state.fbw = std::max(1u, Bits(c.frame, 16, 6));
+    state.psm = frame_psm;
+    state.fbmsk = u32(c.frame >> 32);
+    state.width = frame_width;
+    state.height = frame_height;
+    state.scissor_x0 = scissor_x0;
+    state.scissor_x1 = scissor_x1;
+    state.scissor_y0 = scissor_y0;
+    state.scissor_y1 = scissor_y1;
+    state.gouraud = gouraud;
+    state.textured = (call.prim >> 4) & 1;
+    state.sprite = type == 6 && s.renderer->Scale() > 1;     // (at 1x it would only split batches)
+    state.sprite_prim = type == 6;
     if (s.primary && s.Dumping()) {
         const auto key = std::make_tuple(state.fbp, state.fbw, state.psm);
         if (key != s.last_target) {
