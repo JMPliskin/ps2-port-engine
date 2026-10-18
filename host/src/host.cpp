@@ -43,7 +43,11 @@ namespace ps2host {
    drew (the dump's picture): a GS fault or one before it, told apart.
    PS2HOST_REPLAY_GPU=1: the GPU renderer draws instead (as --gpu), each
    picture to <dir>/gpu_<n>/ (screen.bmp at the internal resolution,
-   PS2HOST_REPLAY_SCALE, default 1; screen_1x.bmp). */
+   PS2HOST_REPLAY_SCALE, default 1; screen_1x.bmp).
+   PS2HOST_REPLAY_REPEAT=n: then the stream n times more, its pictures not
+   written, timed - the GS thread's work for a capture's frames (the GS model,
+   the GPU bridge, the renderer's recording), the same every run; with
+   PS2HOST_REPLAY_SAMPLE=1 sampled too (the sampler's report after). */
 int GsReplay(const std::string& file, const std::string& out) {
     std::FILE* f = std::fopen(file.c_str(), "rb");
     if (!f) {
@@ -86,6 +90,12 @@ int GsReplay(const std::string& file, const std::string& out) {
     auto u64_at = [&](std::size_t o) { u64 v; std::memcpy(&v, data.data() + o, 8); return v; };
     int pictures = 0;
     std::vector<u32> words;
+    const std::size_t stream = at;
+    bool timing = false;                // PS2HOST_REPLAY_REPEAT's passes: nothing written
+    const int repeat = std::getenv("PS2HOST_REPLAY_REPEAT") ? std::atoi(std::getenv("PS2HOST_REPLAY_REPEAT")) : 0;
+    int pass = 0;
+    std::chrono::steady_clock::time_point started;
+    for (;;) {
     while (at < data.size()) {
         const char kind = char(data[at++]);
         if (kind == 'R') {
@@ -120,6 +130,10 @@ int GsReplay(const std::string& file, const std::string& out) {
             }
         } else if (kind == 'V') {
             g.Finish();
+            if (timing) {
+                if (gpu) GpuShadowFrame(u64(pictures), std::string());
+                continue;
+            }
             if (trace) std::fprintf(trace, "[gs] ---- vertical blank %d\n", pictures);
             if (gpu) {
                 GpuShadowFrame(u64(pictures), std::string());
@@ -134,7 +148,31 @@ int GsReplay(const std::string& file, const std::string& out) {
             return 65;
         }
     }
+    if (pass == 0 && trace) {           // the trace of the first pass alone
+        g.trace = false;
+        g.trace_out = stderr;
+        std::fclose(trace);
+        trace = nullptr;
+    }
+    if (pass == 0) {
+        if (repeat > 0 && std::getenv("PS2HOST_REPLAY_SAMPLE")) {
+            StartSampler();
+            SetSampleFrom(0);
+            SampleFrame(0);
+        }
+        started = std::chrono::steady_clock::now();
+    }
+    if (pass++ >= repeat) break;
+    timing = true;
+    at = stream;
+    }
     g.Finish();
+    if (repeat > 0) {
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+        std::fprintf(stderr, "gs-replay: %d passes, %.2f ms a pass (%d pictures each)\n", repeat, ms / repeat, pictures);
+        if (std::getenv("PS2HOST_REPLAY_SAMPLE"))
+            std::printf("%s", SampleReport(std::getenv("PS2HOST_SAMPLE_TOP") ? std::atoi(std::getenv("PS2HOST_SAMPLE_TOP")) : 30).c_str());
+    }
     if (gpu && g.on_memory) g.on_memory(0, 16384, false);     // what the GPU drew, into local memory first
     if (std::FILE* m = std::fopen((out + "/gsmem.bin").c_str(), "wb")) {      // local memory at the end
         std::fwrite(g.memory.data(), 1, kMemory, m);
