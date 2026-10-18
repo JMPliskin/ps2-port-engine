@@ -308,6 +308,14 @@ std::map<std::string, u64> g_decode_kinds;      // PS2HOST_GPU_COUNT
 
 u64 GpuBusyMicroseconds() { return ps2gpu::GpuBusyNanoseconds() / 1000; }
 
+/* SetPresentAtBlankEnd's (the GS thread's): a frame's picture waits, from
+   its end in the stream, for the stream to move past the displayed buffer -
+   the first draw elsewhere, or the next frame's end. */
+bool g_present_at_blank_end = false;
+bool g_present_waits = false;
+u64 g_present_frame = 0;
+void PresentWaiting();
+
 namespace {
 
 /* Blocks [begin, end) whose copy on one side is behind the other's brought up
@@ -1176,6 +1184,10 @@ void OnDraw(const gs::Gs::DrawCall& call) {
     if (type == 7) return;
     if (!s.primary && type < 3) return;                 // the shadow compares what it has always drawn
     const gs::Context& c = *call.context;
+    if (g_present_waits) {
+        u32 fbp = 0, fbw = 0, psm = 0;
+        if (!gs::TheGs().Displayed(&fbp, &fbw, &psm) || Bits(c.frame, 0, 9) != fbp) PresentWaiting();
+    }
     // The frame and scissor as the registers have them; the draw's whole
     // state (a large struct) is made past the fast path below, which reuses
     // the one before.
@@ -1772,16 +1784,18 @@ bool StartGpuRenderer(std::string* error, GpuMode mode, bool show) {
     if (bridge.primary) {
         // The end of each frame on the GS thread, at its place in the stream:
         // the frame to the GPU, and the window's picture straight from the
-        // displayed target (no read-back); the EE goes on meanwhile.
+        // displayed target (no read-back) - at once, or once the stream has
+        // moved past the displayed buffer (SetPresentAtBlankEnd); the EE goes
+        // on meanwhile.
         SetGsFrameHandler([](u64 frame) {
+            PresentWaiting();               // the last frame's, nothing having moved it on
             GpuShadowFrame(frame, std::string());
             // The internal resolution, between frames (the GS thread's).
             const u32 scale = WantedScale(WindowDisplay());
             if (scale != g_bridge->renderer->Scale()) Rescale(*g_bridge, scale);
-            if (ps2gpu::Display* display = WindowDisplay()) {
-                const bool pace = !VirtualClock() && SettingOn("frame_pacing", FramePacingDefault());    // (PC SETTINGS)
-                PresentGpuPicture(*display, pace ? FrameDue(frame) : 0);
-            }
+            g_present_frame = frame;
+            g_present_waits = true;
+            if (!g_present_at_blank_end || VirtualClock()) PresentWaiting();
         });
     }
     std::fprintf(stderr, "gpu: drawing on %s %s\n", device->Describe().c_str(),
@@ -1794,6 +1808,17 @@ bool GpuPrimary() { return g_bridge && g_bridge->primary; }
 void GpuSetScale(u32 scale) {
     if (g_bridge && scale != g_bridge->renderer->Scale()) Rescale(*g_bridge, scale);
 }
+
+void PresentWaiting() {
+    if (!g_present_waits) return;
+    g_present_waits = false;
+    if (ps2gpu::Display* display = WindowDisplay()) {
+        const bool pace = !VirtualClock() && SettingOn("frame_pacing", FramePacingDefault());    // (PC SETTINGS)
+        PresentGpuPicture(*display, pace ? FrameDue(g_present_frame) : 0);
+    }
+}
+
+void SetPresentAtBlankEnd(bool on) { g_present_at_blank_end = on; }
 
 void GpuCaptureBegin(u64 frame, const std::string& passes_dir) {
     if (!g_bridge) return;

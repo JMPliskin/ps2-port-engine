@@ -568,8 +568,11 @@ void FrameDone(u64 frame) {
     const bool cpu_reads_gs = dump || (g_dump_frame >= 0 && (long long)frame == g_dump_frame) || g_trace_frame >= 0 ||
                               capturing;
     if (!cpu_reads_gs && GsFrame(frame)) {
-        DbcFrame();
+        // The window's events first: the controllers' and the keyboard's
+        // state as of now goes into the pad block the game reads this frame
+        // (taken after it, every press reached the game a frame late).
         if (!PumpWindow()) throw GuestExit{0};          // the user closed the window
+        DbcFrame();
         return;
     }
     // What reads the GS from here on - the picture, the GPU's frame, the

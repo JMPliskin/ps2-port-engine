@@ -1285,6 +1285,30 @@ void SetFastForward(unsigned factor) {
     if (before > 1 && factor == 1 && !VirtualClock()) GsDrain();
 }
 unsigned FastForward() { return g_fast_forward.load(std::memory_order_relaxed); }
+
+bool RunIopBetweenSteps() {
+    Scheduler& s = S();
+    if (!s.realtime || s.in_interrupt || !s.current) return false;
+    {
+        Timed timed(Section::Iop);
+        iop::Run(50'000);
+    }
+    while (DeliverIopReply()) {
+    }
+    DeliverPendingDmac();
+    if (s.timer_due.exchange(false)) {
+        DeliverTimers();
+        DeliverAlarms();
+    }
+    Thread* best = PickReady();
+    if (best && best->priority < s.current->priority) {
+        MakeReady(*s.current);
+        GiveWay();
+    }
+    return true;
+}
+
+bool BlankDue() { return S().vblank_due.load(std::memory_order_relaxed); }
 u64 LastVblankNs() { return g_last_vblank_ns.load(std::memory_order_relaxed); }
 
 void FastThread() {

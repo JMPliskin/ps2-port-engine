@@ -211,6 +211,16 @@ void GsPrivileged(u32 address, u64 value);
    thread once the frame's packets are taken, so the EE need not wait for
    them. False when there is no handler: the EE syncs and does it itself. */
 void SetGsFrameHandler(std::function<void(u64)> handler);
+/* A game's choice (default off; real time, --gpu): a frame's picture is
+   taken at its blank's end, not its start - when the GS stream has moved
+   past the displayed buffer (the first draw to another, or the next frame's
+   end). What the game does to the displayed buffer in the blank - a copy of
+   its finished frame there (Burnout 3), DISPFB flipped by its vertical blank
+   handler - the console's CRTC shows in the very next field; taken at the
+   blank's start, every picture went out a frame late. For a game that draws
+   its next frame into the displayed buffer itself, the picture would go out
+   only at the next frame's end: it keeps this off. */
+void SetPresentAtBlankEnd(bool on);
 /* VIF1, VU1 and what feeds the GS on a thread of their own, in real time
    (vif1_worker.cpp): Vif1Run queues a command the worker runs in order (at
    once without the worker, or on it); JoinVif1 waits until all have run. */
@@ -222,6 +232,15 @@ void SetVif1Worker(bool on);
    screen counting frames while it loads (a game's hook turns it on and
    off). */
 void SetFastForward(unsigned factor);
+/* Real time, from a guest thread (a game's override): the IOP runs a short
+   slice and what it answered is delivered - its replies, due timers, a
+   better thread woken - as in the EE's idle wait, so a loading step the game
+   takes once a frame can be taken again within the frame (the vertical
+   blanks, and what the screen shows, at their own pace). False, at once,
+   outside real time: there the step waits for its frame. */
+bool RunIopBetweenSteps();
+/* Real time: the next vertical blank is due (the EE has not taken it yet). */
+bool BlankDue();
 /* --fast-until N[:F]: in real time, the blanks F times as fast (8 unless
    said) until frame N - a scripted run's way to what is to be measured -
    then at their rate. Faster than the EE keeps up with, the game falls

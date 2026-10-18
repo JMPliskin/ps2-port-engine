@@ -404,7 +404,11 @@ u64 FrameDue(u64 frame) {
     // frame's VU1 work, 12 ms past its blank) still goes out on time, for
     // under a third of a frame's delay where all is quick.
     keep = std::min<u64>(std::max<u64>(keep + 500'000, 6'000'000), 25'000'000);
-    return std::max(now, ended + keep);
+    const u64 due = std::max(now, ended + keep);
+    // Its blank to its time to be shown: the host's share of what a press
+    // takes to reach the screen (the display's refresh and compositor after).
+    if (timeline::On()) timeline::Instant("due after its blank (us)", timeline::Now(), (due - ended) / 1000);
+    return due;
 }
 
 u64 GsBusyMicroseconds() { return g_gs_busy_us.load(std::memory_order_relaxed); }
