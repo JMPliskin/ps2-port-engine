@@ -312,10 +312,11 @@ bool WindowVsync();
    so - auto's the window's now. */
 void SetWindowAspect(const std::string& aspect);
 float PictureAspect();
-/* Anti-aliasing (the "antialiasing" setting): "off", the default; "fxaa",
-   the picture's edges smoothed before it is scaled to the window; "ssaa2" or
-   "ssaa4", supersampling - drawn at 2 or 4 times the internal resolution
-   (SupersamplingFactor) and averaged down to the window's size. */
+/* Anti-aliasing (the "antialiasing" setting): "off", the default; "fxaa"
+   or "smaa" (SMAA 1x, gpu/third_party/smaa), the picture's edges smoothed
+   before it is scaled to the window; "ssaa2" or "ssaa4", supersampling -
+   drawn at 2 or 4 times the internal resolution (SupersamplingFactor) and
+   averaged down to the window's size. */
 void SetWindowAntiAliasing(const std::string& mode);
 u32 SupersamplingFactor();
 /* A line after the window's title (a game's tool says what it is doing);

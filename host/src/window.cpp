@@ -157,7 +157,10 @@ void PresentGdi() {
    pictures (drawn larger, SupersamplingFactor) averaged down. */
 ps2gpu::Display::AntiAliasing DisplayAntiAliasing(const std::string& mode) {
     using AA = ps2gpu::Display::AntiAliasing;
-    return mode == "fxaa" ? AA::kFxaa : mode == "ssaa2" || mode == "ssaa4" ? AA::kDownsample : AA::kOff;
+    return mode == "fxaa"                        ? AA::kFxaa
+           : mode == "smaa"                      ? AA::kSmaa
+           : mode == "ssaa2" || mode == "ssaa4" ? AA::kDownsample
+                                                 : AA::kOff;
 }
 #endif
 

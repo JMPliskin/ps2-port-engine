@@ -16,8 +16,13 @@
 #include <volk.h>
 
 #include "gpu_internal.h"
+#include "AreaTex.h"             // gpu/third_party/smaa
+#include "SearchTex.h"
 #include "downsample_comp.h"
 #include "fxaa_comp.h"
+#include "smaa_blend_comp.h"
+#include "smaa_edges_comp.h"
+#include "smaa_weights_comp.h"
 
 #include <algorithm>
 #ifdef _WIN32
@@ -304,6 +309,32 @@ private:
     /* `source` (TRANSFER_SRC, width x height) through `pipeline` into post_out_ (left
        TRANSFER_SRC), in cmd_. */
     void RecordPost(VkImage source, std::uint32_t width, std::uint32_t height, VkPipeline pipeline);
+    // SMAA: post_in_ through its edges and blending weights (images of the
+    // picture's size) into post_out_ - smaa_edges, smaa_weights and
+    // smaa_blend.comp, each with a set of its own (three samplers, an
+    // output image); its area and search tables uploaded once, from a
+    // staging buffer kept until the end.
+    enum { kSmaaEdges, kSmaaWeights, kSmaaArea, kSmaaSearch, kSmaaImages };
+    VkImage smaa_image_[kSmaaImages] = {};
+    VkDeviceMemory smaa_memory_[kSmaaImages] = {};
+    VkImageView smaa_view_[kSmaaImages] = {};
+    VkSampler smaa_point_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout smaa_set_layout_ = VK_NULL_HANDLE;
+    VkDescriptorPool smaa_descriptors_ = VK_NULL_HANDLE;
+    VkDescriptorSet smaa_sets_[3] = {};
+    VkPipelineLayout smaa_layout_ = VK_NULL_HANDLE;
+    VkPipeline smaa_pipelines_[3] = {};
+    VkBuffer smaa_staging_ = VK_NULL_HANDLE;
+    VkDeviceMemory smaa_staging_memory_ = VK_NULL_HANDLE;
+    bool smaa_tables_sent_ = false, smaa_failed_ = false;
+    std::uint32_t smaa_width_ = 0, smaa_height_ = 0;
+    VkImageView smaa_for_in_ = VK_NULL_HANDLE;      // post_in_'s view its sets were written with
+    bool MakeSmaaImage(int which, VkFormat format, std::uint32_t width, std::uint32_t height, VkImageUsageFlags usage);
+    /* The passes (once), their tables and images at this size; false when there are none. */
+    bool EnsureSmaa(std::uint32_t width, std::uint32_t height);
+    /* As RecordPost, through SMAA's three passes. */
+    void RecordSmaa(VkImage source, std::uint32_t width, std::uint32_t height);
+    void DestroySmaa();
     std::string describe_, error_;
     // PresentImageAt's pictures: copies of the frames' targets, three, each
     // its copy's command buffer and fence (the GS thread's own pool).
@@ -904,6 +935,250 @@ void VulkanDisplay::RecordPost(VkImage source, std::uint32_t width, std::uint32_
             VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
 }
 
+bool VulkanDisplay::MakeSmaaImage(int which, VkFormat format, std::uint32_t width, std::uint32_t height,
+                                  VkImageUsageFlags usage) {
+    VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    ici.imageType = VK_IMAGE_TYPE_2D;
+    ici.format = format;
+    ici.extent = {width, height, 1};
+    ici.mipLevels = 1;
+    ici.arrayLayers = 1;
+    ici.samples = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage = usage;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (!Check(vkCreateImage(device_, &ici, nullptr, &smaa_image_[which]), "vkCreateImage (SMAA)")) return false;
+    VkMemoryRequirements req;
+    vkGetImageMemoryRequirements(device_, smaa_image_[which], &req);
+    VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    mai.allocationSize = req.size;
+    mai.memoryTypeIndex = FindMemory(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (!Check(vkAllocateMemory(device_, &mai, nullptr, &smaa_memory_[which]), "vkAllocateMemory (SMAA)")) return false;
+    vkBindImageMemory(device_, smaa_image_[which], smaa_memory_[which], 0);
+    VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    vci.image = smaa_image_[which];
+    vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vci.format = format;
+    vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    return Check(vkCreateImageView(device_, &vci, nullptr, &smaa_view_[which]), "vkCreateImageView (SMAA)");
+}
+
+void VulkanDisplay::DestroySmaa() {
+    if (!device_) return;
+    for (int i = 0; i < kSmaaImages; ++i) {
+        if (smaa_view_[i]) vkDestroyImageView(device_, smaa_view_[i], nullptr);
+        if (smaa_image_[i]) vkDestroyImage(device_, smaa_image_[i], nullptr);
+        if (smaa_memory_[i]) vkFreeMemory(device_, smaa_memory_[i], nullptr);
+        smaa_view_[i] = VK_NULL_HANDLE;
+        smaa_image_[i] = VK_NULL_HANDLE;
+        smaa_memory_[i] = VK_NULL_HANDLE;
+    }
+    for (VkPipeline& p : smaa_pipelines_)
+        if (p) vkDestroyPipeline(device_, p, nullptr), p = VK_NULL_HANDLE;
+    if (smaa_layout_) vkDestroyPipelineLayout(device_, smaa_layout_, nullptr);
+    if (smaa_descriptors_) vkDestroyDescriptorPool(device_, smaa_descriptors_, nullptr);
+    if (smaa_set_layout_) vkDestroyDescriptorSetLayout(device_, smaa_set_layout_, nullptr);
+    if (smaa_point_) vkDestroySampler(device_, smaa_point_, nullptr);
+    if (smaa_staging_) vkDestroyBuffer(device_, smaa_staging_, nullptr);
+    if (smaa_staging_memory_) vkFreeMemory(device_, smaa_staging_memory_, nullptr);
+    smaa_layout_ = VK_NULL_HANDLE;
+    smaa_descriptors_ = VK_NULL_HANDLE;
+    smaa_set_layout_ = VK_NULL_HANDLE;
+    smaa_point_ = VK_NULL_HANDLE;
+    smaa_staging_ = VK_NULL_HANDLE;
+    smaa_staging_memory_ = VK_NULL_HANDLE;
+}
+
+bool VulkanDisplay::EnsureSmaa(std::uint32_t width, std::uint32_t height) {
+    if (smaa_failed_) return false;
+    if (width == smaa_width_ && height == smaa_height_ && smaa_for_in_ == post_in_view_ && smaa_image_[kSmaaEdges])
+        return true;
+    smaa_failed_ = true;                    // until it is all made
+    if (!smaa_pipelines_[0]) {
+        VkSamplerCreateInfo sci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+        sci.magFilter = sci.minFilter = VK_FILTER_NEAREST;
+        sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        if (!Check(vkCreateSampler(device_, &sci, nullptr, &smaa_point_), "vkCreateSampler (SMAA)")) return false;
+        VkDescriptorSetLayoutBinding bindings[4] = {};
+        for (std::uint32_t i = 0; i < 4; ++i) {
+            bindings[i].binding = i;
+            bindings[i].descriptorType = i < 3 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+            bindings[i].descriptorCount = 1;
+            bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        }
+        VkDescriptorSetLayoutCreateInfo lci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        lci.bindingCount = 4;
+        lci.pBindings = bindings;
+        if (!Check(vkCreateDescriptorSetLayout(device_, &lci, nullptr, &smaa_set_layout_), "SMAA set layout"))
+            return false;
+        const VkDescriptorPoolSize sizes[2] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 9},
+                                               {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 3}};
+        VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+        dpi.maxSets = 3;
+        dpi.poolSizeCount = 2;
+        dpi.pPoolSizes = sizes;
+        if (!Check(vkCreateDescriptorPool(device_, &dpi, nullptr, &smaa_descriptors_), "SMAA descriptor pool"))
+            return false;
+        const VkDescriptorSetLayout layouts[3] = {smaa_set_layout_, smaa_set_layout_, smaa_set_layout_};
+        VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        dai.descriptorPool = smaa_descriptors_;
+        dai.descriptorSetCount = 3;
+        dai.pSetLayouts = layouts;
+        if (!Check(vkAllocateDescriptorSets(device_, &dai, smaa_sets_), "SMAA descriptor sets")) return false;
+        const VkPushConstantRange metrics{VK_SHADER_STAGE_COMPUTE_BIT, 0, 16};
+        VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        pli.setLayoutCount = 1;
+        pli.pSetLayouts = &smaa_set_layout_;
+        pli.pushConstantRangeCount = 1;
+        pli.pPushConstantRanges = &metrics;
+        if (!Check(vkCreatePipelineLayout(device_, &pli, nullptr, &smaa_layout_), "SMAA pipeline layout")) return false;
+        const struct { const std::uint32_t* code; std::size_t bytes; } shaders[3] = {
+            {spirv_smaa_edges_comp, sizeof spirv_smaa_edges_comp},
+            {spirv_smaa_weights_comp, sizeof spirv_smaa_weights_comp},
+            {spirv_smaa_blend_comp, sizeof spirv_smaa_blend_comp},
+        };
+        for (int i = 0; i < 3; ++i) {
+            VkShaderModuleCreateInfo smi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+            smi.codeSize = shaders[i].bytes;
+            smi.pCode = shaders[i].code;
+            VkShaderModule module = VK_NULL_HANDLE;
+            if (!Check(vkCreateShaderModule(device_, &smi, nullptr, &module), "SMAA shader")) return false;
+            VkComputePipelineCreateInfo cpi{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+            cpi.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+            cpi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+            cpi.stage.module = module;
+            cpi.stage.pName = "main";
+            cpi.layout = smaa_layout_;
+            const VkResult made = vkCreateComputePipelines(device_, VK_NULL_HANDLE, 1, &cpi, nullptr, &smaa_pipelines_[i]);
+            vkDestroyShaderModule(device_, module, nullptr);
+            if (!Check(made, "SMAA pipeline")) return false;
+        }
+        // The tables: their images, and their bytes in a staging buffer
+        // (RecordSmaa copies them over the first time).
+        const VkImageUsageFlags table = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        if (!MakeSmaaImage(kSmaaArea, VK_FORMAT_R8G8_UNORM, AREATEX_WIDTH, AREATEX_HEIGHT, table) ||
+            !MakeSmaaImage(kSmaaSearch, VK_FORMAT_R8_UNORM, SEARCHTEX_WIDTH, SEARCHTEX_HEIGHT, table))
+            return false;
+        VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        bci.size = sizeof areaTexBytes + sizeof searchTexBytes;
+        bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        if (!Check(vkCreateBuffer(device_, &bci, nullptr, &smaa_staging_), "SMAA staging buffer")) return false;
+        VkMemoryRequirements req;
+        vkGetBufferMemoryRequirements(device_, smaa_staging_, &req);
+        VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        mai.allocationSize = req.size;
+        mai.memoryTypeIndex = FindMemory(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                                              VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (!Check(vkAllocateMemory(device_, &mai, nullptr, &smaa_staging_memory_), "SMAA staging memory")) return false;
+        vkBindBufferMemory(device_, smaa_staging_, smaa_staging_memory_, 0);
+        void* mapped = nullptr;
+        if (!Check(vkMapMemory(device_, smaa_staging_memory_, 0, bci.size, 0, &mapped), "SMAA staging map")) return false;
+        std::memcpy(mapped, areaTexBytes, sizeof areaTexBytes);
+        std::memcpy(static_cast<char*>(mapped) + sizeof areaTexBytes, searchTexBytes, sizeof searchTexBytes);
+        vkUnmapMemory(device_, smaa_staging_memory_);
+    }
+    // Earlier presents may still read the old images.
+    {
+        std::lock_guard<std::mutex> hold(g_queue_lock);
+        vkDeviceWaitIdle(device_);
+    }
+    for (int which : {int(kSmaaEdges), int(kSmaaWeights)}) {
+        if (smaa_view_[which]) vkDestroyImageView(device_, smaa_view_[which], nullptr);
+        if (smaa_image_[which]) vkDestroyImage(device_, smaa_image_[which], nullptr);
+        if (smaa_memory_[which]) vkFreeMemory(device_, smaa_memory_[which], nullptr);
+        smaa_view_[which] = VK_NULL_HANDLE;
+        smaa_image_[which] = VK_NULL_HANDLE;
+        smaa_memory_[which] = VK_NULL_HANDLE;
+        if (!MakeSmaaImage(which, VK_FORMAT_R8G8B8A8_UNORM, width, height,
+                           VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT))
+            return false;
+    }
+    // Each pass's set: its inputs (sampled; one unused stands for the
+    // others) and its output.
+    const VkImageLayout read = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    const VkDescriptorImageInfo colour{post_sampler_, post_in_view_, read};
+    const VkDescriptorImageInfo edges{post_sampler_, smaa_view_[kSmaaEdges], read};
+    const VkDescriptorImageInfo weights{post_sampler_, smaa_view_[kSmaaWeights], read};
+    const VkDescriptorImageInfo area{post_sampler_, smaa_view_[kSmaaArea], read};
+    const VkDescriptorImageInfo search{smaa_point_, smaa_view_[kSmaaSearch], read};
+    const VkDescriptorImageInfo out_edges{VK_NULL_HANDLE, smaa_view_[kSmaaEdges], VK_IMAGE_LAYOUT_GENERAL};
+    const VkDescriptorImageInfo out_weights{VK_NULL_HANDLE, smaa_view_[kSmaaWeights], VK_IMAGE_LAYOUT_GENERAL};
+    const VkDescriptorImageInfo out_picture{VK_NULL_HANDLE, post_out_view_, VK_IMAGE_LAYOUT_GENERAL};
+    const VkDescriptorImageInfo* inputs[3][4] = {{&colour, &colour, &colour, &out_edges},
+                                                 {&edges, &area, &search, &out_weights},
+                                                 {&colour, &weights, &colour, &out_picture}};
+    VkWriteDescriptorSet writes[12] = {};
+    for (int set = 0; set < 3; ++set)
+        for (std::uint32_t b = 0; b < 4; ++b) {
+            VkWriteDescriptorSet& w = writes[set * 4 + b];
+            w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            w.dstSet = smaa_sets_[set];
+            w.dstBinding = b;
+            w.descriptorCount = 1;
+            w.descriptorType = b < 3 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+            w.pImageInfo = inputs[set][b];
+        }
+    vkUpdateDescriptorSets(device_, 12, writes, 0, nullptr);
+    smaa_width_ = width;
+    smaa_height_ = height;
+    smaa_for_in_ = post_in_view_;
+    smaa_failed_ = false;
+    return true;
+}
+
+void VulkanDisplay::RecordSmaa(VkImage source, std::uint32_t width, std::uint32_t height) {
+    // The picture as RGBA, to be sampled (as RecordPost).
+    Barrier(cmd_, post_in_, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
+            VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    VkImageBlit region{};
+    region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    region.dstSubresource = region.srcSubresource;
+    region.srcOffsets[1] = {std::int32_t(width), std::int32_t(height), 1};
+    region.dstOffsets[1] = region.srcOffsets[1];
+    vkCmdBlitImage(cmd_, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, post_in_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                   1, &region, VK_FILTER_NEAREST);
+    Barrier(cmd_, post_in_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    if (!smaa_tables_sent_) {
+        const struct { int which; VkDeviceSize offset; std::uint32_t w, h; } tables[2] = {
+            {kSmaaArea, 0, AREATEX_WIDTH, AREATEX_HEIGHT},
+            {kSmaaSearch, sizeof areaTexBytes, SEARCHTEX_WIDTH, SEARCHTEX_HEIGHT}};
+        for (const auto& t : tables) {
+            Barrier(cmd_, smaa_image_[t.which], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
+                    VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+            VkBufferImageCopy copy{};
+            copy.bufferOffset = t.offset;
+            copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            copy.imageExtent = {t.w, t.h, 1};
+            vkCmdCopyBufferToImage(cmd_, smaa_staging_, smaa_image_[t.which], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+                                   &copy);
+            Barrier(cmd_, smaa_image_[t.which], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+        }
+        smaa_tables_sent_ = true;
+    }
+    const float metrics[4] = {1.0f / float(width), 1.0f / float(height), float(width), float(height)};
+    const VkImage outputs[3] = {smaa_image_[kSmaaEdges], smaa_image_[kSmaaWeights], post_out_};
+    for (int pass = 0; pass < 3; ++pass) {
+        Barrier(cmd_, outputs[pass], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+        vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, smaa_pipelines_[pass]);
+        vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, smaa_layout_, 0, 1, &smaa_sets_[pass], 0, nullptr);
+        vkCmdPushConstants(cmd_, smaa_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof metrics, metrics);
+        vkCmdDispatch(cmd_, (width + 7) / 8, (height + 7) / 8, 1);
+        if (pass < 2)                       // read by the next pass
+            Barrier(cmd_, outputs[pass], VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    }
+    Barrier(cmd_, post_out_, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_SHADER_WRITE_BIT,
+            VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+}
+
 bool VulkanDisplay::FinishPresent(std::uint32_t index, VkImage source, std::uint32_t width, std::uint32_t height) {
     const VkImage target = images_[index];
     Barrier(cmd_, target, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
@@ -931,6 +1206,9 @@ bool VulkanDisplay::FinishPresent(std::uint32_t index, VkImage source, std::uint
     const bool larger = width > std::uint32_t(dw) || height > std::uint32_t(dh);
     if (mode == AntiAliasing::kFxaa && EnsurePost(width, height, width, height)) {
         RecordPost(source, width, height, fxaa_pipeline_);
+        source = post_out_;
+    } else if (mode == AntiAliasing::kSmaa && EnsurePost(width, height, width, height) && EnsureSmaa(width, height)) {
+        RecordSmaa(source, width, height);
         source = post_out_;
     } else if (mode == AntiAliasing::kDownsample && larger && dw > 0 && dh > 0 &&
                EnsurePost(width, height, std::uint32_t(dw), std::uint32_t(dh))) {
@@ -1699,6 +1977,7 @@ VulkanDisplay::~VulkanDisplay() {
     if (copy_pool_) vkDestroyCommandPool(device_, copy_pool_, nullptr);
     DestroyPicture();
     DestroyPostImages();
+    DestroySmaa();
     if (fxaa_pipeline_) vkDestroyPipeline(device_, fxaa_pipeline_, nullptr);
     if (downsample_pipeline_) vkDestroyPipeline(device_, downsample_pipeline_, nullptr);
     if (post_layout_) vkDestroyPipelineLayout(device_, post_layout_, nullptr);
