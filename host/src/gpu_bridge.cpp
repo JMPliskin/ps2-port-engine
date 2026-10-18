@@ -59,6 +59,9 @@
 #include <unordered_map>
 #include <vector>
 
+#define XXH_INLINE_ALL
+#include "xxhash.h"
+
 #include "ps2host/gs.h"
 #include "ps2host/profile.h"
 #include "ps2host/run.h"
@@ -733,28 +736,10 @@ void Sample(Bridge& b, Owned& o, const Pages& pages) {
    textures are hashed hundreds of thousands of times a run (only compared
    within a run, so the values themselves are free to change). */
 u64 Hash(const unsigned char* data, std::size_t size) {
-    constexpr u64 kMul = 0xFF51AFD7ED558CCDull;
-    u64 h[4] = {0x9E3779B97F4A7C15ull ^ size, 0xC2B2AE3D27D4EB4Full, 0x165667B19E3779F9ull, 0x27D4EB2F165667C5ull};
-    std::size_t i = 0;
-    for (; i + 32 <= size; i += 32)
-        for (int lane = 0; lane < 4; ++lane) {
-            u64 word;
-            std::memcpy(&word, data + i + lane * 8, 8);
-            h[lane] = (h[lane] ^ word) * kMul;
-            h[lane] ^= h[lane] >> 29;
-        }
-    for (int lane = 0; i + 8 <= size; i += 8, ++lane) {
-        u64 word;
-        std::memcpy(&word, data + i, 8);
-        h[lane] = (h[lane] ^ word) * kMul;
-        h[lane] ^= h[lane] >> 29;
-    }
-    u64 out = h[0];
-    for (int lane = 1; lane < 4; ++lane) {
-        out = (out ^ h[lane]) * kMul;
-        out ^= out >> 29;
-    }
-    return out;
+    // XXH3 (as texture_pack.cpp has it): a re-uploaded texture's blocks are
+    // hashed each time it is used again (Burnout 3 sends its textures every
+    // picture) - several times as fast as the four-lane hash it replaced.
+    return XXH3_64bits(data, size);
 }
 
 bool GpuHolds(const Bridge& b, u32 begin, u32 end);
