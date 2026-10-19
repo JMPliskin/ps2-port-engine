@@ -26,13 +26,14 @@ layout(push_constant) uniform Params {
     uint bp;            // base, in 256-byte blocks
     uint bw;            // width, in 64-pixel units
     uint psm;
-    uint cols, rows;    // the rectangle moved, from (0, 0)
+    uint cols, rows;    // the rectangle moved: columns [col0, cols), rows from row0
     uint stride;        // the linear rows' length, in pixels
     uint to_memory;     // 1: linear -> memory; 0: memory -> linear
     uint depth;         // the linear side is depth (float)
     uint row0;          // the image's row that linear row 0 holds
     uint scale;         // the image's pixels to a GS pixel, each way (the internal resolution)
     uint keep_colour;   // memory -> image, 32-bit: the square's colour kept where memory differs in alpha alone
+    uint col0;          // the rectangle's first column (cols its end)
 } p;
 
 #include "gs_address.glsl"
@@ -52,7 +53,7 @@ uint From16(uint c) {
 void main() {
     const uint direction = specialized_direction == 0xFFFFFFFFu ? p.to_memory : specialized_direction;
     const uint depth = specialized_depth == 0xFFFFFFFFu ? p.depth : specialized_depth;
-    const uint x = gl_GlobalInvocationID.x, y = gl_GlobalInvocationID.y;
+    const uint x = gl_GlobalInvocationID.x + p.col0, y = gl_GlobalInvocationID.y;
     if (x >= p.cols || y >= p.rows) return;
     // In each GS 16-pixel column, x and x+8 occupy the low/high half
     // of one word. Complete columns can be packed by one invocation,

@@ -100,18 +100,19 @@ public:
     // Answered from what the queue has made by then (the images known),
     // made in turn; the renderer's own answer counted when it differs.
     bool TargetToMemory(std::uint32_t fbp, std::uint32_t fbw, std::uint32_t psm, std::uint32_t cols,
-                        std::uint32_t rows, std::uint32_t first_row) override {
+                        std::uint32_t rows, std::uint32_t first_row, std::uint32_t first_col) override {
         const std::uint32_t known = targets_.count(TargetKey(fbp, fbw, psm)) ? 1 : 0;
-        const std::uint32_t a[7] = {fbp, fbw, psm, cols, rows, first_row, known};
+        const std::uint32_t a[8] = {fbp, fbw, psm, cols, rows, first_row, known, first_col};
         Op(kTargetToMemory, sizeof a);
         Put(a, sizeof a);
         End();
         return known != 0;
     }
     bool DepthToMemory(std::uint32_t zbp, std::uint32_t width, std::uint32_t height, std::uint32_t fbw,
-                       std::uint32_t zpsm, std::uint32_t cols, std::uint32_t rows, std::uint32_t first_row) override {
+                       std::uint32_t zpsm, std::uint32_t cols, std::uint32_t rows, std::uint32_t first_row,
+                       std::uint32_t first_col) override {
         const std::uint32_t known = depths_.count(DepthKey(zbp, width, height)) ? 1 : 0;
-        const std::uint32_t a[9] = {zbp, width, height, fbw, zpsm, cols, rows, first_row, known};
+        const std::uint32_t a[10] = {zbp, width, height, fbw, zpsm, cols, rows, first_row, known, first_col};
         Op(kDepthToMemory, sizeof a);
         Put(a, sizeof a);
         End();
@@ -223,9 +224,10 @@ public:
         End();
     }
     void TargetRowsFromMemory(std::uint32_t fbp, std::uint32_t fbw, std::uint32_t psm, std::uint32_t width,
-                              std::uint32_t height, std::uint32_t first_row, std::uint32_t rows) override {
+                              std::uint32_t height, std::uint32_t first_row, std::uint32_t rows,
+                              std::uint32_t first_col, std::uint32_t end_col) override {
         Made(fbp, fbw, psm, width, height);         // (made whole if it was not)
-        const std::uint32_t a[7] = {fbp, fbw, psm, width, height, first_row, rows};
+        const std::uint32_t a[9] = {fbp, fbw, psm, width, height, first_row, rows, first_col, end_col};
         Op(kTargetRowsFromMemory, sizeof a);
         Put(a, sizeof a);
         End();
@@ -491,9 +493,9 @@ private:
                 }
                 case kReloadKeepsColour: r.ReloadKeepsColour(Take<std::uint32_t>(at) != 0); break;
                 case kTargetRowsFromMemory: {
-                    std::uint32_t a[7];
+                    std::uint32_t a[9];
                     std::memcpy(a, at, sizeof a);
-                    r.TargetRowsFromMemory(a[0], a[1], a[2], a[3], a[4], a[5], a[6]);
+                    r.TargetRowsFromMemory(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8]);
                     break;
                 }
                 case kDepthRowsFromMemory: {
@@ -503,15 +505,15 @@ private:
                     break;
                 }
                 case kTargetToMemory: {
-                    std::uint32_t a[7];
+                    std::uint32_t a[8];
                     std::memcpy(a, at, sizeof a);
-                    if (r.TargetToMemory(a[0], a[1], a[2], a[3], a[4], a[5]) != (a[6] != 0)) ++wrong_;
+                    if (r.TargetToMemory(a[0], a[1], a[2], a[3], a[4], a[5], a[7]) != (a[6] != 0)) ++wrong_;
                     break;
                 }
                 case kDepthToMemory: {
-                    std::uint32_t a[9];
+                    std::uint32_t a[10];
                     std::memcpy(a, at, sizeof a);
-                    if (r.DepthToMemory(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]) != (a[8] != 0)) ++wrong_;
+                    if (r.DepthToMemory(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[9]) != (a[8] != 0)) ++wrong_;
                     break;
                 }
                 default: break;

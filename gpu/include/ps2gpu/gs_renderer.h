@@ -247,11 +247,11 @@ public:
        what is recorded, nothing waiting: part of a block written over what
        the GPU drew there, without bringing it back. */
     virtual void MemoryPatch(const std::uint32_t* words, std::size_t count) { (void)words, (void)count; }
-    /* A target's rows [first_row, rows), `cols` wide, into GPU memory at FBP
-       as its PSM lays them out (CT32, CT24, CT16, CT16S); false if there is
-       none. */
+    /* A target's rows [first_row, rows), columns [first_col, cols), into GPU
+       memory at FBP as its PSM lays them out (CT32, CT24, CT16, CT16S); false
+       if there is none. */
     virtual bool TargetToMemory(std::uint32_t fbp, std::uint32_t fbw, std::uint32_t psm, std::uint32_t cols,
-                                std::uint32_t rows, std::uint32_t first_row = 0) = 0;
+                                std::uint32_t rows, std::uint32_t first_row = 0, std::uint32_t first_col = 0) = 0;
     /* A target, made at this size if there is none, loaded from GPU memory. */
     virtual void TargetFromMemory(std::uint32_t fbp, std::uint32_t fbw, std::uint32_t psm, std::uint32_t width,
                                   std::uint32_t height) = 0;
@@ -259,7 +259,7 @@ public:
        (Z32, Z24, Z16, Z16S) FBW pages wide. */
     virtual bool DepthToMemory(std::uint32_t zbp, std::uint32_t width, std::uint32_t height, std::uint32_t fbw,
                                std::uint32_t zpsm, std::uint32_t cols, std::uint32_t rows,
-                               std::uint32_t first_row = 0) = 0;
+                               std::uint32_t first_row = 0, std::uint32_t first_col = 0) = 0;
     virtual void DepthFromMemory(std::uint32_t zbp, std::uint32_t width, std::uint32_t height, std::uint32_t fbw,
                                  std::uint32_t zpsm) = 0;
     /* A texture decoded from GPU memory, as the host's software GS decodes
@@ -296,10 +296,12 @@ public:
        memory's, as ever. */
     virtual void ReloadKeepsColour(bool keep) { (void)keep; }
     /* TargetFromMemory / DepthFromMemory for rows [first_row, first_row +
-       rows) alone (the rest of the image as it is). */
+       rows) alone (the rest of the image as it is) - of a target, columns
+       [first_col, end_col) of them. */
     virtual void TargetRowsFromMemory(std::uint32_t fbp, std::uint32_t fbw, std::uint32_t psm, std::uint32_t width,
-                                      std::uint32_t height, std::uint32_t first_row, std::uint32_t rows) {
-        (void)first_row, (void)rows;
+                                      std::uint32_t height, std::uint32_t first_row, std::uint32_t rows,
+                                      std::uint32_t first_col = 0, std::uint32_t end_col = ~0u) {
+        (void)first_row, (void)rows, (void)first_col, (void)end_col;
         TargetFromMemory(fbp, fbw, psm, width, height);
     }
     virtual void DepthRowsFromMemory(std::uint32_t zbp, std::uint32_t width, std::uint32_t height, std::uint32_t fbw,

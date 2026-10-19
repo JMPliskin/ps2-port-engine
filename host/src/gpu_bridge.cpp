@@ -411,6 +411,27 @@ struct TimelineStep {
     }
 };
 
+/* The columns [first, end) of image `o` that `pages` reach (a page is 64
+   pixels wide in every format), within [0, limit), as PagesOf numbers
+   them; all of them where not known (none; an image reaching past the end
+   of local memory, whose pages there PagesOf leaves out; a page before it). */
+void ColumnsOf(const Owned& o, const Pages& pages, u32 limit, u32* first, u32* end) {
+    *first = 0;
+    *end = limit;
+    const u32 fbw = std::max(1u, o.fbw), base = o.begin / 32;
+    u32 lo = ~0u, hi = 0;
+    if (pages.none() || o.full_end > 16384) return;
+    for (u32 p = 0; p < 512; ++p) {
+        if (!pages.test(p)) continue;
+        if (p < base) return;
+        const u32 col = (p - base) % fbw;
+        lo = std::min(lo, col);
+        hi = std::max(hi, col);
+    }
+    *first = std::min(lo * 64, limit);
+    *end = std::min((hi + 1) * 64, limit);
+}
+
 /* What the GPU drew into an image, swizzled into the GPU's local memory - on
    the GPU, nothing waiting. */
 void WriteBack(Bridge& b, Owned& o) {
@@ -418,6 +439,12 @@ void WriteBack(Bridge& b, Owned& o) {
     Timed timed(Section::GpuSync);
     const TimelineStep step("sync: a write-back");
     o.gpu_newer = false;
+    // Only the columns of the pages drawn since (a page is 64 pixels wide in
+    // every format): the fog's triangles in splitscreen's lower view, a few
+    // columns each, wrote back the depth buffer's whole width ~110 times a
+    // frame.
+    u32 first_col = 0, end_col = o.x1;
+    ColumnsOf(o, o.dirty_pages, o.x1, &first_col, &end_col);
     o.dirty_pages.reset();
     o.rect_dirty = false;
     if (o.dirty_end <= o.dirty_begin) return;
@@ -433,8 +460,9 @@ void WriteBack(Bridge& b, Owned& o) {
         std::fprintf(gs::TheGs().trace_out, "[gpu] write-back %s %X/%u/%02X rows %u-%u cols %u\n", o.depth ? "Z" : "C",
                      unsigned(o.fbp), unsigned(o.fbw), unsigned(o.psm), unsigned(first), unsigned(last),
                      unsigned(o.x1));
-    const bool done = o.depth ? b.renderer->DepthToMemory(o.fbp, o.width, o.height, o.fbw, o.psm, o.x1, last, first)
-                              : b.renderer->TargetToMemory(o.fbp, o.fbw, o.psm, o.x1, last, first);
+    const bool done = o.depth ? b.renderer->DepthToMemory(o.fbp, o.width, o.height, o.fbw, o.psm, end_col, last, first,
+                                                          first_col)
+                              : b.renderer->TargetToMemory(o.fbp, o.fbw, o.psm, end_col, last, first, first_col);
     if (!done && gs::TheGs().trace) std::fprintf(gs::TheGs().trace_out, "[gpu]   (nothing to write back)\n");
     if (done) {
         ++b.write_backs;
@@ -620,7 +648,15 @@ Owned& Use(Bridge& b, u32 fbp, u32 fbw, u32 psm, bool depth, u32 width, u32 heig
             else b.renderer->TargetFromMemory(o.fbp, o.fbw, o.psm, o.width, o.height);
         } else if (r0 < r1) {
             if (depth) b.renderer->DepthRowsFromMemory(o.fbp, o.width, o.height, o.fbw, o.psm, r0, r1 - r0);
-            else b.renderer->TargetRowsFromMemory(o.fbp, o.fbw, o.psm, o.width, o.height, r0, r1 - r0);
+            else {
+                // The stale pages' columns alone (the image is memory's
+                // elsewhere: written back first, above): the fog's own
+                // texture view, a 1024-wide one, came back whole for a few
+                // columns of drawing ~110 times a splitscreen frame.
+                u32 c0 = 0, c1 = o.width;
+                ColumnsOf(o, o.stale_pages, o.width, &c0, &c1);
+                b.renderer->TargetRowsFromMemory(o.fbp, o.fbw, o.psm, o.width, o.height, r0, r1 - r0, c0, c1);
+            }
         }
         b.renderer->ReloadKeepsColour(false);
         o.stale_row0 = 0;
