@@ -1175,6 +1175,159 @@ Owned* Containing(Bridge& b, u32 fbp, u32 fbw, u32 psm, u32* offset) {
     return best;
 }
 
+/* The pixel of an image a word of local memory is ((x | y << 16) + 1; 0
+   none): an image's layout inverted, made once a layout (Shuffle). */
+struct WordPixels {
+    std::tuple<u32, u32, u32, u32, u32> key{~0u, 0, 0, 0, 0};
+    std::vector<u32> pixel;
+    const std::vector<u32>& For(u32 bp, u32 bw, u32 psm, u32 width, u32 height) {
+        const auto k = std::make_tuple(bp, bw, psm, width, height);
+        if (k == key) return pixel;
+        key = k;
+        pixel.assign(1u << 20, 0);
+        for (u32 y = 0; y < height; ++y)
+            for (u32 x = 0; x < width; ++x) {
+                u32 nibble = 0;
+                pixel[(gs::Memory::Address(bp, bw, x, y, psm, &nibble) >> 2) & ((1u << 20) - 1)] = (x | y << 16) + 1;
+            }
+        return pixel;
+    }
+};
+
+/* GsShuffle: a sprite into a 16-bit view of a 32-bit target, its texels a
+   16-bit view of the depth buffer, copied 1:1, done on the target's image
+   (ChannelShuffle) - not a 16-bit image of its own, its write-back and the
+   target's reload. Burnout 3's fog puts its depth into the picture's alpha
+   so, 40 sprites a frame: the 16-bit image, its write-back, the picture's,
+   the depth buffer's and two reloads, all at the internal resolution, were
+   most of the fog's cost. Only what it does exactly as the GS would: the
+   texel unchanged (DECAL, TCC; no blend, or one that gives Cs; no fog), no
+   test that could fail and no Z written, nearest texels at their centres,
+   inside the texture; the view and the texture at the start of the target
+   and the depth buffer or whole pages into them (Containing; Burnout 3's
+   player 2); each pixel and texel inside their images, a Z24 texel's top
+   byte (not in the image) never read - checked once for each sprite's place.
+   False: drawn as it is. PS2HOST_GPU_NO_SHUFFLE: never. */
+bool Shuffle(Bridge& s, const gs::Gs::DrawCall& call, const gs::Context& c, u32 frame_psm) {
+    static const bool off = std::getenv("PS2HOST_GPU_NO_SHUFFLE") != nullptr;
+    if (off || call.count < 2 || !s.renderer->CanShuffle()) return false;
+    const u32 tex_psm = Bits(c.tex0, 20, 6);
+    if (tex_psm != gs::PSMZ16 && tex_psm != gs::PSMZ16S) return false;
+    if (!Bits(c.tex0, 34, 1) || Bits(c.tex0, 35, 2) != 1) return false;          // TCC, DECAL
+    if ((call.prim >> 5) & 1 || !((call.prim >> 8) & 1)) return false;          // no fog; UV
+    if (((call.prim >> 6) & 1) && !(Bits(c.alpha, 0, 2) == Bits(c.alpha, 2, 2) && Bits(c.alpha, 6, 2) == 0))
+        return false;                                                           // blending to Cs alone
+    const u64 test = c.test;
+    if (Bits(test, 14, 1)) return false;                                        // DATE
+    if (Bits(test, 0, 1) && !(Bits(test, 1, 3) == 1 || (Bits(test, 1, 3) == 0 && Bits(test, 12, 2) == 1)))
+        return false;                                                           // ATST ALWAYS, or NEVER with FB_ONLY
+    if (Bits(test, 16, 1) && Bits(test, 17, 2) != 1) return false;              // ZTST ALWAYS
+    if (!Bits(c.zbuf, 32, 1)) return false;                                     // ZMSK
+    if (Bits(c.tex1, 5, 4)) return false;                                       // MMAG, MMIN nearest
+    const gs::Vertex& a = call.vertices[0];
+    const gs::Vertex& b = call.vertices[1];
+    const gs::Vertex& lo = a.x <= b.x ? a : b;
+    const gs::Vertex& hi = a.x <= b.x ? b : a;
+    const gs::Vertex& top = a.y <= b.y ? a : b;
+    const gs::Vertex& bottom = a.y <= b.y ? b : a;
+    if (lo.x != std::floor(lo.x) || hi.x != std::floor(hi.x) || top.y != std::floor(top.y) ||
+        bottom.y != std::floor(bottom.y) || lo.x < 0 || top.y < 0)
+        return false;
+    const int x0 = int(lo.x), x1 = int(hi.x), y0 = int(top.y), y1 = int(bottom.y);
+    if ((lo.u & 15) != 8 || (top.v & 15) != 8 || int(hi.u) - int(lo.u) != (x1 - x0) * 16 ||
+        int(bottom.v) - int(top.v) != (y1 - y0) * 16)
+        return false;
+    const int du = int(lo.u >> 4) - x0, dv = int(top.v >> 4) - y0;
+    // The pixels drawn: the sprite inside the scissor.
+    const int qx0 = std::max(x0, int(Bits(c.scissor, 0, 11))), qx1 = std::min(x1, int(Bits(c.scissor, 16, 11)) + 1);
+    const int qy0 = std::max(y0, int(Bits(c.scissor, 32, 11))), qy1 = std::min(y1, int(Bits(c.scissor, 48, 11)) + 1);
+    if (qx1 <= qx0 || qy1 <= qy0) return true;                                  // nothing drawn
+    const int tw = 1 << std::min(Bits(c.tex0, 26, 4), 10u), th = 1 << std::min(Bits(c.tex0, 30, 4), 10u);
+    if (qx0 + du < 0 || qy0 + dv < 0 || qx1 + du > tw || qy1 + dv > th) return false;
+    const u32 fbp = Bits(c.frame, 0, 9), fbw = std::max(1u, Bits(c.frame, 16, 6));
+    const u32 tbp = Bits(c.tex0, 0, 14), tbw = std::max(1u, Bits(c.tex0, 14, 6));
+    if (tbp % 32) return false;
+    Owned* target = nullptr;
+    if (auto at = s.owned.find(std::make_tuple(fbp, fbw, u32(gs::PSMCT32), false)); at != s.owned.end())
+        target = &at->second;
+    u32 down = 0;
+    if (!target) target = Containing(s, fbp, fbw, gs::PSMCT32, &down);
+    if (!target || !target->width) return false;
+    // The depth buffer the texture starts in: at its ZBP, or whole pages in.
+    Owned* depth = nullptr;
+    for (auto& [k, o] : s.owned)
+        if (o.depth && o.width && o.fbw == tbw && (o.psm == gs::PSMZ24 || o.psm == gs::PSMZ32) && o.fbp <= tbp / 32 &&
+            (tbp / 32 - o.fbp) % tbw == 0 && (tbp / 32 - o.fbp) / tbw * 32 < o.height &&
+            (!depth || o.fbp > depth->fbp))
+            depth = &o;
+    if (!depth) return false;
+    Owned& t = *target;
+    Owned& z = *depth;
+    const u32 zpsm = z.psm;
+    // Each pixel's word in the target's image, each texel's in the depth
+    // buffer's, a Z24 texel's top half never read: once for each place.
+    static std::map<std::tuple<u32, u32, u32, u32, u32, u32, int, int, int, int, int, int, u32, u32>, bool> verdicts;
+    const auto key = std::make_tuple(fbp | t.fbp << 16, fbw, frame_psm, tbp | z.fbp << 16, tbw, tex_psm, qx0, qy0,
+                                     qx1, qy1, du, dv, t.width | t.height << 16, z.width | z.height << 16 | zpsm << 28);
+    auto known = verdicts.find(key);
+    if (known == verdicts.end()) {
+        static WordPixels target_words, depth_words;
+        const std::vector<u32>& tw32 = target_words.For(t.fbp * 32, fbw, gs::PSMCT32, t.width, t.height);
+        const std::vector<u32>& zw32 = depth_words.For(z.fbp * 32, tbw, zpsm, z.width, z.height);
+        bool ok = true;
+        for (int y = qy0; y < qy1 && ok; ++y)
+            for (int x = qx0; x < qx1 && ok; ++x) {
+                u32 nibble = 0;
+                const u32 dst = gs::Memory::Address(fbp * 32, fbw, u32(x), u32(y), frame_psm, &nibble);
+                const u32 src = gs::Memory::Address(tbp, tbw, u32(x + du), u32(y + dv), tex_psm, &nibble);
+                ok = tw32[(dst >> 2) & ((1u << 20) - 1)] && zw32[(src >> 2) & ((1u << 20) - 1)] &&
+                     !(zpsm == gs::PSMZ24 && (src & 2));
+            }
+        if (verdicts.size() > 4096) verdicts.clear();
+        known = verdicts.emplace(key, ok).first;
+    }
+    if (!known->second) return false;
+    const u32 fbmsk = u32(c.frame >> 32);
+    u32 write16 = 0;
+    for (u32 k = 0; k < 5; ++k) {
+        if (!((fbmsk >> (3 + k)) & 1)) write16 |= 1u << k;
+        if (!((fbmsk >> (11 + k)) & 1)) write16 |= 1u << (5 + k);
+        if (!((fbmsk >> (19 + k)) & 1)) write16 |= 1u << (10 + k);
+    }
+    if (!(fbmsk >> 31)) write16 |= 0x8000;
+    if (!write16) return true;
+    Use(s, t.fbp, fbw, gs::PSMCT32, false, t.width, t.height, 1);       // (growing neither)
+    Use(s, z.fbp, tbw, zpsm, true, z.width, z.height, 1);
+    ps2gpu::GsShuffle sh;
+    sh.fbp = t.fbp;
+    sh.fbw = fbw;
+    sh.view_fbp = fbp;
+    sh.view_psm = frame_psm;
+    sh.x0 = qx0;
+    sh.y0 = qy0;
+    sh.x1 = qx1;
+    sh.y1 = qy1;
+    sh.du = du;
+    sh.dv = dv;
+    sh.tbp = tbp;
+    sh.tbw = tbw;
+    sh.tex_psm = tex_psm;
+    sh.zbp = z.fbp;
+    sh.zwidth = z.width;
+    sh.zheight = z.height;
+    sh.write16 = write16;
+    sh.ta0 = Bits(call.texa, 0, 8);
+    sh.ta1 = Bits(call.texa, 32, 8);
+    sh.aem = Bits(call.texa, 15, 1) != 0;
+    sh.fba = Bits(c.fba, 0, 1) != 0;
+    s.renderer->ChannelShuffle(sh);
+    // The 32-bit pages the 16-bit ones are (a page each way: 64 by 64 16-bit
+    // pixels, 64 by 32 32-bit ones).
+    Drew(s, t, u32(qx0) / 64 * 64, (u32(qx1) + 63) / 64 * 64, down + (u32(qy1) + 63) / 64 * 32,
+         down + u32(qy0) / 64 * 32);
+    return true;
+}
+
 void OnDraw(const gs::Gs::DrawCall& call) {
     // Timed only past the fast path below: two clock reads a primitive were
     // a twentieth of the GS thread.
@@ -1242,6 +1395,8 @@ void OnDraw(const gs::Gs::DrawCall& call) {
             return;
         if (Bits(c.test, 16, 1) && Bits(c.test, 17, 2) == 0) return;    // ZTST NEVER: every pixel fails
     }
+    if (s.primary && type == 6 && Is16(frame_psm) && ((call.prim >> 4) & 1) && Shuffle(s, call, c, frame_psm))
+        return;
     const u32 rows = std::max(1u, y1);
     // The registers of the primitive before, and nothing changed since: its
     // state, target and depth buffer again (most of a frame's tens of

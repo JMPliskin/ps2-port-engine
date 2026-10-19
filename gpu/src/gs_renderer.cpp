@@ -45,6 +45,7 @@
 #include "decode_comp.h"
 #include "decode_image_comp.h"
 #include "patch_comp.h"
+#include "shuffle_comp.h"
 
 namespace ps2gpu {
 
@@ -212,6 +213,21 @@ struct SwizzleParams {
     std::uint32_t bp, bw, psm, cols, rows, stride, to_memory, depth, row0;
     std::uint32_t scale = 1;    // the image's pixels to a GS pixel: one taken to memory, a square filled from it
     std::uint32_t keep_colour = 0;  // from memory: the square's colour kept where memory differs in alpha alone
+};
+
+/* shuffle.comp's push constants (ChannelShuffle). */
+struct ShuffleParams {
+    std::uint32_t dst_bp, dst_bw, dst_view;
+    std::uint32_t view_bp;
+    std::uint32_t rx0, ry0, cols, rows;
+    std::int32_t qx0, qy0, qx1, qy1;
+    std::int32_t period, run;
+    std::int32_t du, dv;
+    std::uint32_t src_bp, src_bw, src_view;
+    std::uint32_t img_bp, img_w, img_h;
+    std::uint32_t write16;
+    std::uint32_t ta0, ta1, flags;
+    std::uint32_t scale;
 };
 
 constexpr std::uint32_t kDepthRows = 512;   // a depth buffer's rows (DrawTriangles; the bridge's)
@@ -419,6 +435,8 @@ public:
     void TextureFromMemory(std::uint64_t key, const GsTextureDecode& decode) override;
     void ClutFromMemory(const GsClutLoad& load) override;
     void ClutRows(const std::uint32_t* clut, std::uint32_t rows) override;
+    bool CanShuffle() const override { return shuffle_pipeline_ != VK_NULL_HANDLE; }
+    void ChannelShuffle(const GsShuffle& shuffle) override;
     bool ReadTarget(std::uint32_t fbp, std::uint32_t fbw, std::uint32_t psm, std::vector<std::uint32_t>* pixels,
                     std::uint32_t* width, std::uint32_t* height) override;
     bool ReadTargetFull(std::uint32_t fbp, std::uint32_t fbw, std::uint32_t psm, std::vector<std::uint32_t>* pixels,
@@ -715,6 +733,21 @@ private:
     void DepthOut(VkCommandBuffer cmd, const SwizzleParams& params, Image& depth);
     void DepthIn(VkCommandBuffer cmd, const SwizzleParams& params, Image& depth);
     bool MakeDepthPipelines();
+    /* The channel shuffle (shuffle.comp): the target as storage (set 0), the
+       depth buffer sampled (set 1). None if it did not build: shuffles are
+       then drawn as they are. */
+    VkShaderModule shuffle_ = VK_NULL_HANDLE;
+    VkPipelineLayout shuffle_layout_ = VK_NULL_HANDLE;
+    VkPipeline shuffle_pipeline_ = VK_NULL_HANDLE;
+    void MakeShufflePipeline();
+    /* Shuffles one after another, alike but for their columns - a comb of
+       sprites, `run` wide every `period` (Burnout 3's fog: 40, 8 wide every
+       16) - wait to be one dispatch: recorded by the next anything else
+       (Flush, DrawTriangles). */
+    bool shuffle_pending_ = false;
+    GsShuffle shuffle_wait_;
+    std::int32_t shuffle_period_ = 0, shuffle_count_ = 0;
+    void RecordShuffle();
 };
 
 void* VulkanGsRenderer::Vertices(VkDeviceSize bytes, VkBuffer* buffer, VkDeviceSize* offset) {
@@ -1165,6 +1198,7 @@ bool VulkanGsRenderer::InitMemory(std::string* error) {
         if (error) *error = "the depth buffer shaders did not load";
         return false;
     }
+    MakeShufflePipeline();
     {
         VkShaderModuleCreateInfo pi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
         pi.codeSize = sizeof spirv_patch_comp;
@@ -1229,6 +1263,29 @@ bool VulkanGsRenderer::InitMemory(std::string* error) {
         MemoryBarrier(cmd);
     });
     return true;
+}
+
+void VulkanGsRenderer::MakeShufflePipeline() {
+    VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+    ci.codeSize = sizeof spirv_shuffle_comp;
+    ci.pCode = spirv_shuffle_comp;
+    if (vkCreateShaderModule(g_.device, &ci, nullptr, &shuffle_) != VK_SUCCESS) return;
+    const VkDescriptorSetLayout layouts[2] = {image_set_layout_, depth_set_layout_};
+    const VkPushConstantRange push{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ShuffleParams)};
+    VkPipelineLayoutCreateInfo lci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    lci.setLayoutCount = 2;
+    lci.pSetLayouts = layouts;
+    lci.pushConstantRangeCount = 1;
+    lci.pPushConstantRanges = &push;
+    if (vkCreatePipelineLayout(g_.device, &lci, nullptr, &shuffle_layout_) != VK_SUCCESS) return;
+    VkComputePipelineCreateInfo cpi{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    cpi.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    cpi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    cpi.stage.module = shuffle_;
+    cpi.stage.pName = "main";
+    cpi.layout = shuffle_layout_;
+    if (vkCreateComputePipelines(g_.device, cache_, 1, &cpi, nullptr, &shuffle_pipeline_) != VK_SUCCESS)
+        shuffle_pipeline_ = VK_NULL_HANDLE;
 }
 
 bool VulkanGsRenderer::MakeDepthPipelines() {
@@ -1564,6 +1621,81 @@ bool VulkanGsRenderer::DepthToMemory(std::uint32_t zbp, std::uint32_t width, std
         MemoryBarrier(cmd);
     });
     return true;
+}
+
+void VulkanGsRenderer::ChannelShuffle(const GsShuffle& s) {
+    if (shuffle_pending_) {
+        const GsShuffle& p = shuffle_wait_;
+        const bool alike = s.fbp == p.fbp && s.fbw == p.fbw && s.view_fbp == p.view_fbp &&
+                           s.view_psm == p.view_psm && s.y0 == p.y0 &&
+                           s.y1 == p.y1 && s.du == p.du && s.dv == p.dv && s.tbp == p.tbp && s.tbw == p.tbw &&
+                           s.tex_psm == p.tex_psm && s.zbp == p.zbp && s.zwidth == p.zwidth &&
+                           s.zheight == p.zheight && s.write16 == p.write16 && s.ta0 == p.ta0 && s.ta1 == p.ta1 &&
+                           s.aem == p.aem && s.fba == p.fba;
+        const std::int32_t run = shuffle_wait_.x1 - shuffle_wait_.x0;
+        const std::int32_t at = shuffle_wait_.x0 + shuffle_count_ * shuffle_period_;
+        if (alike && s.x1 - s.x0 == run &&
+            (shuffle_count_ == 1 ? s.x0 >= shuffle_wait_.x0 + run : s.x0 == at)) {
+            if (shuffle_count_ == 1) shuffle_period_ = s.x0 - shuffle_wait_.x0;
+            ++shuffle_count_;
+            return;
+        }
+    }
+    Flush();                        // (the one pending first)
+    shuffle_wait_ = s;
+    shuffle_period_ = s.x1 - s.x0;
+    shuffle_count_ = 1;
+    shuffle_pending_ = true;
+}
+
+void VulkanGsRenderer::RecordShuffle() {
+    if (!shuffle_pending_) return;
+    shuffle_pending_ = false;
+    GsShuffle s = shuffle_wait_;
+    const std::int32_t run = s.x1 - s.x0, period = shuffle_period_;
+    s.x1 = s.x0 + (shuffle_count_ - 1) * period + run;
+    auto target = targets_.find(Key{s.fbp, s.fbw, 0x00});
+    auto depth = depths_.find(Key{s.zbp, s.zwidth, s.zheight});
+    if (!shuffle_pipeline_ || target == targets_.end() || depth == depths_.end()) return;
+    Image& t = target->second;
+    Image& d = depth->second;
+    // The pixels to visit: the 32-bit pages the sprite's 16-bit pages are
+    // (a page is 64 by 64 16-bit pixels, 64 by 32 32-bit ones, the same
+    // memory) - its pixels lie among them; the view's rows into the target.
+    const std::uint32_t down = s.view_fbp > s.fbp ? (s.view_fbp - s.fbp) / std::max(1u, s.fbw) * 32 : 0;
+    const std::uint32_t px0 = std::uint32_t(std::max(s.x0, 0)) / 64, px1 = (std::uint32_t(std::max(s.x1, 0)) + 63) / 64;
+    const std::uint32_t py0 = std::uint32_t(std::max(s.y0, 0)) / 64, py1 = (std::uint32_t(std::max(s.y1, 0)) + 63) / 64;
+    const std::uint32_t rx0 = std::min(px0 * 64, t.width), rx1 = std::min(px1 * 64, t.width);
+    const std::uint32_t ry0 = std::min(down + py0 * 32, t.height), ry1 = std::min(down + py1 * 32, t.height);
+    if (rx1 <= rx0 || ry1 <= ry0) return;
+    const ShuffleParams params{s.fbp * 32, s.fbw, s.view_psm, s.view_fbp * 32, rx0, ry0, rx1 - rx0, ry1 - ry0,
+                               s.x0, s.y0, s.x1, s.y1, std::max(period, 1), run, s.du, s.dv, s.tbp, s.tbw, s.tex_psm,
+                               s.zbp * 32, d.width, d.height, s.write16, s.ta0, s.ta1,
+                               (s.aem ? 1u : 0u) | (s.fba ? 2u : 0u), t.scale};
+    g_.Record([&](VkCommandBuffer cmd) {
+        drawn_ = DrawState{};
+        // One after another on the same image (two sprites can write the two
+        // halves of a pixel): what the one before wrote, first.
+        if (t.layout == VK_IMAGE_LAYOUT_GENERAL) {
+            ++g_barriers;
+            VkMemoryBarrier b{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+            b.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+                                 1, &b, 0, nullptr, 0, nullptr);
+        }
+        Transition(cmd, d, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL, VK_ACCESS_SHADER_READ_BIT,
+                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+        Transition(cmd, t, VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+        const VkDescriptorSet sets[2] = {StorageSet(t), DepthSampledSet(d)};
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, shuffle_pipeline_);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, shuffle_layout_, 0, 2, sets, 0, nullptr);
+        vkCmdPushConstants(cmd, shuffle_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof params, &params);
+        ++g_dispatches;
+        vkCmdDispatch(cmd, (params.cols * t.scale + 7) / 8, (params.rows * t.scale + 7) / 8, 1);
+        g_.Mark(cmd, kProfSwizzle);
+    });
 }
 
 void VulkanGsRenderer::TargetRowsFromMemory(std::uint32_t fbp, std::uint32_t fbw, std::uint32_t psm,
@@ -2450,6 +2582,7 @@ void VulkanGsRenderer::UploadDepth(std::uint32_t zbp, std::uint32_t width, std::
 }
 
 void VulkanGsRenderer::DrawTriangles(const GsDrawState& state, const GsVertex* v, std::size_t count) {
+    RecordShuffle();
     if (!SameBatch(state, state_)) Flush();
     // A primitive sampling the target it draws into, where the batch has
     // drawn already: the batch so far first (the next takes a new copy).
@@ -2718,6 +2851,7 @@ void VulkanGsRenderer::FlatQuadRange(FlatQuad& q, const GsDrawState& state) {
 }
 
 void VulkanGsRenderer::Flush() {
+    RecordShuffle();
     drawn_any_ = false;
     sprites_.clear();
     quads_.clear();
@@ -3207,6 +3341,9 @@ VulkanGsRenderer::~VulkanGsRenderer() {
     if (frag_) vkDestroyShaderModule(g_.device, frag_, nullptr);
     if (frag_blend_) vkDestroyShaderModule(g_.device, frag_blend_, nullptr);
     if (swizzle_pipeline_) vkDestroyPipeline(g_.device, swizzle_pipeline_, nullptr);
+    if (shuffle_pipeline_) vkDestroyPipeline(g_.device, shuffle_pipeline_, nullptr);
+    if (shuffle_layout_) vkDestroyPipelineLayout(g_.device, shuffle_layout_, nullptr);
+    if (shuffle_) vkDestroyShaderModule(g_.device, shuffle_, nullptr);
     for (auto& format : swizzle_image_specialised_)
         for (auto& direction : format)
             for (VkPipeline pipeline : direction)

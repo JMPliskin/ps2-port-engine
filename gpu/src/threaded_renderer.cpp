@@ -191,6 +191,12 @@ public:
         Put(&load, sizeof load);
         End();
     }
+    bool CanShuffle() const override { return inner_->CanShuffle(); }
+    void ChannelShuffle(const GsShuffle& shuffle) override {
+        Op(kChannelShuffle, sizeof shuffle);
+        Put(&shuffle, sizeof shuffle);
+        End();
+    }
     void ClutRows(const std::uint32_t* clut, std::uint32_t rows) override {
         Op(kClutRows, 4 + 1024);
         Put(&rows, 4);
@@ -284,7 +290,7 @@ private:
         kDraw, kDrawSame, kFlush, kKick, kUploadTexture, kUseReplacement, kUploadDepth, kUploadTarget,
         kReleaseTexture, kMemoryWrite, kMemoryPatch, kTargetFromMemory, kDepthFromMemory, kTextureFromMemory,
         kClutFromMemory, kClutRows, kReloadKeepsColour, kTargetRowsFromMemory, kDepthRowsFromMemory,
-        kTargetToMemory, kDepthToMemory,
+        kTargetToMemory, kDepthToMemory, kChannelShuffle,
     };
     // The images the queue has made by its end, as VulkanGsRenderer makes
     // them: a target by (FBP, FBW, PSM) at the size first asked for, a depth
@@ -462,6 +468,7 @@ private:
                     break;
                 }
                 case kClutFromMemory: r.ClutFromMemory(Take<GsClutLoad>(at)); break;
+                case kChannelShuffle: r.ChannelShuffle(Take<GsShuffle>(at)); break;
                 case kClutRows: {
                     const auto rows = Take<std::uint32_t>(at);
                     std::memcpy(clut_, at, sizeof clut_);

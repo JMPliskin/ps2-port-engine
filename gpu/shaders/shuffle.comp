@@ -1,0 +1,125 @@
+#version 450
+// A channel shuffle (GsRenderer::ChannelShuffle): sprites drawn into a
+// 16-bit view of a 32-bit target, its texels a 16-bit view of a depth
+// buffer - each 16-bit pixel a half of a 32-bit word. Burnout 3's fog puts
+// the depth's bits 8-15 into the picture's alpha so. Drawn as the GS would,
+// it is a separate 16-bit image, written back to memory and reloaded into
+// the picture; here it is done on the 32-bit image itself: each pixel's two
+// halves found in the 16-bit view (the layouts' bit permutations inverted),
+// those the sprite covers given their texel's bits - the texel's half found
+// in the depth buffer the same way - through FRAME's mask.
+//
+// At an internal resolution each image pixel takes its own sub-pixel of the
+// depth buffer, so the result is as fine as the picture.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0, rgba8) uniform image2D target;
+layout(set = 1, binding = 0) uniform sampler2D depth;
+
+layout(push_constant) uniform Params {
+    uint dst_bp, dst_bw, dst_view;      // the target: base (blocks), FBW, the 16-bit view's PSM
+    uint view_bp;                       // the 16-bit view's base (blocks): the target's, or further in
+    uint rx0, ry0, cols, rows;          // the pixels to visit, in the target's GS pixels
+    int qx0, qy0, qx1, qy1;             // the sprites in the 16-bit view (ends exclusive), scissored:
+    int period, run;                    // columns qx0 + k * period, run of them each
+    int du, dv;                         // its texel: the pixel plus (du, dv)
+    uint src_bp, src_bw, src_view;      // the texture: TBP (blocks), TBW, its 16-bit PSM
+    uint img_bp, img_w, img_h;          // the depth buffer: base (blocks), its size in GS pixels
+    uint write16;                       // the 16-bit pixel's bits written (FRAME's mask, as the GS applies it)
+    uint ta0, ta1, flags;               // TEXA; flags: 1 AEM, 2 FBA
+    uint scale;
+} p;
+
+const uint PSMCT16S = 0x0Au, PSMZ16 = 0x32u, PSMZ16S = 0x3Au;
+
+uint Bit(uint v, uint i) { return (v >> i) & 1u; }
+
+// A 32-bit (colour) pixel's word, as gs_address.glsl's Address / 4.
+uint Word32(uint bp, uint bw, uvec2 q) {
+    const uint bx = (q.x >> 3u) & 7u, by = (q.y >> 3u) & 3u;
+    const uint b = (bx & 1u) | ((bx & 2u) << 1u) | ((bx & 4u) << 2u) | ((by & 1u) << 1u) | ((by & 2u) << 2u);
+    const uint block = bp + 32u * ((q.y / 32u) * max(bw, 1u) + q.x / 64u) + b;
+    const uint column = (q.x & 1u) | ((q.x & 6u) << 1u) | ((q.y & 1u) << 1u) | ((q.y & 6u) << 3u);
+    return (block * 64u + column) & ((1u << 20u) - 1u);
+}
+
+// A 16-bit pixel's half-word, as gs_address.glsl's Address / 2.
+uint Half16(uint bp, uint bw, uint psm, uvec2 q) {
+    const uint bx = (q.x >> 4u) & 3u, by = (q.y >> 3u) & 7u;
+    const bool s = psm == PSMCT16S || psm == PSMZ16S;
+    uint b = ((bx & 1u) << 1u) | (by & 1u);
+    b |= s ? ((bx & 2u) << 3u) | ((by & 2u) << 2u) | (by & 4u) : ((bx & 2u) << 2u) | ((by & 2u) << 1u) | ((by & 4u) << 2u);
+    if (psm == PSMZ16 || psm == PSMZ16S) b ^= 24u;
+    const uint block = bp + 32u * ((q.y / 64u) * max(bw, 1u) + q.x / 64u) + b;
+    const uint column = ((q.x & 1u) << 1u) | ((q.x & 6u) << 2u) | ((q.x & 8u) >> 3u) | ((q.y & 1u) << 2u) | ((q.y & 6u) << 4u);
+    return (block * 128u + column) & ((1u << 21u) - 1u);
+}
+
+// The 16-bit pixel at a half-word (Half16 inverted).
+uvec2 Pixel16(uint half_word, uint bp, uint bw, uint psm) {
+    const uint rel = (half_word - bp * 128u) & ((1u << 21u) - 1u);
+    const uint page = rel / 4096u, inside = rel % 4096u;
+    uint b = inside / 128u;
+    const uint c = inside % 128u;
+    if (psm == PSMZ16 || psm == PSMZ16S) b ^= 24u;
+    uint bx, by;
+    if (psm == PSMCT16S || psm == PSMZ16S) {
+        by = Bit(b, 0u) | (Bit(b, 3u) << 1u) | (Bit(b, 2u) << 2u);
+        bx = Bit(b, 1u) | (Bit(b, 4u) << 1u);
+    } else {
+        by = Bit(b, 0u) | (Bit(b, 2u) << 1u) | (Bit(b, 4u) << 2u);
+        bx = Bit(b, 1u) | (Bit(b, 3u) << 1u);
+    }
+    const uint x = Bit(c, 1u) | (Bit(c, 3u) << 1u) | (Bit(c, 4u) << 2u) | (Bit(c, 0u) << 3u);
+    const uint y = Bit(c, 2u) | (Bit(c, 5u) << 1u) | (Bit(c, 6u) << 2u);
+    const uint w = max(bw, 1u);
+    return uvec2((page % w) * 64u + bx * 16u + x, (page / w) * 64u + by * 8u + y);
+}
+
+// The depth buffer's pixel at a word (a Z format's layout, inverted).
+uvec2 PixelZ32(uint word, uint bp, uint bw) {
+    const uint rel = (word - bp * 64u) & ((1u << 20u) - 1u);
+    const uint page = rel / 2048u, inside = rel % 2048u;
+    const uint b = (inside / 64u) ^ 24u, c = inside % 64u;
+    const uint bx = Bit(b, 0u) | (Bit(b, 2u) << 1u) | (Bit(b, 4u) << 2u);
+    const uint by = Bit(b, 1u) | (Bit(b, 3u) << 1u);
+    const uint x = Bit(c, 0u) | (Bit(c, 2u) << 1u) | (Bit(c, 3u) << 2u);
+    const uint y = Bit(c, 1u) | (Bit(c, 4u) << 1u) | (Bit(c, 5u) << 2u);
+    const uint w = max(bw, 1u);
+    return uvec2((page % w) * 64u + bx * 8u + x, (page / w) * 32u + by * 8u + y);
+}
+
+void main() {
+    const uvec2 g = gl_GlobalInvocationID.xy;
+    if (g.x >= p.cols * p.scale || g.y >= p.rows * p.scale) return;
+    const ivec2 at = ivec2(p.rx0 * p.scale + g.x, p.ry0 * p.scale + g.y);
+    if (any(greaterThanEqual(at, imageSize(target)))) return;
+    const uvec2 pixel = uvec2(at) / p.scale, sub = uvec2(at) % p.scale;
+    const uint word = Word32(p.dst_bp, p.dst_bw, pixel);
+    uint value = packUnorm4x8(imageLoad(target, at));
+    bool changed = false;
+    for (uint h = 0u; h < 2u; ++h) {
+        const ivec2 q = ivec2(Pixel16(word * 2u + h, p.view_bp, p.dst_bw, p.dst_view));
+        if (q.x < p.qx0 || q.x >= p.qx1 || q.y < p.qy0 || q.y >= p.qy1 || (q.x - p.qx0) % p.period >= p.run)
+            continue;
+        const ivec2 t = q + ivec2(p.du, p.dv);
+        if (t.x < 0 || t.y < 0) continue;
+        const uint texel_half = Half16(p.src_bp, p.src_bw, p.src_view, uvec2(t));
+        const uvec2 z_pixel = PixelZ32(texel_half >> 1u, p.img_bp, p.src_bw);
+        if (z_pixel.x >= p.img_w || z_pixel.y >= p.img_h) continue;
+        const ivec2 z_at = min(ivec2(z_pixel * p.scale + sub), textureSize(depth, 0) - 1);
+        const float d = texelFetch(depth, z_at, 0).r;          // Z / 2^32
+        const uint z = d >= 1.0 ? 0xFFFFFFFFu : uint(d * 4294967296.0);
+        const uint v16 = (z >> (16u * (texel_half & 1u))) & 0xFFFFu;
+        // The texel as the GS expands it (TEXA), written back as 16-bit colour.
+        const uint alpha = (v16 & 0x8000u) != 0u ? p.ta1
+                         : ((p.flags & 1u) != 0u && (v16 & 0x7FFFu) == 0u) ? 0u : p.ta0;
+        const uint out16 = (v16 & 0x7FFFu) | ((alpha >= 0x80u || (p.flags & 2u) != 0u) ? 0x8000u : 0u);
+        const uint old16 = (value >> (16u * h)) & 0xFFFFu;
+        const uint new16 = (old16 & ~p.write16) | (out16 & p.write16);
+        value = (value & ~(0xFFFFu << (16u * h))) | (new16 << (16u * h));
+        changed = true;
+    }
+    if (changed) imageStore(target, at, unpackUnorm4x8(value));
+}

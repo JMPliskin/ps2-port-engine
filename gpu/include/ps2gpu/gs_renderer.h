@@ -160,6 +160,28 @@ struct GsClutLoad {
     std::uint32_t texa_lo = 0, ta1 = 0;
 };
 
+/* A channel shuffle: a sprite drawn into a 16-bit view (VIEW_PSM) of a
+   32-bit colour target, its texels a 16-bit view (TEX_PSM, Z16 or Z16S) of a
+   depth buffer, copied 1:1 (the texel the pixel plus (du, dv)) - each 16-bit
+   pixel a half of a 32-bit word (Burnout 3's fog: the depth's bits 8-15 into
+   the picture's alpha). ChannelShuffle does it on the 32-bit target itself,
+   as the GS would through memory: the bits WRITE16 of each 16-bit pixel the
+   sprite covers (FRAME's mask), from its texel as the GS expands it (TEXA,
+   AEM; FBA sets the alpha bit). The target and the depth buffer are named as
+   they were made (FBP, FBW, CT32; ZBP and the size it was made at); the view
+   can start further into the target (VIEW_FBP: Burnout 3's player 2, 224
+   rows down), the texture further into the depth buffer (TBP). */
+struct GsShuffle {
+    std::uint32_t fbp = 0, fbw = 1, view_fbp = 0, view_psm = 0;
+    std::int32_t x0 = 0, y0 = 0, x1 = 0, y1 = 0;        /* the sprite in the view, ends exclusive */
+    std::int32_t du = 0, dv = 0;
+    std::uint32_t tbp = 0, tbw = 1, tex_psm = 0;        /* TEX0: TBP in blocks */
+    std::uint32_t zbp = 0, zwidth = 0, zheight = 0;
+    std::uint32_t write16 = 0;
+    std::uint32_t ta0 = 0, ta1 = 0x80;
+    bool aem = false, fba = false;
+};
+
 class GsRenderer {
 public:
     virtual ~GsRenderer() = default;
@@ -250,6 +272,10 @@ public:
     /* Rows of the GPU's CLUT (16 entries each; bit r of `rows` for row r)
        from the host's copy, `clut` being all 256 entries. */
     virtual void ClutRows(const std::uint32_t* clut, std::uint32_t rows) = 0;
+    /* GsShuffle, on the target's image (and nothing in memory): false when
+       this renderer cannot, the draw then made as it is. */
+    virtual bool CanShuffle() const { return false; }
+    virtual void ChannelShuffle(const GsShuffle& shuffle) { (void)shuffle; }
     /* A depth buffer's Z (the GS's, unsigned), rows top-down; false if there
        is none of that size. */
     virtual bool ReadDepth(std::uint32_t zbp, std::uint32_t width, std::uint32_t height,
