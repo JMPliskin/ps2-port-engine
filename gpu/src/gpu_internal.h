@@ -9,6 +9,7 @@
 #include <chrono>
 #include <functional>
 #include <mutex>
+#include <unordered_map>
 #include <string>
 #include <utility>
 #include <vector>
@@ -33,6 +34,11 @@ inline std::atomic<std::uint64_t> g_gpu_ns{0};
 enum ProfileKind { kProfOther, kProfDraw, kProfSwizzle, kProfLinear, kProfMemory, kProfFeedback, kProfDecode,
                    kProfUpload, kProfClear, kProfDate, kProfReadback, kProfKinds };
 inline std::atomic<std::uint64_t> g_profile_ns[kProfKinds] = {};
+/* PS2HOST_GPU_PROFILE: the draws' time by their tag too (MarkDraw: the
+   renderer's - its target and what kind of draw), for the report's list of
+   the dearest. Only where the slots are retired, under the lock. */
+inline std::mutex g_draw_ns_lock;
+inline std::unordered_map<std::uint32_t, std::uint64_t> g_draw_ns;
 struct WaitReason { const char* why; std::uint64_t count; double seconds; };
 inline WaitReason g_waits[16] = {};
 inline void CountWait(const char* why, double seconds) {
@@ -86,6 +92,13 @@ public:
         vkCmdWriteTimestamp(c, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, profile_,
                             std::uint32_t(current_) * kMarks + std::uint32_t(marks_[current_].size()));
         marks_[current_].push_back(kind);
+        tags_[current_].push_back(0);
+    }
+    /* A draw's mark with its tag. */
+    void MarkDraw(VkCommandBuffer c, std::uint32_t tag) {
+        if (!profile_ || marks_[current_].size() >= kMarks) return;
+        Mark(c, kProfDraw);
+        tags_[current_].back() = tag;
     }
     /* Counts command buffers begun: what was set in one is not in the next. */
     std::uint64_t recording_id() const { return recordings_; }
@@ -125,6 +138,7 @@ private:
     static constexpr std::uint32_t kMarks = 8192;
     VkQueryPool profile_ = VK_NULL_HANDLE;
     std::vector<int> marks_[kSlots];
+    std::vector<std::uint32_t> tags_[kSlots];
     std::vector<std::function<void()>> after_submit_;
     int current_ = 0;
     bool in_flight_[kSlots] = {};
@@ -150,6 +164,7 @@ void VulkanGpu::RecordInPass(F&& record) {
         if (profile_) {
             vkCmdResetQueryPool(cmd, profile_, std::uint32_t(current_) * kMarks, kMarks);
             marks_[current_].clear();
+            tags_[current_].clear();
             Mark(cmd, kProfOther);
         }
     }
@@ -189,9 +204,16 @@ inline bool VulkanGpu::Retire(int slot, const char* why) {
                                   ticks.size() * sizeof ticks[0], ticks.data(), sizeof ticks[0],
                                   VK_QUERY_RESULT_64_BIT) == VK_SUCCESS)
             for (std::size_t i = 1; i < ticks.size(); ++i)
-                if (ticks[i] > ticks[i - 1])
-                    g_profile_ns[marks_[slot][i]] += std::uint64_t(double(ticks[i] - ticks[i - 1]) * timestamp_ns_);
+                if (ticks[i] > ticks[i - 1]) {
+                    const std::uint64_t ns = std::uint64_t(double(ticks[i] - ticks[i - 1]) * timestamp_ns_);
+                    g_profile_ns[marks_[slot][i]] += ns;
+                    if (marks_[slot][i] == kProfDraw) {
+                        std::lock_guard<std::mutex> hold(g_draw_ns_lock);
+                        g_draw_ns[tags_[slot][i]] += ns;
+                    }
+                }
         marks_[slot].clear();
+        tags_[slot].clear();
     }
     std::vector<std::function<void()>> done;
     done.swap(slot_done_[slot]);

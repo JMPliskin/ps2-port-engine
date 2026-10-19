@@ -2935,6 +2935,11 @@ void VulkanGsRenderer::Flush() {
         }
         destination_set = SampledSet(*feedback_);
     }
+    // The profile's tag (MarkDraw): the target, and its texture's kind -
+    // none, a target (its FBP), memory - with the shader's own blending.
+    const std::uint32_t tag = (state_.fbp & 0x1FFu) << 20 | (state_.psm & 0x3Fu) << 14 |
+                              (shader_blend ? 1u << 13 : 0u) |
+                              (!state_.textured ? 0u : state_.texture_target ? (1u << 12) | (state_.tex_fbp & 0x1FFu) : 0x800u);
     FragmentParams params{};
     params.textured = state_.textured && (texture != &blank_ || source);
     params.tfx = std::uint32_t(state_.tfx);
@@ -3157,7 +3162,7 @@ void VulkanGsRenderer::Flush() {
                                            sizeof params, &params);
                         ++g_draws;
                         vkCmdDraw(cmd, count, 1, first, 0);
-                        g_.Mark(cmd, kProfDraw);
+                        g_.MarkDraw(cmd, tag);
                     }
                 }
             }
@@ -3387,6 +3392,28 @@ std::string GpuProfileReport() {
         if (!ns[i]) continue;
         char text[64];
         std::snprintf(text, sizeof text, " %s %.1f%%", kNames[i], 100.0 * double(ns[i]) / double(total));
+        out += text;
+    }
+    // The dearest kinds of draw: target (FBP, PSM), texture (none, a target
+    // by its FBP, memory), the shader's blending.
+    std::vector<std::pair<std::uint64_t, std::uint32_t>> draws;
+    {
+        std::lock_guard<std::mutex> hold(g_draw_ns_lock);
+        for (const auto& [tag, t] : g_draw_ns) draws.emplace_back(t, tag);
+        g_draw_ns.clear();
+    }
+    std::sort(draws.rbegin(), draws.rend());
+    for (std::size_t i = 0; i < draws.size() && i < 12; ++i) {
+        const std::uint32_t tag = draws[i].second;
+        const std::uint32_t texture = tag & 0x1FFFu;
+        char what[48];
+        if (!texture) std::snprintf(what, sizeof what, "untextured");
+        else if (texture & (1u << 12)) std::snprintf(what, sizeof what, "from target %X", unsigned(texture & 0x1FFu));
+        else std::snprintf(what, sizeof what, "textured");
+        char text[128];
+        std::snprintf(text, sizeof text, "\n[gpu]     draws into %X/%02X, %s%s: %.1f%%", unsigned(tag >> 20),
+                      unsigned((tag >> 14) & 0x3Fu), what, (tag >> 13) & 1u ? ", shader blend" : "",
+                      100.0 * double(draws[i].first) / double(total));
         out += text;
     }
     return out;
