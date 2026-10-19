@@ -13,61 +13,92 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <deque>
+#include <memory>
 #include <vector>
 
 namespace ps2host {
 
 class Path3Queue {
 public:
-    void Push(std::uint32_t word) { held_.push_back(word); }
-    void Push(const std::uint32_t* words, std::size_t count) { held_.insert(held_.end(), words, words + count); }
-    bool empty() const { return size() == 0; }
-    std::size_t size() const { return held_.size() - head_; }
+    void Push(std::uint32_t word) {
+        if (spans_.empty() || !spans_.back().own || spans_.back().own->size() != spans_.back().offset + spans_.back().count) {
+            Span s;
+            s.own = std::make_shared<std::vector<std::uint32_t>>();
+            spans_.push_back(std::move(s));
+        }
+        Span& last = spans_.back();
+        last.own->push_back(word);
+        ++last.count;
+        size_ += 1;
+    }
+    /* Copied: the words may change once this returns. */
+    void Push(const std::uint32_t* words, std::size_t count) {
+        if (!count) return;
+        Span s;
+        s.own = std::make_shared<std::vector<std::uint32_t>>(words, words + count);
+        s.count = count;
+        spans_.push_back(std::move(s));
+        size_ += count;
+    }
+    /* Not copied: the words stay as they are while `owner` lives (VIF1's
+       worker's copy of a transfer, devices.cpp - Burnout 3 holds a
+       picture's textures here, 160,000 words, a copy each was most of what
+       PATH3 cost the worker). */
+    void Push(const std::uint32_t* words, std::size_t count, std::shared_ptr<const void> owner) {
+        if (!count) return;
+        Span s;
+        s.data = words;
+        s.count = count;
+        s.owner = std::move(owner);
+        spans_.push_back(std::move(s));
+        size_ += count;
+    }
+    bool empty() const { return size_ == 0; }
+    std::size_t size() const { return size_; }
 
-    /* Hands words to `sink` (one run: words, count), up to the end of the
-       first packet with EOP set (or all of them). */
+    /* Hands words to `sink` (runs: words, count - a packet may be split
+       between them), up to the end of the first packet with EOP set (or all
+       of them). */
     template <typename Sink>
     void ReleaseBlock(bool all, Sink&& sink) {
-        const std::uint32_t* words = held_.data() + head_;
-        const std::size_t held = size();
-        std::size_t end = held;
+        std::size_t end = size_;
         if (!all) {
+            // The tags, read where they are: a quadword's four words may lie
+            // in two spans.
             std::size_t at = 0;
-            while (at + 4 <= held) {
-                const std::uint64_t low = std::uint64_t(words[at]) | std::uint64_t(words[at + 1]) << 32;
+            Cursor cursor{spans_};
+            while (at + 4 <= size_) {
+                const std::uint64_t low = std::uint64_t(cursor.At(at)) | std::uint64_t(cursor.At(at + 1)) << 32;
                 const std::uint64_t nloop = low & 0x7FFF, eop = (low >> 15) & 1;
                 const std::uint64_t flg = (low >> 58) & 3, nreg = (low >> 60) ? (low >> 60) : 16;
                 const std::uint64_t qwords = flg == 0 ? nloop * nreg : flg == 1 ? (nloop * nreg + 1) / 2 : nloop;
                 at += 4 + std::size_t(qwords) * 4;
                 if (eop) break;
             }
-            end = std::min(at, held);
+            end = std::min(at, size_);
         }
-        // Taken off before the sink runs: what it does may hold more. Into a
-        // buffer kept for it, and what is left moved down only once a good
-        // deal has gone (Burnout 3 holds a picture's textures here, 160,000
-        // words, and lets them go a group at a time).
-        // (A release within a release - the sink letting more go - takes a
-        // buffer of its own: the outer one's sink is still reading going_.)
-        std::vector<std::uint32_t> nested;
-        std::vector<std::uint32_t>& buffer = releasing_ ? nested : going_;
-        buffer.assign(words, words + end);
-        head_ += end;
-        if (head_ == held_.size()) {
-            held_.clear();
-            head_ = 0;
-        } else if (head_ > held_.size() / 2 && head_ >= 65536) {
-            held_.erase(held_.begin(), held_.begin() + std::ptrdiff_t(head_));
-            head_ = 0;
+        // Taken off before the sink runs: what it does may hold more (the
+        // spans keep their words alive, wherever they are).
+        std::vector<Span> going;
+        std::size_t left = end;
+        while (left) {
+            Span& first = spans_.front();
+            if (first.count <= left) {
+                left -= first.count;
+                going.push_back(std::move(first));
+                spans_.pop_front();
+            } else {
+                Span part = first;
+                part.count = left;
+                going.push_back(std::move(part));
+                first.offset += left;
+                first.count -= left;
+                left = 0;
+            }
         }
-        if (buffer.empty()) return;
-        if (&buffer == &nested) {
-            sink(nested.data(), nested.size());
-            return;
-        }
-        releasing_ = true;
-        struct Done { bool& flag; ~Done() { flag = false; } } done{releasing_};
-        sink(going_.data(), going_.size());
+        size_ -= end;
+        for (const Span& s : going) sink(s.Words(), s.count);
     }
 
     /* The same, a word at a time. */
@@ -79,10 +110,27 @@ public:
     }
 
 private:
-    std::vector<std::uint32_t> held_;
-    std::size_t head_ = 0;                  // words before it have gone
-    std::vector<std::uint32_t> going_;      // what ReleaseBlock hands on
-    bool releasing_ = false;
+    /* Words held: borrowed (data, kept by owner) or the queue's own. */
+    struct Span {
+        const std::uint32_t* data = nullptr;
+        std::shared_ptr<const void> owner;
+        std::shared_ptr<std::vector<std::uint32_t>> own;
+        std::size_t offset = 0, count = 0;
+        const std::uint32_t* Words() const { return (own ? own->data() : data) + offset; }
+    };
+
+    /* The word at an index, the indices asked for never going back. */
+    struct Cursor {
+        const std::deque<Span>& spans;
+        std::size_t span = 0, base = 0;     // the span at `span` begins at word `base`
+        std::uint32_t At(std::size_t index) {
+            while (span < spans.size() && index >= base + spans[span].count) base += spans[span++].count;
+            return span < spans.size() ? spans[span].Words()[index - base] : 0;
+        }
+    };
+
+    std::deque<Span> spans_;
+    std::size_t size_ = 0;
 };
 
 }  // namespace ps2host

@@ -111,6 +111,12 @@ void Path3(const u32* words, u32 count, u32 from) {
     else GsWords(3, words, count, from);
 }
 
+/* The same from words `owner` keeps (VIF1's worker's copy): held, not copied. */
+void Path3Kept(const u32* words, u32 count, u32 from, std::shared_ptr<const void> owner) {
+    if (g_path3_masked || !g_path3_held.empty()) g_path3_held.Push(words, count, std::move(owner));
+    else GsWords(3, words, count, from);
+}
+
 void ReleasePath3(bool all) {
     g_path3_held.ReleaseBlock(all, [](const u32* words, std::size_t count) {
         GsWords(3, words, u32(count));
@@ -137,14 +143,19 @@ std::string Scratchpad(const Channel& ch, u32 chcr, bool describe) {
     char text[160];
     if (ch.base == 0x1000D000u) {                       // SPR_FROM
         if ((chcr >> 2) & 3) return "chain mode is not modelled (nothing copied)";
-        for (u32 i = 0; i < 16 * qwc; i += 16) {           // a quadword at a time (SADR is aligned)
+        // Up to the scratchpad's end at a time (where SADR wraps); a
+        // quadword at a time where it is not plain memory.
+        for (u32 i = 0; i < 16 * qwc;) {
             const u32 from = kScratchpadBase + ((sadr + i) & 0x3FF0u);
-            u8* to = Plain(m, madr + i) ? m.Translate(madr + i, 16) : nullptr;
-            if (const u8* source = to ? m.Translate(from, 16) : nullptr) {
-                std::memcpy(to, source, 16);
+            const u32 run = std::min(16 * qwc - i, kScratchpadBase + 0x4000u - from);
+            u8* to = Plain(m, madr + i) ? m.Translate(madr + i, run) : nullptr;
+            if (const u8* source = to ? m.Translate(from, run) : nullptr) {
+                std::memmove(to, source, run);
+                i += run;
                 continue;
             }
             for (u32 k = 0; k < 16; k += 4) m.Write(madr + i + k, m.Read(from + k, 4), 4);
+            i += 16;
         }
         *Register(ch.base + kMadr) = madr + 16 * qwc;
         *Register(ch.base + kQwc) = 0;
@@ -157,10 +168,21 @@ std::string Scratchpad(const Channel& ch, u32 chcr, bool describe) {
                           u32(m.Read(ch.base + kAsr0, 4)), u32(m.Read(ch.base + kAsr1, 4))};
     u8* scratchpad = Plain(m, kScratchpadBase) ? m.Translate(kScratchpadBase, kScratchpadSize) : nullptr;
     const DmaOutcome outcome = SendDmaBlocks(state, [&sadr, scratchpad](const u32* words, u32 count, u32 from) {
+        if (scratchpad) {
+            // Up to the scratchpad's end at a time (where SADR wraps).
+            for (u32 i = 0; i < count;) {
+                const u32 at = sadr & 0x3FFCu;
+                const u32 n = std::min(count - i, (0x4000u - at) / 4);
+                std::memcpy(scratchpad + at, &words[i], 4 * std::size_t(n));
+                i += n;
+                sadr = (sadr + 4 * n) & 0x3FFFu;
+            }
+            if (count) g_dma_source = from + 4 * (count - 1);
+            return;
+        }
         for (u32 i = 0; i < count; ++i) {
             g_dma_source = from + 4 * i;
-            if (scratchpad) std::memcpy(scratchpad + (sadr & 0x3FFCu), &words[i], 4);
-            else GuestMemory().Write(kScratchpadBase + (sadr & 0x3FFCu), words[i], 4);
+            GuestMemory().Write(kScratchpadBase + (sadr & 0x3FFCu), words[i], 4);
             sadr = (sadr + 4) & 0x3FFFu;
         }
     });
@@ -247,6 +269,9 @@ std::shared_ptr<ChainCopy> NewChainCopy() {
     });
 }
 
+// The words copied for VIF1's worker (Walk), for the frames line.
+u64 g_chain_words = 0;
+
 // Walks a started transfer and leaves the registers as it would; returns a
 // note (when `describe`: a transfer is noted only the first time).
 std::string Walk(const Channel& ch, u32 chcr, bool describe) {
@@ -272,6 +297,7 @@ std::string Walk(const Channel& ch, u32 chcr, bool describe) {
         sink = [copy](const u32* words, u32 count, u32 from) {
             copy->words.insert(copy->words.end(), words, words + count);
             copy->runs.emplace_back(count, from);
+            g_chain_words += count;
         };
     char text[160] = "";
     try {
@@ -307,7 +333,7 @@ std::string Walk(const Channel& ch, u32 chcr, bool describe) {
             Vif1Run([copy, gif, fifo, learn] {
                 const u32* at = copy->words.data();
                 for (const auto& [count, from] : copy->runs) {
-                    if (gif) Path3(at, count, from);
+                    if (gif) Path3Kept(at, count, from, copy);
                     else Vif1().Words(at, count, from);
                     at += count;
                 }
@@ -437,6 +463,13 @@ void FrameTimes(u64 frame) {
                       (unsigned long long)(guesses - last_guesses), (unsigned long long)wrong);
     }
     last_guesses = guesses;
+    static u64 last_chain_words = 0;
+    if (g_chain_words != last_chain_words && seconds > 0) {
+        const std::size_t used = std::strlen(job_text);
+        std::snprintf(job_text + used, sizeof job_text - used, ", %.1f MB a second copied for VIF1's worker",
+                      double(g_chain_words - last_chain_words) * 4 / 1e6 / seconds);
+    }
+    last_chain_words = g_chain_words;
     // Frames here are vertical blanks; a game that cannot keep up draws a
     // picture every other one (or less), which the VIF1 transfers show.
     {

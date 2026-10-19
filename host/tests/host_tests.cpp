@@ -397,6 +397,25 @@ void Path3GoesOneGroupPerWindow() {
     tag(1, false, 2, 0); data(1);
     queue.Release(false, [&](u32 word) { sent.push_back(word); });
     Check(queue.empty(), "a group without its EOP yet goes whole");
+    // Borrowed words (an owner keeps them), a tag split between two runs.
+    auto words = std::make_shared<std::vector<u32>>();
+    auto push_tag = [&](u32 nloop, bool eop) {
+        const u64 low = u64(nloop) | u64(eop) << 15 | u64(2) << 58;
+        for (u32 w : {u32(low), u32(low >> 32), 0u, 0u}) words->push_back(w);
+        for (u32 i = 0; i < 4 * nloop; ++i) words->push_back(0x1000u + i);
+    };
+    push_tag(2, true);
+    push_tag(1, true);
+    queue.Push(words->data(), 10, words);       // the second tag's first two words in this run
+    queue.Push(words->data() + 10, 2);
+    queue.Push(words->data() + 12, words->size() - 12, words);
+    sent.clear();
+    queue.Release(false, [&](u32 word) { sent.push_back(word); });
+    const bool first = sent.size() == 12 && std::equal(sent.begin(), sent.end(), words->begin());
+    sent.clear();
+    queue.Release(false, [&](u32 word) { sent.push_back(word); });
+    Check(first && sent.size() == 8 && std::equal(sent.begin(), sent.end(), words->begin() + 12) && queue.empty(),
+          "held runs, borrowed or copied, go a group at a time with a tag split between them");
 }
 
 // Fog (PRIM.FGE): C = (F * C + (255 - F) * FOGCOL) >> 8, F from XYZF2 or the
