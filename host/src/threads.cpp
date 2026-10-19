@@ -509,7 +509,11 @@ void VblankTimer() {
         // spinning a retry's every 700 us was this thread spinning all the
         // time the EE could not take it (a third of a core in Burnout 3's
         // garage, the EE waiting there for VIF1's worker).
-        const bool deadline = !(retrying && wake == retry_at);
+        // Only the blank itself is spun to (the frame's pace): an EE timer's
+        // interrupt - many a frame - is slept to, the high-resolution timer's
+        // half a millisecond close enough for it (spinning to each was 4% of
+        // a core, the timer thread's every 700 us before them).
+        const bool deadline = !(retrying && wake == retry_at) && wake == next;
         if (!SpareCores() || !deadline) {
             SleepUntil(wake);
         } else {
