@@ -110,7 +110,7 @@ struct Named {
 #ifdef _WIN32
     HANDLE handle = nullptr;
 #endif
-    u64 last_cpu_100ns = 0;
+    u64 last_cpu_100ns = 0, last_kernel_100ns = 0;
 };
 std::mutex g_named_mutex;
 std::vector<Named> g_named;
@@ -129,12 +129,21 @@ std::string ThreadCpu() {
         if (!GetThreadTimes(n.handle, &created, &exited, &kernel, &user)) continue;
         const u64 cpu = (u64(kernel.dwHighDateTime) << 32 | kernel.dwLowDateTime) +
                         (u64(user.dwHighDateTime) << 32 | user.dwLowDateTime);
-        const u64 used = cpu - n.last_cpu_100ns;
+        const u64 in_kernel = u64(kernel.dwHighDateTime) << 32 | kernel.dwLowDateTime;
+        const u64 used = cpu - n.last_cpu_100ns, used_kernel = in_kernel - n.last_kernel_100ns;
         n.last_cpu_100ns = cpu;
+        n.last_kernel_100ns = in_kernel;
         if (seconds <= 0) continue;
-        char one[96];
-        std::snprintf(one, sizeof one, "%s%s %d%%", out.empty() ? "" : ", ", n.name.c_str(),
-                      int(100.0 * double(used) / 1e7 / seconds + 0.5));
+        // PS2HOST_CPU_KERNEL=1: the kernel's part of each as well (waits, wakes).
+        static const bool kernel_too = std::getenv("PS2HOST_CPU_KERNEL") != nullptr;
+        char one[128];
+        if (kernel_too)
+            std::snprintf(one, sizeof one, "%s%s %d%% (kernel %d%%)", out.empty() ? "" : ", ", n.name.c_str(),
+                          int(100.0 * double(used) / 1e7 / seconds + 0.5),
+                          int(100.0 * double(used_kernel) / 1e7 / seconds + 0.5));
+        else
+            std::snprintf(one, sizeof one, "%s%s %d%%", out.empty() ? "" : ", ", n.name.c_str(),
+                          int(100.0 * double(used) / 1e7 / seconds + 0.5));
         out += one;
     }
 #endif
