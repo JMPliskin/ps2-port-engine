@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -227,13 +228,32 @@ void StartSampler() {
     // The guest's call stack too, on the EE's thread only (the others run no
     // guest thread of their own).
     const bool sample_guest = !SampleGsThread() && !SampleVif1Thread();
-    s.thread = std::thread([&s, target, sample_guest] {
+    // PS2HOST_SAMPLE_US: microseconds between samples (1000 by default, a
+    // Sleep each; under that the sampler spins on the clock - a core of its
+    // own - for the samples a compiled VU block's lines need).
+    const char* us_text = std::getenv("PS2HOST_SAMPLE_US");
+    const long long every_us = us_text ? std::max(10, std::atoi(us_text)) : 1000;
+    s.thread = std::thread([&s, target, sample_guest, every_us] {
         std::vector<std::uint64_t> local, local_times;
         std::vector<std::uint32_t> local_guest;
         local.reserve(1 << 20);
         local_times.reserve(1 << 17);
+        LARGE_INTEGER frequency, next;
+        QueryPerformanceFrequency(&frequency);
+        QueryPerformanceCounter(&next);
+        const long long step = frequency.QuadPart * every_us / 1000000;
         while (!s.stop.load()) {
-            Sleep(1);
+            if (every_us >= 1000) {
+                Sleep(DWORD(every_us / 1000));
+            } else {
+                next.QuadPart += step;
+                LARGE_INTEGER now;
+                do {
+                    _mm_pause();
+                    QueryPerformanceCounter(&now);
+                } while (now.QuadPart < next.QuadPart && !s.stop.load(std::memory_order_relaxed));
+                if (now.QuadPart > next.QuadPart + 16 * step) next = now;   // fell behind: no burst
+            }
             if (!g_sampling.load(std::memory_order_relaxed)) continue;
             // While the thread is suspended nothing here may allocate or take a
             // lock it could hold: the walk goes into a fixed array, through
@@ -274,6 +294,46 @@ std::string SampleReport(int top) {
     s.thread.join();
     timeEndPeriod(1);
     HANDLE process = GetCurrentProcess();
+    // PS2HOST_SAMPLE_RAW=file: the samples' stacks as they are, for
+    // engine/tools/hotspots.py (llvm-symbolizer: thousands of addresses in a
+    // second, where DbgHelp here took minutes) - addresses in the executable
+    // as offsets from where it was loaded (its header's ImageBase is that
+    // place by now, not the file's), 0 for any outside it. No report here.
+    if (const char* raw_path = std::getenv("PS2HOST_SAMPLE_RAW")) {
+        const auto* module = reinterpret_cast<const unsigned char*>(GetModuleHandleA(nullptr));
+        const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(module);
+        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(module + dos->e_lfanew);
+        const std::uint64_t base = reinterpret_cast<std::uint64_t>(module), size = nt->OptionalHeader.SizeOfImage;
+        std::FILE* out = std::fopen(raw_path, "w");
+        if (!out) return "sample: cannot write PS2HOST_SAMPLE_RAW\n";
+        std::size_t written = 0;
+        const std::size_t count = s.stacks.size() / kFrames;
+        std::vector<bool> in(count, true);
+        {
+            std::lock_guard<std::mutex> lock(s.mutex);
+            if (!s.spans.empty())
+                for (std::size_t i = 0; i < count; ++i) {
+                    const std::uint64_t t = i < s.times.size() ? s.times[i] : 0;
+                    bool inside = false;
+                    for (const auto& [from, to] : s.spans) inside = inside || (t >= from && t <= to);
+                    in[i] = inside;
+                }
+        }
+        for (std::size_t i = 0; i < count; ++i) {
+            if (!in[i]) continue;
+            const std::uint64_t* f = &s.stacks[i * kFrames];
+            for (int n = 0; n < kFrames; ++n) {
+                const std::uint64_t a = f[n] >= base && f[n] < base + size ? f[n] - base : 0;
+                std::fprintf(out, n ? " %llx" : "%llx", static_cast<unsigned long long>(a));
+            }
+            std::fputc('\n', out);
+            ++written;
+        }
+        std::fclose(out);
+        char text[160];
+        std::snprintf(text, sizeof text, "sample: %zu samples into %s\n", written, raw_path);
+        return text;
+    }
     SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES);
     // Symbols beside the executable (it names its PDB without a folder,
     // /PDBALTPATH), wherever the run was started from.
