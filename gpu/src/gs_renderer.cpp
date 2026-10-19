@@ -174,6 +174,11 @@ struct Texture {
 
 // What the frames' command buffers hold (RendererCounters, PS2HOST_GPU_LOG).
 std::uint64_t g_barriers = 0, g_transitions = 0, g_dispatches = 0, g_draws = 0, g_passes = 0, g_feedback = 0;
+// Why each pass ended (RendererCounters): a draw's destination alpha test,
+// its copy of its own target, a source to make readable, another target,
+// another depth buffer; anything else recorded (VulkanGpu::end_pass).
+enum PassEnd { kEndDate, kEndFeedback, kEndSource, kEndTarget, kEndDepth, kEndOther, kEndWhys };
+std::uint64_t g_pass_ends[kEndWhys] = {};
 
 void Transition(VkCommandBuffer cmd, Image& t, VkImageLayout to, VkAccessFlags dst_access,
                 VkPipelineStageFlags dst_stage) {
@@ -564,8 +569,9 @@ private:
     std::uint32_t ScaleOf(std::uint32_t width) const { return width <= 320 || width >= 1024 ? 1u : scale_; }
     Image* open_target_ = nullptr;
     Image* open_depth_ = nullptr;
-    void EndPass(VkCommandBuffer cmd) {
+    void EndPass(VkCommandBuffer cmd, PassEnd why = kEndOther) {
         if (!open_target_) return;
+        ++g_pass_ends[why];
         vkCmdEndRendering(cmd);
         open_target_ = open_depth_ = nullptr;
     }
@@ -3001,7 +3007,9 @@ void VulkanGsRenderer::Flush() {
             // needing one, or drawing elsewhere, ends the open pass first.
             const bool outside = state_.date || copy_first ||
                                  (source && source->layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-            if (outside || open_target_ != t || open_depth_ != depth) EndPass(cmd);
+            if (outside || open_target_ != t || open_depth_ != depth)
+                EndPass(cmd, state_.date ? kEndDate : copy_first ? kEndFeedback : outside ? kEndSource
+                             : open_target_ != t ? kEndTarget : kEndDepth);
             if (state_.date) DateSetup(cmd, *t, *depth, state_.datm);
             if (copy_first) {
                 ++g_feedback;
@@ -3393,7 +3401,15 @@ std::string RendererCounters() {
                   (unsigned long long)(now[2] - last[2]), (unsigned long long)(now[3] - last[3]),
                   (unsigned long long)(now[4] - last[4]), (unsigned long long)(now[5] - last[5]));
     for (int i = 0; i < 6; ++i) last[i] = now[i];
-    return text;
+    static std::uint64_t last_ends[kEndWhys] = {};
+    char ends[160];
+    std::snprintf(ends, sizeof ends, "; passes ended by: alpha test %llu, own copy %llu, a source %llu, target %llu, "
+                  "depth %llu, other work %llu",
+                  (unsigned long long)(g_pass_ends[0] - last_ends[0]), (unsigned long long)(g_pass_ends[1] - last_ends[1]),
+                  (unsigned long long)(g_pass_ends[2] - last_ends[2]), (unsigned long long)(g_pass_ends[3] - last_ends[3]),
+                  (unsigned long long)(g_pass_ends[4] - last_ends[4]), (unsigned long long)(g_pass_ends[5] - last_ends[5]));
+    for (int i = 0; i < kEndWhys; ++i) last_ends[i] = g_pass_ends[i];
+    return std::string(text) + ends;
 }
 
 std::string SubmitStats() {
