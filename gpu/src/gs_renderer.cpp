@@ -538,8 +538,12 @@ private:
        through 64-320-wide views of one memory some fifty times a frame,
        each brought back from memory: at 4x those were a third of the GPU's
        time, and the upscaled glow ghosted (a second, offset outline around
-       its words). */
-    std::uint32_t ScaleOf(std::uint32_t width) const { return width <= 320 ? 1u : scale_; }
+       its words). 1024 wide or more (FBW 16 and up) too: wider than any
+       picture the GS shows, a view of memory as texture pages - Burnout 3's
+       1024x256 over its glow's memory, read as PSMT8H, brought back from
+       memory 18 times a splitscreen frame and never drawn into: at 3x its
+       reloads were a third of the swizzles. */
+    std::uint32_t ScaleOf(std::uint32_t width) const { return width <= 320 || width >= 1024 ? 1u : scale_; }
     Image* open_target_ = nullptr;
     Image* open_depth_ = nullptr;
     void EndPass(VkCommandBuffer cmd) {
