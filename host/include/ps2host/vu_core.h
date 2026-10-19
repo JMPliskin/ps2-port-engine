@@ -91,8 +91,28 @@ struct VuRunState {
 };
 
 /* A block of a compiled program: pairs run in a line from its first, the
-   run's state then left where it goes next (s.pc), or done. */
-using VuBlock = void (*)(Vu& vu, VuRunState& state, std::uint64_t limit);
+   run's state then left where it goes next (s.pc), or done. With clang a
+   block saves no registers for its caller (preserve_none): Windows' own
+   convention had every block save eight general and ten vector registers
+   and put them back, for the one small loop that calls it (Vu::RunCompiled),
+   which keeps its few values itself. */
+#if defined(__clang__) && defined(__x86_64__)
+#define PS2HOST_VU_BLOCK __attribute__((preserve_none, no_stack_protector))
+#else
+#define PS2HOST_VU_BLOCK
+#endif
+using VuBlock = void (PS2HOST_VU_BLOCK*)(Vu& vu, VuRunState& state, std::uint64_t limit);
+/* How a block goes on to the next where the generator knows which it is (the
+   pair after it, a branch's target): straight into it, as Vu::RunCompiled's
+   loop would have called it next - it starts only with as many pairs left
+   as it has, and returns to that loop otherwise. 2.5 frames of a race's VU1
+   work entered 700,000 blocks, each through the loop and a call it could
+   not foresee. Without clang the loop calls it. */
+#if defined(__clang__) && defined(__x86_64__)
+#define PS2HOST_VU_NEXT(block) [[clang::musttail]] return block(v, s, limit)
+#else
+#define PS2HOST_VU_NEXT(block) return
+#endif
 
 /* A microprogram compiled ahead of time. `code` is what it was compiled
    from, as runs: a count of runs, then for each its byte address in
@@ -385,6 +405,40 @@ struct VuCore {
     static PS2HOST_VU_INLINE u32& Status(Vu& v, u64 cycle) { LandFlags(v, cycle); return v.status; }
     static PS2HOST_VU_INLINE u32& StatusLatest(Vu& v) { return v.status_latest_; }
     static PS2HOST_VU_INLINE u32 Mac(Vu& v, u64 cycle) { LandFlags(v, cycle); return v.mac; }
+    /* The landed flags where the queue is known empty (vurecomp.py: Flags). */
+    static PS2HOST_VU_INLINE u32& ClipNow(Vu& v) { return v.clip; }
+    static PS2HOST_VU_INLINE u32& StatusNow(Vu& v) { return v.status; }
+    static PS2HOST_VU_INLINE u32 MacNow(Vu& v) { return v.mac; }
+    static PS2HOST_VU_INLINE u32 MacLatest(Vu& v) { return v.mac_latest_; }
+
+    /* The flags as the generator follows them within a block (vurecomp.py:
+       Flags). A pair's flags are held in its locals, not queued: the block
+       knows which have landed where it reads them. These land them - after
+       everything still queued, which is older and has landed too (LandAll
+       Flags) - or queue them as the block leaves, those that may not have
+       landed yet. */
+    static PS2HOST_VU_INLINE void LandAllFlags(Vu& v) { LandFlags(v, ~u64(0)); }
+    /* A pair's MAC and STATUS, landed (`status`'s sticky bits with every
+       one's before it). */
+    static PS2HOST_VU_INLINE void LandMac(Vu& v, u32 mac, u32 status) {
+        v.mac = mac;
+        v.status = (v.status & ~0x3u) | (status & 0xC3u);
+    }
+    static PS2HOST_VU_INLINE void LandClip(Vu& v, u32 clip) { v.clip = clip; }
+    /* Queued as FinishUpper would have at the pair's issue cycle `at`. */
+    static PS2HOST_VU_INLINE void QueueFlags(Vu& v, u64 at, u32 mac, u32 status, u32 clip, bool sets_mac,
+                                             bool sets_clip) {
+        if (v.flag_count_ == 8) LandFlags(v, at);
+        if (v.flag_count_ < 8) {
+            Vu::FlagWrite& f = v.flag_queue_[(v.flag_head_ + v.flag_count_++) & 7];
+            f.ready = at + kFmacLatency;
+            f.mac = mac;
+            f.status = status;
+            f.clip = clip;
+            f.sets_mac = sets_mac;
+            f.sets_clip = sets_clip;
+        }
+    }
 
     // ------------------------------------------------------------ upper
 #if PS2RT_VU_SSE

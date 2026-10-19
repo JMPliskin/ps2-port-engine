@@ -188,6 +188,14 @@ bool Holds(const Vu::Span& micro, const Vu::u32* code) {
 
 std::FILE* g_record = nullptr;
 
+/* PS2HOST_VU_BY_BLOCK (--vu-bench): the time, entries and pairs of each
+   compiled block, by its program's entry and its address. */
+struct BlockTime {
+    std::uint64_t ticks = 0, entries = 0, pairs = 0;
+    std::uint32_t entry = 0, pc = 0;
+};
+std::unordered_map<const void*, BlockTime>* g_block_times = nullptr;
+
 std::unordered_set<std::size_t>& Recorded() {
     static std::unordered_set<std::size_t> seen;
     return seen;
@@ -766,6 +774,8 @@ int Vu::Bench(const std::string& path, int passes, bool fast) {
     // PS2HOST_VU_BY_PROGRAM: the best pass's time and pairs by the address
     // each run started at (the microprogram), most first.
     static const bool by_program = std::getenv("PS2HOST_VU_BY_PROGRAM") != nullptr;
+    std::unordered_map<const void*, BlockTime> block_times;
+    if (std::getenv("PS2HOST_VU_BY_BLOCK")) g_block_times = &block_times;
     std::map<u32, std::pair<double, u64>> programs, best_programs;
     std::map<u32, u64> program_runs;
     for (int pass = 0; pass < passes; ++pass) {
@@ -833,6 +843,27 @@ int Vu::Bench(const std::string& path, int passes, bool fast) {
                         best ? 100 * t / best : 0, (unsigned long long)program_runs[pc],
                         (unsigned long long)best_programs[pc].second,
                         best_programs[pc].second ? t * 1e9 / double(best_programs[pc].second) : 0.0);
+    }
+    if (g_block_times) {
+        // Over every pass (the clock around each block slows them all alike).
+        std::vector<const BlockTime*> order;
+        u64 total = 0;
+        for (const auto& [block, b] : block_times) { order.push_back(&b); total += b.ticks; }
+        std::sort(order.begin(), order.end(), [](const BlockTime* a, const BlockTime* b) { return a->ticks > b->ticks; });
+        double shown = 0;
+        for (std::size_t i = 0; i < order.size() && i < 40; ++i) {
+            const BlockTime& b = *order[i];
+            shown += 100.0 * double(b.ticks) / double(total);
+            std::printf("  block %04X:%04X %.1f%% (%.1f%% so far), %llu entries, %.1f pairs an entry, %.2f ns a pair\n",
+                        b.entry, b.pc, 100.0 * double(b.ticks) / double(total), shown,
+                        (unsigned long long)b.entries, double(b.pairs) / double(b.entries),
+                        b.pairs ? double(b.ticks) / double(b.pairs) : 0.0);
+        }
+        u64 entries = 0, block_pairs = 0;
+        for (const auto& [block, b] : block_times) { entries += b.entries; block_pairs += b.pairs; }
+        std::printf("  %zu blocks, %llu entries a pass, %.1f pairs an entry\n", block_times.size(),
+                    (unsigned long long)(entries / u64(passes)), entries ? double(block_pairs) / double(entries) : 0.0);
+        g_block_times = nullptr;
     }
     std::printf("vu-bench: %zu runs, %llu pairs, best pass %.1f ms, %.2f ns a pair; state hash %016llX\n",
                 runs.size(), (unsigned long long)pairs, best * 1000, pairs ? best * 1e9 / double(pairs) : 0.0,
@@ -934,6 +965,20 @@ bool Vu::RunCompiled(VuRunState& state, u64 limit) {
             const VuBlock block = table[(state.pc & u32(micro.size() - 1)) / 8];
             if (!block) break;
             const u64 at = state.count;
+            if (g_block_times) {
+                const u32 pc = state.pc;
+                const auto began = std::chrono::steady_clock::now();
+                block(*this, state, limit);
+                BlockTime& b = (*g_block_times)[reinterpret_cast<const void*>(block)];
+                b.ticks += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                   std::chrono::steady_clock::now() - began).count());
+                ++b.entries;
+                b.pairs += state.count - at;
+                b.entry = program->entry;
+                b.pc = pc;
+                if (state.count == at) break;
+                continue;
+            }
             block(*this, state, limit);
             if (state.count == at) break;   // it would not start here: the interpreter goes on
         }
