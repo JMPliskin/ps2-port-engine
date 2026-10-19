@@ -10,6 +10,7 @@
 #include "ps2host/vu.h"
 
 #include <algorithm>
+#include <map>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -762,8 +763,14 @@ int Vu::Bench(const std::string& path, int passes, bool fast) {
     }
     double best = 0;
     u64 pairs = 0, hash = 0;
+    // PS2HOST_VU_BY_PROGRAM: the best pass's time and pairs by the address
+    // each run started at (the microprogram), most first.
+    static const bool by_program = std::getenv("PS2HOST_VU_BY_PROGRAM") != nullptr;
+    std::map<u32, std::pair<double, u64>> programs, best_programs;
+    std::map<u32, u64> program_runs;
     for (int pass = 0; pass < passes; ++pass) {
         double seconds = 0;
+        programs.clear();
         u64 pass_pairs = 0, pass_hash = 1469598103934665603ull;
         std::uint8_t* micro_now = nullptr;
         for (Run& r : runs) {
@@ -784,8 +791,16 @@ int Vu::Bench(const std::string& path, int passes, bool fast) {
             vu.top = r.s.flags[4];
             vu.itop = r.s.flags[5];
             const auto began = std::chrono::steady_clock::now();
-            pass_pairs += vu.Run(r.s.pc);
-            seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - began).count();
+            const u64 run_pairs = vu.Run(r.s.pc);
+            const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - began).count();
+            pass_pairs += run_pairs;
+            seconds += took;
+            if (by_program) {
+                auto& [t, p] = programs[r.s.pc];
+                t += took;
+                p += run_pairs;
+                if (pass == 0) ++program_runs[r.s.pc];
+            }
             // FNV-1a, a word at a time, over what the run left: registers, flags, data memory.
             auto mix = [&pass_hash](const void* p, std::size_t n) {
                 const std::uint8_t* b = static_cast<const std::uint8_t*>(p);
@@ -802,9 +817,22 @@ int Vu::Bench(const std::string& path, int passes, bool fast) {
             mix(flags, sizeof flags);
             mix(vu.data.data(), 16384);
         }
-        if (pass == 0 || seconds < best) best = seconds;
+        if (pass == 0 || seconds < best) {
+            best = seconds;
+            best_programs = programs;
+        }
         pairs = pass_pairs;
         hash = pass_hash;
+    }
+    if (by_program) {
+        std::vector<std::pair<double, u32>> order;
+        for (const auto& [pc, tp] : best_programs) order.emplace_back(tp.first, pc);
+        std::sort(order.rbegin(), order.rend());
+        for (const auto& [t, pc] : order)
+            std::printf("  program %04X: %.2f ms (%.1f%%), %llu runs, %llu pairs, %.2f ns a pair\n", pc, t * 1000,
+                        best ? 100 * t / best : 0, (unsigned long long)program_runs[pc],
+                        (unsigned long long)best_programs[pc].second,
+                        best_programs[pc].second ? t * 1e9 / double(best_programs[pc].second) : 0.0);
     }
     std::printf("vu-bench: %zu runs, %llu pairs, best pass %.1f ms, %.2f ns a pair; state hash %016llX\n",
                 runs.size(), (unsigned long long)pairs, best * 1000, pairs ? best * 1e9 / double(pairs) : 0.0,
