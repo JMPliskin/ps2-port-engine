@@ -4,12 +4,15 @@
  */
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <system_error>
+#include <thread>
 #include <vector>
 
 #include "ps2host/disc.h"
@@ -478,8 +481,16 @@ void TexturePackNamesAsPcsx2() {
     bool pending = false;
     texture_pack::Find(name, &pending);
     Check(pending, "a texture the pack has (TCC's bit ignored): its file read in the background");
-    fs::remove_all(dir);
+    // The background read done before the folder goes: a file it still had
+    // open could not be removed (Windows), and remove_all threw - the tests
+    // ended there, now and then.
+    for (int i = 0; i < 200 && pending; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        texture_pack::Find(name, &pending);
+    }
     texture_pack::Open("");
+    std::error_code ignored;
+    fs::remove_all(dir, ignored);
 }
 
 void GsTakesImagesInBlocks() {
