@@ -1145,7 +1145,10 @@ void DumpPass(Bridge& s, const std::tuple<u32, u32, u32>& target) {
    drawn into and sampled at the internal resolution, not a second image
    reconciled with it through memory (at 1x). Burnout 3's splitscreen draws
    player 2's post effects into a frame based at the picture's row 224. */
-Owned* Containing(Bridge& b, u32 fbp, u32 fbw, u32 psm, u32* offset) {
+/* `across`, when given: a target whole pages across into another too (its
+   pixels that many to the right) - Burnout 3's glow draws into the second
+   page column of its 128-wide strip buffer (D3 of D2). */
+Owned* Containing(Bridge& b, u32 fbp, u32 fbw, u32 psm, u32* offset, u32* across = nullptr) {
     // PS2HOST_GPU_NO_CONTAINING=1: each buffer an image of its own (comparisons).
     static const bool off = std::getenv("PS2HOST_GPU_NO_CONTAINING") != nullptr;
     if (off) return nullptr;
@@ -1162,11 +1165,14 @@ Owned* Containing(Bridge& b, u32 fbp, u32 fbw, u32 psm, u32* offset) {
     if (!inside) return nullptr;
     Owned* best = nullptr;
     for (auto& [key, o] : b.owned) {
-        if (o.depth || o.fbw != fbw || o.psm != psm || o.fbp >= fbp || (fbp - o.fbp) % std::max(1u, fbw)) continue;
+        if (o.depth || o.fbw != fbw || o.psm != psm || o.fbp >= fbp) continue;
+        const u32 pages_across = (fbp - o.fbp) % std::max(1u, fbw);
+        if (pages_across && !across) continue;
         const u32 rows = (fbp - o.fbp) / std::max(1u, fbw) * (Is16(psm) ? 64 : 32);
         if (rows >= o.height || (best && o.fbp < best->fbp)) continue;
         best = &o;
         *offset = rows;
+        if (across) *across = pages_across * 64;
     }
     static std::set<std::tuple<u32, u32, u32>> told;
     if (best && told.insert(std::make_tuple(fbp, fbw, psm)).second)
@@ -1193,6 +1199,101 @@ struct WordPixels {
         return pixel;
     }
 };
+
+/* A sprite's Z into its own colour target's memory (OnDraw's z_as_colour),
+   drawn into that target itself: a Z format's page is a 32-bit colour
+   page with its 32x16 quarters swapped (the block index's bits 3 and 4), so
+   each quarter of the sprite is drawn, as the Z's bytes, where its memory is
+   in the target - not into an image of its own in the Z format, which the
+   target and it then took turns to bring up to date through memory. The
+   race's glow lays its threshold down so, 32 columns as colour and the 32
+   next to them as Z: twenty such sprites a frame, each a write-back and a
+   reload of both (~110 a frame). Only a sprite of one Z, the target's own
+   32-bit image, the view and the target over the same pages - checked by
+   each quarter's corners. False: drawn as before. */
+bool ZIntoColour(Bridge& s, Owned& target, const ps2gpu::GsDrawState& state, u32 zpsm, const ps2gpu::GsVertex* v,
+                 std::size_t n, int x_offset, int y_offset) {
+    static const bool off = std::getenv("PS2HOST_GPU_Z_VIEWS") != nullptr;
+    if (off || !state.sprite_prim || n != 6 || (zpsm != gs::PSMZ24 && zpsm != gs::PSMZ32)) return false;
+    if (target.psm != gs::PSMCT32 || target.fbp != state.fbp || target.fbw != state.fbw) return false;
+    for (std::size_t i = 1; i < n; ++i)
+        if (v[i].z != v[0].z) return false;
+    // In the Z's own view: the target's pixels moved back (Containing).
+    float lx = v[0].x, hx = v[0].x, ly = v[0].y, hy = v[0].y;
+    for (std::size_t i = 1; i < n; ++i) {
+        lx = std::min(lx, v[i].x);
+        hx = std::max(hx, v[i].x);
+        ly = std::min(ly, v[i].y);
+        hy = std::max(hy, v[i].y);
+    }
+    lx -= float(x_offset), hx -= float(x_offset), ly -= float(y_offset), hy -= float(y_offset);
+    // The pixels it covers (their centres inside), inside the scissor.
+    const int x0 = std::max(int(std::ceil(lx - 0.5f)), state.scissor_x0 - x_offset);
+    const int x1 = std::min(int(std::ceil(hx - 0.5f)), state.scissor_x1 + 1 - x_offset);
+    const int y0 = std::max(int(std::ceil(ly - 0.5f)), state.scissor_y0 - y_offset);
+    const int y1 = std::min(int(std::ceil(hy - 0.5f)), state.scissor_y1 + 1 - y_offset);
+    if (x0 < 0 || y0 < 0) return false;
+    if (x1 <= x0 || y1 <= y0) return true;
+    static WordPixels words;
+    const std::vector<u32>& pixel = words.For(target.fbp * 32, target.fbw, gs::PSMCT32, target.width, target.height);
+    auto where = [&](int x, int y, int* cx, int* cy) {
+        u32 nibble = 0;
+        const u32 p = pixel[(gs::Memory::Address(state.zbp * 32, state.fbw, u32(x), u32(y), zpsm, &nibble) >> 2) &
+                            ((1u << 20) - 1)];
+        if (!p) return false;
+        *cx = int((p - 1) & 0xFFFF);
+        *cy = int((p - 1) >> 16);
+        return true;
+    };
+    // Each quarter of a page it reaches: its corners where the target has
+    // their memory, the same move for both.
+    struct Piece { int x0, y0, x1, y1, dx, dy; };
+    std::vector<Piece> pieces;
+    for (int ty = y0 / 16 * 16; ty < y1; ty += 16)
+        for (int tx = x0 / 32 * 32; tx < x1; tx += 32) {
+            Piece q{std::max(x0, tx), std::max(y0, ty), std::min(x1, tx + 32), std::min(y1, ty + 16), 0, 0};
+            int ax, ay, bx, by;
+            if (!where(q.x0, q.y0, &ax, &ay) || !where(q.x1 - 1, q.y1 - 1, &bx, &by)) return false;
+            q.dx = ax - q.x0;
+            q.dy = ay - q.y0;
+            if (bx - (q.x1 - 1) != q.dx || by - (q.y1 - 1) != q.dy) return false;
+            pieces.push_back(q);
+        }
+    ps2gpu::GsDrawState zs;
+    zs.fbp = target.fbp;
+    zs.fbw = target.fbw;
+    zs.psm = gs::PSMCT32;
+    zs.width = target.width;
+    zs.height = target.height;
+    zs.scissor_x0 = 0;
+    zs.scissor_y0 = 0;
+    zs.scissor_x1 = int(target.width) - 1;
+    zs.scissor_y1 = int(target.height) - 1;
+    zs.gouraud = false;
+    if (zpsm == gs::PSMZ24) zs.fbmsk = 0xFF000000u;
+    const u32 z = v[0].z;
+    for (const Piece& q : pieces) {
+        ps2gpu::GsVertex corner{};
+        corner.z = 0;
+        corner.r = u8(z);
+        corner.g = u8(z >> 8);
+        corner.b = u8(z >> 16);
+        corner.a = u8(z >> 24);
+        corner.q = 1;
+        const float ax = float(q.x0 + q.dx), ay = float(q.y0 + q.dy);
+        const float bx = float(q.x1 + q.dx), by = float(q.y1 + q.dy);
+        ps2gpu::GsVertex quad[6] = {corner, corner, corner, corner, corner, corner};
+        quad[0].x = ax, quad[0].y = ay;
+        quad[1].x = bx, quad[1].y = ay;
+        quad[2].x = ax, quad[2].y = by;
+        quad[3].x = bx, quad[3].y = ay;
+        quad[4].x = bx, quad[4].y = by;
+        quad[5].x = ax, quad[5].y = by;
+        s.renderer->DrawTriangles(zs, quad, 6);
+        Drew(s, target, u32(q.x0 + q.dx), u32(q.x1 + q.dx), u32(q.y1 + q.dy), u32(q.y0 + q.dy));
+    }
+    return true;
+}
 
 /* GsShuffle: a sprite into a 16-bit view of a 32-bit target, its texels a
    16-bit view of the depth buffer, copied 1:1, done on the target's image
@@ -1470,19 +1571,36 @@ void OnDraw(const gs::Gs::DrawCall& call) {
     }
     Owned* target = nullptr;
     Owned* tex_source = nullptr;
-    u32 y_offset = 0, t_offset = 0;
+    u32 y_offset = 0, t_offset = 0, x_offset = 0;
     u32 draw_rows = rows;
     u32 z_shift = 0;                    // the depth buffer's pages, moved with the target
     if (s.primary && !s.owned.count(std::make_tuple(state.fbp, state.fbw, state.psm, false))) {
-        Owned* base = Containing(s, state.fbp, state.fbw, state.psm, &y_offset);
+        Owned* base = Containing(s, state.fbp, state.fbw, state.psm, &y_offset, &x_offset);
+        // Pages across: the draw inside the base's width.
+        if (base && x_offset && x1 + x_offset > base->fbw * 64) base = nullptr;
         // Its depth buffer as far into the base's (Burnout 3's player 2 has
         // its Z 224 rows into the picture's depth buffer too): there, or the
-        // buffer stays apart.
+        // buffer stays apart - or, pages across (no depth buffer moves so),
+        // a Z that only goes into the target's own memory (ZTST ALWAYS:
+        // ZIntoColour) or none.
         if (base && Bits(c.test, 16, 1)) {
             const u32 pages = state.fbp - base->fbp, zbp = Bits(c.zbuf, 0, 9);
             const u32 zpsm_early = 0x30 | Bits(c.zbuf, 24, 4);
-            if (zbp >= pages && s.owned.count(std::make_tuple(zbp - pages, state.fbw, zpsm_early, true))) z_shift = pages;
-            else base = nullptr, y_offset = 0;
+            const auto colour = Blocks(state.fbp, state.fbw, state.psm, rows);
+            const auto z = Blocks(zbp, state.fbw, zpsm_early, rows);
+            const bool z_inside = Bits(c.test, 17, 2) == 1 &&
+                                  (Bits(c.zbuf, 32, 1) || (colour.first < z.second && z.first < colour.second) ||
+                                   (base->begin < z.second && z.first < base->full_end));
+            if (!x_offset && zbp >= pages && s.owned.count(std::make_tuple(zbp - pages, state.fbw, zpsm_early, true)))
+                z_shift = pages;
+            else if (!(x_offset && z_inside)) base = nullptr, y_offset = 0, x_offset = 0;
+        }
+        if (base && x_offset) {
+            state.scissor_x0 += int(x_offset);
+            state.scissor_x1 += int(x_offset);
+            for (std::size_t i = 0; i < n; ++i) v[i].x += float(x_offset);
+            x0 += x_offset;
+            x1 += x_offset;
         }
         if (base) {
             state.fbp = base->fbp;
@@ -1678,7 +1796,7 @@ void OnDraw(const gs::Gs::DrawCall& call) {
         // The next primitive may take the fast path - unless this one's
         // texture is a target, lies over what it draws (each primitive
         // makes it stale), or its Z goes in as colour.
-        bool may = !z_as_colour && !s.Dumping();
+        bool may = !z_as_colour && !x_offset && !s.Dumping();
         // A target that samples itself (feedback) sees each primitive's
         // drawing in the next: those go the whole way.
         if (state.texture_target && tex_source == target) may = false;
@@ -1709,7 +1827,10 @@ void OnDraw(const gs::Gs::DrawCall& call) {
             fast.t_offset = t_offset;
             fast.th = th;
         }
-        if (z_as_colour) {
+        if (z_as_colour && z_shift == 0 &&
+            ZIntoColour(s, *target, state, zpsm, v, n, int(x_offset), int(y_offset))) {
+            // (drawn into the target where the Z's memory is)
+        } else if (z_as_colour) {
             // The Z, as the bytes the Z format stores, into the Z-format view.
             ps2gpu::GsDrawState zs;
             zs.fbp = state.zbp;
@@ -1717,15 +1838,16 @@ void OnDraw(const gs::Gs::DrawCall& call) {
             zs.psm = zpsm;
             zs.width = state.width;
             zs.height = state.height;
-            zs.scissor_x0 = state.scissor_x0;
+            zs.scissor_x0 = state.scissor_x0 - int(x_offset);
             zs.scissor_y0 = state.scissor_y0;
-            zs.scissor_x1 = state.scissor_x1;
+            zs.scissor_x1 = state.scissor_x1 - int(x_offset);
             zs.scissor_y1 = state.scissor_y1;
             zs.gouraud = state.gouraud;
             if (zpsm == gs::PSMZ24) zs.fbmsk = 0xFF000000u;
             ps2gpu::GsVertex zv[6];
             for (std::size_t i = 0; i < n; ++i) {
                 zv[i] = v[i];
+                zv[i].x -= float(x_offset);         // (the Z's own view: not moved with the target)
                 const u32 z = v[i].z;
                 const u32 c = Is16(zpsm) ? From16(z & 0xFFFF) : z;
                 zv[i].r = u8(c);
@@ -1735,7 +1857,7 @@ void OnDraw(const gs::Gs::DrawCall& call) {
             }
             Owned& view = Use(s, zs.fbp, zs.fbw, zs.psm, false, zs.width, zs.height, rows);
             s.renderer->DrawTriangles(zs, zv, n);
-            Drew(s, view, x0, x1, y1, y0);
+            Drew(s, view, x0 - x_offset, x1 - x_offset, y1, y0);
         }
         return;
     }
