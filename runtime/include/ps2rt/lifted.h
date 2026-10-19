@@ -135,8 +135,12 @@ void StoreLeft(u32 address, u64 value, u32 size);
 void StoreRight(u32 address, u64 value, u32 size);
 
 /* VU0 in macro mode (runtime/src/vu0.cpp, mirroring engine/ps2decomp/vu0.py):
-   an arithmetic COP2 instruction, and the moves between it and the core. */
-void Cop2(Context& c, u32 word);
+   an arithmetic COP2 instruction, and the moves between it and the core.
+   Cop2 (below, inline) runs the FMAC operations itself; Cop2Slow every one,
+   decoded as it runs. */
+void Cop2Slow(Context& c, u32 word);
+/* PS2RT_EE_ROUND_NEAREST: macro mode left rounding to nearest (vu0.cpp). */
+extern const bool kMacroNearest;
 /* COP2's FMAC operations (ADD, SUB, MUL, MADD, MSUB, MAX, MINI, with their
    broadcast, Q, I and accumulator forms), decoded once and run as often as
    needed - the VU interpreter keeps them per instruction. Cop2 runs them the
@@ -161,6 +165,127 @@ void Cop2Move(Context& c, u32 word, u32 rt);
    instruction memory) on the registers macro mode shares with it. Defined by
    whatever hosts the lifted code. */
 void Vcallms(Context& c, u32 address);
+
+}  // namespace lifted
+
+#include "ps2rt/vu_math.h"
+
+namespace lifted {
+
+/* An FMAC's form from its word (vu0.cpp's Special1 and AccumulatorForm, the
+   same tables): foldable where the word is a constant - the lifted code's
+   34,000 COP2 instructions each are - so each compiles to its arithmetic
+   alone, not a decode and a call each time it runs (5% of the EE's time in
+   a race). */
+struct FmacForm {
+    int op = 0, operand = 0;
+    bool to_acc = false, valid = false;
+};
+
+constexpr FmacForm MakeForm(int op, int operand, bool to_acc) { return FmacForm{op, operand, to_acc, true}; }
+
+constexpr FmacForm Special1Form(u32 funct) {
+    constexpr int kBroadcast[7] = {kAdd, kSub, kMadd, kMsub, kMax_, kMini, kMul};
+    if (funct <= 0x1B) return MakeForm(kBroadcast[funct >> 2], int(funct & 3), false);
+    switch (funct) {
+        case 0x1C: return MakeForm(kMul, 4, false);
+        case 0x1D: return MakeForm(kMax_, 5, false);
+        case 0x1E: return MakeForm(kMul, 5, false);
+        case 0x1F: return MakeForm(kMini, 5, false);
+        case 0x20: return MakeForm(kAdd, 4, false);
+        case 0x21: return MakeForm(kMadd, 4, false);
+        case 0x22: return MakeForm(kAdd, 5, false);
+        case 0x23: return MakeForm(kMadd, 5, false);
+        case 0x24: return MakeForm(kSub, 4, false);
+        case 0x25: return MakeForm(kMsub, 4, false);
+        case 0x26: return MakeForm(kSub, 5, false);
+        case 0x27: return MakeForm(kMsub, 5, false);
+        case 0x28: return MakeForm(kAdd, 6, false);
+        case 0x29: return MakeForm(kMadd, 6, false);
+        case 0x2A: return MakeForm(kMul, 6, false);
+        case 0x2B: return MakeForm(kMax_, 6, false);
+        case 0x2C: return MakeForm(kSub, 6, false);
+        case 0x2D: return MakeForm(kMsub, 6, false);
+        case 0x2F: return MakeForm(kMini, 6, false);
+        default: return FmacForm{};
+    }
+}
+
+constexpr FmacForm AccumulatorFormOf(u32 index) {
+    constexpr int kBroadcast[4] = {kAdd, kSub, kMadd, kMsub};
+    if (index <= 0x0F) return MakeForm(kBroadcast[index >> 2], int(index & 3), true);
+    if (index >= 0x18 && index <= 0x1B) return MakeForm(kMul, int(index & 3), true);
+    switch (index) {
+        case 0x1C: return MakeForm(kMul, 4, true);
+        case 0x1E: return MakeForm(kMul, 5, true);
+        case 0x20: return MakeForm(kAdd, 4, true);
+        case 0x21: return MakeForm(kMadd, 4, true);
+        case 0x22: return MakeForm(kAdd, 5, true);
+        case 0x23: return MakeForm(kMadd, 5, true);
+        case 0x24: return MakeForm(kSub, 4, true);
+        case 0x25: return MakeForm(kMsub, 4, true);
+        case 0x26: return MakeForm(kSub, 5, true);
+        case 0x27: return MakeForm(kMsub, 5, true);
+        case 0x28: return MakeForm(kAdd, 6, true);
+        case 0x29: return MakeForm(kMadd, 6, true);
+        case 0x2A: return MakeForm(kMul, 6, true);
+        case 0x2C: return MakeForm(kSub, 6, true);
+        case 0x2D: return MakeForm(kMsub, 6, true);
+        default: return FmacForm{};
+    }
+}
+
+constexpr FmacForm FmacFormOf(u32 word) {
+    const u32 funct = word & 0x3F;
+    return funct < 0x3C ? Special1Form(funct) : AccumulatorFormOf((word & 3) | ((word >> 4) & 0x7C));
+}
+
+#if PS2RT_VU_SSE
+/* An FMAC as Cop2Slow runs it (RunFmac's Lanes: LanesSse<Op>, every lane
+   read before any is written; dest's lanes stored), in the same rounding. */
+template <int Op>
+inline __m128i MacroLanes(__m128i a, __m128i b, __m128i acc) { return LanesSse<Op>(a, b, acc); }
+
+inline void MacroFmac(Context& c, u32 word, FmacForm f) {
+    const u32 fd = (word >> 6) & 0x1F, fs = (word >> 11) & 0x1F, ft = (word >> 16) & 0x1F;
+    const u32 dest = (word >> 21) & 0xF;
+    const unsigned saved = _mm_getcsr();
+    if (!kMacroNearest) _mm_setcsr((saved & ~0x6000u) | 0x6000u | 0x8000u | 0x0040u);
+    const __m128i a = _mm_loadu_si128(reinterpret_cast<const __m128i*>(c.vf[fs]));
+    __m128i b;
+    if (f.operand == 6) b = _mm_loadu_si128(reinterpret_cast<const __m128i*>(c.vf[ft]));
+    else b = _mm_set1_epi32(int(f.operand < 4 ? c.vf[ft][f.operand] : f.operand == 4 ? c.vc[kRegQ] : c.vc[kRegI]));
+    const __m128i acc = _mm_loadu_si128(reinterpret_cast<const __m128i*>(c.vacc));
+    __m128i r;
+    switch (f.op) {
+        case kAdd: r = MacroLanes<kAdd>(a, b, acc); break;
+        case kSub: r = MacroLanes<kSub>(a, b, acc); break;
+        case kMul: r = MacroLanes<kMul>(a, b, acc); break;
+        case kMadd: r = MacroLanes<kMadd>(a, b, acc); break;
+        case kMsub: r = MacroLanes<kMsub>(a, b, acc); break;
+        case kMax_: r = MacroLanes<kMax_>(a, b, acc); break;
+        default: r = MacroLanes<kMini>(a, b, acc); break;
+    }
+    u32 out[4];
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(out), r);
+    u32* to = f.to_acc ? c.vacc : fd ? c.vf[fd] : nullptr;
+    if (to)
+        for (int lane = 0; lane < 4; ++lane)
+            if (dest & (8u >> lane)) to[lane] = out[lane];
+    if (!kMacroNearest) _mm_setcsr(saved);
+}
+#endif
+
+inline void Cop2(Context& c, u32 word) {
+#if PS2RT_VU_SSE
+    const FmacForm f = FmacFormOf(word);
+    if (f.valid) {
+        MacroFmac(c, word, f);
+        return;
+    }
+#endif
+    Cop2Slow(c, word);
+}
 
 }  // namespace lifted
 

@@ -51,7 +51,15 @@ extern bool ram_watched;
 /* The scratchpad's 16 KB at 0x70000000, given the same way (or null). */
 extern u8* scratchpad_base;
 
-inline u8* RamPointer(u32 address, u32 size) {
+#if defined(_MSC_VER) && !defined(__clang__)
+#define PS2RT_NOINLINE __declspec(noinline)
+#else
+#define PS2RT_NOINLINE __attribute__((noinline))
+#endif
+
+/* Every address but main RAM's own: the kernel segments' and uncached
+   mirrors, the scratchpad, an access running off the end. */
+PS2RT_NOINLINE inline u8* RamPointerElsewhere(u32 address, u32 size) {
     if (address - 0x80000000u < 0x40000000u) address &= 0x1FFFFFFFu;
     const u32 window = address >> 28;
     if (window == 7) {
@@ -61,6 +69,16 @@ inline u8* RamPointer(u32 address, u32 size) {
     if (!ram_base || (window != 0 && window != 2 && window != 3)) return nullptr;
     const u32 offset = address & 0x0FFFFFFFu;
     return offset + size <= (32u << 20) ? ram_base + offset : nullptr;
+}
+
+/* Main RAM at 0 - nearly every access the game makes - in one comparison;
+   the rest as RamPointerElsewhere has them (a fifth of the EE's time in a
+   race was spent here, every load and store through all of it). */
+inline u8* RamPointer(u32 address, u32 size) {
+    if (address <= (32u << 20) - size && ram_base) return ram_base + address;
+    // The scratchpad (the game builds its packets there): one more.
+    if (address - 0x70000000u <= 0x4000u - size && scratchpad_base) return scratchpad_base + (address - 0x70000000u);
+    return RamPointerElsewhere(address, size);
 }
 
 template <typename T>

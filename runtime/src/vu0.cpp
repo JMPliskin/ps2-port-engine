@@ -204,7 +204,7 @@ void RunFmac(Context& c, const FmacOp& f) {
    EE code, which runs with the host's default (to nearest).
    PS2RT_EE_ROUND_NEAREST=1 leaves it to nearest, as emu.py's interpreter
    (eefpu.cpp: what verification compares against). */
-const bool kMacroNearest = std::getenv("PS2RT_EE_ROUND_NEAREST") != nullptr;
+extern const bool kMacroNearest = std::getenv("PS2RT_EE_ROUND_NEAREST") != nullptr;
 
 struct MacroRounding {
     unsigned saved = _mm_getcsr();
@@ -212,7 +212,7 @@ struct MacroRounding {
     ~MacroRounding() { if (!kMacroNearest) _mm_setcsr(saved); }
 };
 
-void Cop2(Context& c, u32 word) {
+void Cop2Slow(Context& c, u32 word) {
     MacroRounding rounding;
     const u32 fd = (word >> 6) & 0x1F, fs = (word >> 11) & 0x1F, ft = (word >> 16) & 0x1F;
     const u32 dest = (word >> 21) & 0xF;
