@@ -223,13 +223,21 @@ struct Bridge {
     std::list<u64> texture_lru;     // most recent first
     // The textures over each page (32 blocks) of local memory, for what a
     // write there invalidates: scanning all 2,048 on every write was 3% of a
-    // race. Elements of `textures` stay put until erased.
-    std::vector<std::vector<Cached*>> texture_pages = std::vector<std::vector<Cached*>>(512);
+    // race. Elements of `textures` stay put until erased. Each with its
+    // blocks (set before it is indexed, and never after): a write looks
+    // through the list without going to each texture - a cache miss each,
+    // 4% of the GS thread in splitscreen.
+    struct PageTexture {
+        u32 begin, end;
+        Cached* t;
+        bool operator==(const Cached* other) const { return t == other; }
+    };
+    std::vector<std::vector<PageTexture>> texture_pages = std::vector<std::vector<PageTexture>>(512);
     void IndexTexture(Cached* t, bool add) {
         for (u32 page = t->begin >> 5; page <= ((std::max(t->end, t->begin + 1) - 1) >> 5) && page < 512; ++page) {
-            std::vector<Cached*>& list = texture_pages[page];
+            std::vector<PageTexture>& list = texture_pages[page];
             if (add) {
-                list.push_back(t);
+                list.push_back(PageTexture{t->begin, t->end, t});
             } else {
                 auto found = std::find(list.begin(), list.end(), t);
                 if (found != list.end()) {
@@ -463,8 +471,8 @@ void Sync(Bridge& b, u32 begin, u32 end, bool write, const Owned* except = nullp
     }
     if (write && begin < end)
         for (u32 page = begin >> 5; page <= ((end - 1) >> 5) && page < 512; ++page)
-            for (Cached* t : b.texture_pages[page])
-                if (t->begin < end && begin < t->end) t->valid = false;
+            for (const Bridge::PageTexture& t : b.texture_pages[page])
+                if (t.begin < end && begin < t.end) t.t->valid = false;
 }
 
 /* An image transfer about to write blocks [begin, end) (Gs::on_write): the
@@ -499,8 +507,8 @@ void SyncWrite(Bridge& b, u32 begin, u32 end, const u8* cover) {
         else o.stale_beyond = true;
     }
     for (u32 page = first >> 5; page <= ((last - 1) >> 5) && page < 512; ++page)
-        for (Cached* t : b.texture_pages[page])
-            if (t->begin < last && first < t->end) t->valid = false;
+        for (const Bridge::PageTexture& t : b.texture_pages[page])
+            if (t.begin < last && first < t.end) t.t->valid = false;
 }
 
 /* The pending patch (Bridge::Patch): each pixel of the transfer's rectangle

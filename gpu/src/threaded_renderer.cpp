@@ -51,9 +51,22 @@ public:
         const std::uint32_t n = std::uint32_t(count);
         // The images its batch makes (VulkanGsRenderer::Flush): its target,
         // and its depth buffer as large as the target was made.
+        // (The last ones kept: a draw's target and depth buffer are nearly
+        // always the last draw's, and the sets' hashing for each was 5% of
+        // the GS thread in splitscreen.)
         if (n >= 3) {
-            const Size made = Made(state.fbp, state.fbw, state.psm, state.width, state.height);
-            if (state.depth) depths_.insert(DepthKey(state.zbp, made.w, std::min(made.h, kDepthRows)));
+            const std::uint64_t target = TargetKey(state.fbp, state.fbw, state.psm);
+            if (target != last_target_) {
+                last_made_ = Made(state.fbp, state.fbw, state.psm, state.width, state.height);
+                last_target_ = target;
+            }
+            if (state.depth) {
+                const std::uint64_t depth = DepthKey(state.zbp, last_made_.w, std::min(last_made_.h, kDepthRows));
+                if (depth != last_depth_) {
+                    depths_.insert(depth);
+                    last_depth_ = depth;
+                }
+            }
         }
         if (has_last_ && std::memcmp(&state, &last_, sizeof state) == 0) {
             Op(kDrawSame, sizeof n + n * sizeof(GsVertex));
@@ -235,6 +248,7 @@ public:
         if (inner_->Scale() != scale_) {            // every image dropped
             targets_.clear();
             depths_.clear();
+            last_target_ = last_depth_ = ~std::uint64_t(0);
         }
         scale_ = inner_->Scale();
     }
@@ -510,6 +524,8 @@ private:
     std::uint32_t scale_ = 1;
     std::unordered_map<std::uint64_t, Size> targets_;
     std::unordered_set<std::uint64_t> depths_;
+    std::uint64_t last_target_ = ~std::uint64_t(0), last_depth_ = ~std::uint64_t(0);
+    Size last_made_{};
     std::atomic<unsigned> wrong_{0};
     // PS2HOST_GPU_THREAD_LOG: the waits for the queue, by what waited.
     static constexpr int kWhys = 14;
