@@ -1234,31 +1234,48 @@ bool ZIntoColour(Bridge& s, Owned& target, const ps2gpu::GsDrawState& state, u32
     const int y1 = std::min(int(std::ceil(hy - 0.5f)), state.scissor_y1 + 1 - y_offset);
     if (x0 < 0 || y0 < 0) return false;
     if (x1 <= x0 || y1 <= y0) return true;
-    static WordPixels words;
-    const std::vector<u32>& pixel = words.For(target.fbp * 32, target.fbw, gs::PSMCT32, target.width, target.height);
-    auto where = [&](int x, int y, int* cx, int* cy) {
-        u32 nibble = 0;
-        const u32 p = pixel[(gs::Memory::Address(state.zbp * 32, state.fbw, u32(x), u32(y), zpsm, &nibble) >> 2) &
-                            ((1u << 20) - 1)];
-        if (!p) return false;
-        *cx = int((p - 1) & 0xFFFF);
-        *cy = int((p - 1) >> 16);
-        return true;
-    };
     // Each quarter of a page it reaches: its corners where the target has
-    // their memory, the same move for both.
+    // their memory, the same move for both - found once for each place (the
+    // map of the target's words is remade for each target, and splitscreen's
+    // two took turns: 15% of the GS thread).
     struct Piece { int x0, y0, x1, y1, dx, dy; };
-    std::vector<Piece> pieces;
-    for (int ty = y0 / 16 * 16; ty < y1; ty += 16)
-        for (int tx = x0 / 32 * 32; tx < x1; tx += 32) {
-            Piece q{std::max(x0, tx), std::max(y0, ty), std::min(x1, tx + 32), std::min(y1, ty + 16), 0, 0};
-            int ax, ay, bx, by;
-            if (!where(q.x0, q.y0, &ax, &ay) || !where(q.x1 - 1, q.y1 - 1, &bx, &by)) return false;
-            q.dx = ax - q.x0;
-            q.dy = ay - q.y0;
-            if (bx - (q.x1 - 1) != q.dx || by - (q.y1 - 1) != q.dy) return false;
-            pieces.push_back(q);
-        }
+    struct Found { bool ok; std::vector<Piece> pieces; };
+    static std::map<std::tuple<u32, u32, u32, u32, u32, u32, int, int, int, int>, Found> found;
+    const auto key = std::make_tuple(target.fbp, target.fbw, target.width | target.height << 16, state.zbp, state.fbw,
+                                     zpsm, x0, y0, x1, y1);
+    auto known = found.find(key);
+    if (known == found.end()) {
+        static WordPixels words;
+        const std::vector<u32>& pixel =
+            words.For(target.fbp * 32, target.fbw, gs::PSMCT32, target.width, target.height);
+        auto where = [&](int x, int y, int* cx, int* cy) {
+            u32 nibble = 0;
+            const u32 p = pixel[(gs::Memory::Address(state.zbp * 32, state.fbw, u32(x), u32(y), zpsm, &nibble) >> 2) &
+                                ((1u << 20) - 1)];
+            if (!p) return false;
+            *cx = int((p - 1) & 0xFFFF);
+            *cy = int((p - 1) >> 16);
+            return true;
+        };
+        Found f{true, {}};
+        for (int ty = y0 / 16 * 16; ty < y1 && f.ok; ty += 16)
+            for (int tx = x0 / 32 * 32; tx < x1 && f.ok; tx += 32) {
+                Piece q{std::max(x0, tx), std::max(y0, ty), std::min(x1, tx + 32), std::min(y1, ty + 16), 0, 0};
+                int ax, ay, bx, by;
+                if (!where(q.x0, q.y0, &ax, &ay) || !where(q.x1 - 1, q.y1 - 1, &bx, &by)) {
+                    f.ok = false;
+                    break;
+                }
+                q.dx = ax - q.x0;
+                q.dy = ay - q.y0;
+                if (bx - (q.x1 - 1) != q.dx || by - (q.y1 - 1) != q.dy) f.ok = false;
+                else f.pieces.push_back(q);
+            }
+        if (found.size() > 4096) found.clear();
+        known = found.emplace(key, std::move(f)).first;
+    }
+    if (!known->second.ok) return false;
+    const std::vector<Piece>& pieces = known->second.pieces;
     ps2gpu::GsDrawState zs;
     zs.fbp = target.fbp;
     zs.fbw = target.fbw;
