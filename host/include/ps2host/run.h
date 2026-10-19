@@ -574,6 +574,8 @@ void CloseAudio();
 /* ...and/or recorded to a WAV file (--audio-wav). */
 bool OpenWavDump(const std::string& path);
 void AudioFrames(const short* frames, unsigned count);
+/* Whether the SPU2's output goes anywhere (a device or --audio-wav). */
+bool AudioActive();
 
 }  // namespace ps2host
 

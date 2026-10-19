@@ -39,6 +39,7 @@ add_library(ps2host STATIC
     ${CMAKE_CURRENT_LIST_DIR}/src/iopheap.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/spu2.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/audio.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/music.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/vu.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/timers.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/pc_menu.cpp
@@ -71,12 +72,14 @@ target_link_libraries(ps2host PUBLIC ps2rt)
 
 # Texture packs (texture_pack.cpp): single headers, pinned by hash - xxHash
 # (BSD-2-Clause; PCSX2's names are XXH3 hashes), bcdec (MIT or Unlicense; DDS
-# BC1-BC7) and stb_image (MIT or public domain; PNG).
+# BC1-BC7) and stb_image (MIT or public domain; PNG). And for the host's music
+# (music.cpp), minimp3 (CC0: public domain; MP3).
 set(third_party_dir ${CMAKE_CURRENT_BINARY_DIR}/third_party)
 foreach(entry
         "xxhash.h|https://raw.githubusercontent.com/Cyan4973/xxHash/v0.8.3/xxhash.h|17973c0dc49d9854ca26caa191f0e12f7a424b68858d9a78de3860d959d85e4b"
         "bcdec.h|https://raw.githubusercontent.com/iOrange/bcdec/80859ed3b7afb1c527a2a99d70c61457bea72d0c/bcdec.h|134520764d96f70a27db814173616c89ad85db95fbd3328417c7a8c77e7ca189"
-        "stb_image.h|https://raw.githubusercontent.com/nothings/stb/2c980bb59875b0d32144a71867fbdebb2f77cd20/stb_image.h|594c2fe35d49488b4382dbfaec8f98366defca819d916ac95becf3e75f4200b3")
+        "stb_image.h|https://raw.githubusercontent.com/nothings/stb/2c980bb59875b0d32144a71867fbdebb2f77cd20/stb_image.h|594c2fe35d49488b4382dbfaec8f98366defca819d916ac95becf3e75f4200b3"
+        "minimp3.h|https://raw.githubusercontent.com/lieff/minimp3/afb604c06bc8beb145fecd42c0ceb5bda8795144/minimp3.h|5fb296a790734772b65a5514438cc06d14f24e539c13475ff2a7f737681c82c0")
     string(REPLACE "|" ";" parts "${entry}")
     list(GET parts 0 name)
     list(GET parts 1 url)

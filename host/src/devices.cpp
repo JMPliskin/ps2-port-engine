@@ -46,6 +46,7 @@
 #include "ps2host/ipu.h"
 #include "ps2host/memory.h"
 #include "ps2host/path3.h"
+#include "ps2host/music.h"
 #include "ps2host/run.h"
 #include "ps2host/settings.h"
 #include "ps2host/vif.h"
@@ -541,6 +542,7 @@ void RequestCapture() { g_capture_request = true; }
 
 void FrameDone(u64 frame) {
     FrameTimes(frame);
+    MusicBlank();
     timeline::Frame(frame);
     SampleFrame(frame);
     Vu::SnapshotFrame(frame);

@@ -45,6 +45,7 @@
 #include <thread>
 #include <vector>
 
+#include "ps2host/music.h"
 #include "ps2host/run.h"
 #include "ps2host/timeline.h"
 
@@ -408,8 +409,27 @@ bool OpenWavDump(const std::string& path) {
     return true;
 }
 
+bool AudioActive() {
+    Device& d = D();
+    return d.open || d.wav;
+}
+
 void AudioFrames(const short* frames, unsigned count) {
     Device& d = D();
+    // PS2HOST_MUSIC_TEST=file.mp3: that MP3 played over the game from its
+    // first sound (music.h's check).
+    static const bool music_test = [] {
+        if (const char* path = std::getenv("PS2HOST_MUSIC_TEST")) MusicPlay(path);
+        return true;
+    }();
+    (void)music_test;
+    // The host's music mixed in (music.h): into a copy, the SPU2's own as it is.
+    static thread_local std::vector<short> mixed;
+    if (MusicMixing()) {
+        mixed.assign(frames, frames + 2 * std::size_t(count));
+        MusicMix(mixed.data(), count);
+        frames = mixed.data();
+    }
     if (d.wav) {
         std::fwrite(frames, 4, count, d.wav);
         d.wav_frames += count;
