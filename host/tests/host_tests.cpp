@@ -1059,7 +1059,7 @@ void VuFastIsTheExactButFlags() {
     std::size_t count = 0;
     const ps2host::VuCompiled* programs = VuGeneratedPrograms(&count);
     u32 seed = 991;
-    u32 wrong = 0, runs = 0, flags_differ = 0;
+    u32 wrong = 0, runs = 0, flags_differ = 0, ended = 0;
     for (std::size_t i = 0; i < count; ++i) {
         const ps2host::VuCompiled& program = programs[i];
         if (!program.block_count || !program.fast_blocks) continue;
@@ -1089,7 +1089,12 @@ void VuFastIsTheExactButFlags() {
                 if (exact->clip != fast->clip) std::fprintf(stderr, "  clip\n");
                 if (std::memcmp(exact->data.data(), fast->data.data(), exact->data.size())) std::fprintf(stderr, "  data\n");
             }
-            if (!exact->SameState(*fast)) ++flags_differ;
+            // A run stopped by the limit ends in the interpreter (the last
+            // block does not fit), with the flags exact: only the others tell.
+            if (b < limit) {
+                ++ended;
+                if (!exact->SameState(*fast)) ++flags_differ;
+            }
         }
     }
     char what[160];
@@ -1097,8 +1102,9 @@ void VuFastIsTheExactButFlags() {
                   wrong, runs);
     Check(wrong == 0 && runs >= 100, what);
     // The fast blocks do leave the flags alone (else they were not taken).
-    std::snprintf(what, sizeof what, "VU fast blocks taken: the flags differ in %u of %u runs", flags_differ, runs);
-    Check(flags_differ > runs / 4, what);
+    std::snprintf(what, sizeof what, "VU fast blocks taken: the flags differ in %u of the %u runs that end themselves",
+                  flags_differ, ended);
+    Check(ended >= 50 && flags_differ > ended / 2, what);
 }
 
 void VuTimingIsVisible() {

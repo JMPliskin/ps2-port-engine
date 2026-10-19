@@ -180,16 +180,23 @@ PS2RT_VU_INLINE __m128i LanesSse(__m128i a, __m128i b, __m128i acc) {
         return _mm_or_si128(_mm_andnot_si128(take_b, a), _mm_and_si128(take_b, b));
     }
     const auto clean = [](__m128i v) { return Daz ? ClampLanes(v) : CleanLanes(v); };
+    // A result under DAZ and FTZ needs no cleaning: a VU run rounds toward
+    // zero too (VuRounding), and there the sum, difference or product of
+    // finite operands that overflows is the largest finite of its sign -
+    // what the clamp would give - never an infinity, and never a NaN; a
+    // denormal is flushed to a zero of its sign. (The clamp was ~15% of the
+    // race's VU1 time.)
+    const auto result = [](__m128i v) { return Daz ? v : CleanLanes(v); };
     if constexpr ((Known & 1) == 0) a = clean(a);
     if constexpr ((Known & 2) == 0) b = clean(b);
-    if constexpr (Op == kAdd) return clean(AsBits(_mm_add_ps(AsFloats(a), AsFloats(b))));
-    else if constexpr (Op == kSub) return clean(AsBits(_mm_sub_ps(AsFloats(a), AsFloats(b))));
-    else if constexpr (Op == kMul) return clean(AsBits(_mm_mul_ps(AsFloats(a), AsFloats(b))));
+    if constexpr (Op == kAdd) return result(AsBits(_mm_add_ps(AsFloats(a), AsFloats(b))));
+    else if constexpr (Op == kSub) return result(AsBits(_mm_sub_ps(AsFloats(a), AsFloats(b))));
+    else if constexpr (Op == kMul) return result(AsBits(_mm_mul_ps(AsFloats(a), AsFloats(b))));
     else if constexpr (Op == kMadd || Op == kMsub) {
-        const __m128i product = clean(AsBits(_mm_mul_ps(AsFloats(a), AsFloats(b))));
+        const __m128i product = result(AsBits(_mm_mul_ps(AsFloats(a), AsFloats(b))));
         const __m128 total = AsFloats((Known & 4) != 0 ? acc : clean(acc));
-        return clean(AsBits(Op == kMadd ? _mm_add_ps(total, AsFloats(product))
-                                        : _mm_sub_ps(total, AsFloats(product))));
+        return result(AsBits(Op == kMadd ? _mm_add_ps(total, AsFloats(product))
+                                         : _mm_sub_ps(total, AsFloats(product))));
     }
 }
 #endif

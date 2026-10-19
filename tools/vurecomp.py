@@ -556,11 +556,16 @@ class Flags:
         self.held = self.held[count:]
         return lines
 
-    def leaving(self, i: int) -> str:
+    def leaving(self, i: int, quiet: bool = False) -> str:
         """As the block leaves after pair i (its cycle then c_i + 1): those
-        landed by then (i - j >= 3) landed, the rest queued. Changes
-        nothing: the block goes on where it does not leave."""
-        certain = [(j, kind) for j, kind in self.held if i - j >= 3]
+        landed by then (i - j >= 3) landed, the rest queued - or all landed
+        where it goes on into a block that is `quiet`: one that reads no
+        flags in its first three pairs, nor leaves before them, so that
+        anything read after has landed (held flags land by c_i + 4, and its
+        third pair issues at c_i + 3 at the earliest), as Issue would have
+        landed them on the way. Changes nothing: the block goes on where it
+        does not leave."""
+        certain = [(j, kind) for j, kind in self.held if quiet or i - j >= 3]
         rest = self.held[len(certain):]
         return " ".join(self.land(certain) + self.queue(rest))
 
@@ -579,7 +584,8 @@ def leave_to(pc: int, chain: dict) -> str:
 
 def emit_pair(pc: int, lower: int, upper: int, mask: int, last: bool, index: int = 0,
               written: dict = None, clean: dict = None, dead_flags: bool = False,
-              after: tuple = None, no_flags: bool = False, chain: dict = None, fl: Flags = None) -> list:
+              after: tuple = None, no_flags: bool = False, chain: dict = None, fl: Flags = None,
+              quiet: set = frozenset()) -> list:
     """One pair, as Run runs it, then where the run goes: on to the next pair
     of the block, or (`last`, a branch taken, the program's end) back to the
     driver with s.pc. `index` is its place in the block and `written` where
@@ -703,6 +709,11 @@ def emit_pair(pc: int, lower: int, upper: int, mask: int, last: bool, index: int
     next_pc = (pc + 8) & mask
     body.append("++count;")
     leaving = fl.leaving(index) + " " if fl is not None and fl.held else ""
+    # Going on into a quiet block with nothing pending (no E bit here, no
+    # branch to follow): the held flags all landed (Flags.leaving).
+    calm = not end and not branch
+    landing_into = lambda to: (fl.leaving(index, to in quiet and calm and to in (chain or {})) + " "
+                               if fl is not None and fl.held else "")
     may_stop = after is None or bool(after[1] & 0x40000000)
     may_branch = after is None or is_branch(*after)[0]
     if may_stop:
@@ -717,7 +728,7 @@ def emit_pair(pc: int, lower: int, upper: int, mask: int, last: bool, index: int
         target = (pc - 8 + 8 + imm11(after[0]) * 8) & mask if static else None
         if target is not None:
             body.append("if (delayed != kNone) { s.pc = 0x%Xu; delayed = %s; %s%s }" %
-                        (target, new_delayed, leaving, leave_to(target, chain)))
+                        (target, new_delayed, landing_into(target), leave_to(target, chain)))
         else:
             body.append("if (delayed != kNone) { s.pc = delayed; delayed = %s; %s%s }" % (new_delayed, leaving, LEAVE))
     if branch:
@@ -725,7 +736,7 @@ def emit_pair(pc: int, lower: int, upper: int, mask: int, last: bool, index: int
     if last:
         body.append("s.pc = 0x%Xu;" % next_pc)
         if leaving:
-            body.append(leaving.strip())
+            body.append(landing_into(next_pc).strip())
         body.append(leave_to(next_pc, chain))
     out += ["        " + line for line in body]
     out.append("    }")
@@ -745,18 +756,25 @@ def is_branch(lower: int, upper: int):
 
 def blocks_of(pairs: dict, entries: list, mask: int) -> list:
     """The program as blocks - [[pc, ...], ...] - each entered at its first
-    pair only: where runs start, branch targets, the pair after a branch's
-    delay slot, the start of each run of code. A block ends at a delay slot,
-    at the pair after an E bit and where code or a leader breaks it."""
+    pair only: where runs start, branch targets, the pair after an
+    unconditional branch's delay slot (a return's place), the start of each
+    run of code. A block ends at an unconditional branch's delay slot, at the
+    pair after an E bit and where code or a leader breaks it. A conditional
+    branch does not end it: the block goes on where it is not taken, and
+    leaves after the delay slot where it is (a side exit) - so what the
+    generator knows (the fields written, the clean registers, the flags
+    held) goes on with it, where a block of its own started knowing
+    nothing: the race's clipping loops were blocks of two and three pairs."""
     leaders = set(e for e in entries if e in pairs)
     for pc, (lower, upper) in pairs.items():
-        branch, static, _ = is_branch(lower, upper)
+        branch, static, conditional = is_branch(lower, upper)
         if branch:
             if static:
                 target = (pc + 8 + imm11(lower) * 8) & mask
                 if target in pairs:
                     leaders.add(target)
-            leaders.add((pc + 16) & mask)
+            if not conditional:
+                leaders.add((pc + 16) & mask)
         if upper & 0x40000000:
             leaders.add((pc + 16) & mask)
     blocks = []
@@ -768,7 +786,8 @@ def blocks_of(pairs: dict, entries: list, mask: int) -> list:
         blocks[-1].append(pc)
         lower, upper = pairs[pc]
         before = pairs.get((pc - 8) & mask)
-        ends_block = bool(before and (is_branch(*before)[0] or before[1] & 0x40000000))
+        ends_block = bool(before and ((is_branch(*before)[0] and not is_branch(*before)[2]) or
+                                      before[1] & 0x40000000))
         previous = pc
     return blocks
 
@@ -793,15 +812,19 @@ def dead_flags(block: list, pairs: dict) -> set:
     issues, and a pair takes one cycle at least, so from j + 4 on - and
     after the block, whatever comes next - the landed flags are j's or
     later ones; before that a reader might see i's. The block runs whole
-    (it does not start where it could not: emit_block), so j does run.
-    STATUS's sticky bits are still gathered."""
+    (it does not start where it could not: emit_block) but for its side
+    exits (a conditional branch taken, after its delay slot k): none may
+    come from i to three pairs after j - before j, j does not run; after
+    j, its flags may not have landed. STATUS's sticky bits are still
+    gathered."""
     n = len(block)
+    exits = [k for k in range(1, n) if is_branch(*pairs[block[k - 1]])[0]]
     dead = set()
     for i in range(n):
         if not sets_mac(pairs[block[i]][1]):
             continue
         j = next((j for j in range(i + 1, n) if sets_mac(pairs[block[j]][1])), None)
-        if j is None or j >= n - 3:
+        if j is None or j >= n - 3 or any(i <= k < j + 3 for k in exits):
             continue
         if not any(reads_mac(*pairs[block[k]]) for k in range(i + 1, j + 4)):
             dead.add(i)
@@ -900,8 +923,24 @@ def fast_drops(unit: int, pairs: dict, mask: int) -> set:
     return {pc for pc, (lower, upper) in pairs.items() if sets_mac(upper) and not mac_live(pairs, mask, pc)}
 
 
+def reads_flags(lower: int, upper: int) -> bool:
+    """FCEQ ... FCGET, FSEQ ... FSOR, FMEQ ... FMOR: the lowers that read or
+    set the landed flags."""
+    return not (upper & 0x80000000) and 0x10 <= (lower >> 25) <= 0x1C
+
+
+def quiet_blocks(blocks: list, pairs: dict) -> set:
+    """The blocks (by start) that read no landed flags in their first three
+    pairs and run them all: three pairs or more, no branch first (a block
+    leaves after its first pair with an E bit or a branch pending - which
+    Flags.leaving's caller rules out - after a branch's delay slot, or
+    after its last)."""
+    return {b[0] for b in blocks if len(b) >= 3 and not is_branch(*pairs[b[0]])[0] and
+            not any(reads_flags(*pairs[pc]) for pc in b[:3])}
+
+
 def emit_block(name: str, block: list, pairs: dict, mask: int, drops: set = frozenset(),
-               chain: dict = None) -> list:
+               chain: dict = None, quiet: set = frozenset()) -> list:
     # The run's state and the cycle as locals, written back where the block
     # leaves (LEAVE): nothing the block does can reach them through memory.
     # A block starts only with as many pairs left to the limit as it has
@@ -923,7 +962,7 @@ def emit_block(name: str, block: list, pairs: dict, mask: int, drops: set = froz
     head = len(out)
     for i, pc in enumerate(block):
         out += emit_pair(pc, pairs[pc][0], pairs[pc][1], mask, i == len(block) - 1, i, written, clean,
-                         i in dead, pairs[block[i - 1]] if i else None, pc in drops, chain, fl)
+                         i in dead, pairs[block[i - 1]] if i else None, pc in drops, chain, fl, quiet)
     out[head:head] = ["    " + line for line in fl.declared]
     out.append("}")
     # The blocks it goes on into, declared before it (they may be in another file).
@@ -996,12 +1035,13 @@ def generate_files(programs: list, what: str, single: str = None) -> dict:
         names = []
         drops = fast_drops(unit, pairs, mask)
         fast = bool(drops)
+        quiet = quiet_blocks(blocks, pairs)
         for block in blocks:
             block_name = "%sBlock%04X" % (name, block[0])
             names.append((block[0], block_name))
             for variant, dropped in [("", frozenset())] + ([("Fast", drops)] if fast else []):
                 chain = {b[0]: "%sBlock%04X%s" % (name, b[0], variant) for b in blocks}
-                code = emit_block(block_name + variant, block, pairs, mask, dropped, chain)
+                code = emit_block(block_name + variant, block, pairs, mask, dropped, chain, quiet)
                 if single is None and len(chunks[-1]) + len(code) > LINES_PER_FILE and chunks[-1]:
                     chunks.append([])
                 chunks[-1] += code + [""]
