@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <emmintrin.h>
 #include <cstdint>
 #include <vector>
 
@@ -144,6 +145,9 @@ struct PageTable {
     u32 width, height;                  // the page, in pixels
     bool half_width;                    // pages per row are BW / 2 (PSMT8, PSMT4)
     std::vector<std::uint16_t> offset;
+    // 32-bit pixels whose every aligned eight in a row lie as four pairs, 16
+    // bytes apart (a column's row: 0 1 4 5 8 9 12 13 - checked as built).
+    bool pairs = false;
 };
 
 PageTable Build(u32 psm, u32 width, u32 height, bool half_width) {
@@ -166,6 +170,17 @@ struct PageTables {
     PageTable t8 = Build(PSMT8, 128, 64, true), t4 = Build(PSMT4, 128, 128, true);
     const PageTable* by_psm[64] = {};
     PageTables() {
+        for (PageTable* t : {&ct32, &z32}) {
+            static constexpr std::uint16_t kGroup[8] = {0, 4, 16, 20, 32, 36, 48, 52};
+            bool pairs = t->width % 8 == 0;
+            for (u32 y = 0; y < t->height && pairs; ++y)
+                for (u32 x = 0; x < t->width && pairs; x += 8) {
+                    const std::uint16_t* row = &t->offset[std::size_t(y) * t->width + x];
+                    pairs = row[0] % 64 == 0 || row[0] % 64 == 8;
+                    for (u32 j = 0; j < 8 && pairs; ++j) pairs = row[j] == row[0] + kGroup[j];
+                }
+            t->pairs = pairs;
+        }
         for (u32 psm : {PSMCT32, PSMCT24, PSMT8H, PSMT4HL, PSMT4HH}) by_psm[psm] = &ct32;
         by_psm[PSMZ32] = by_psm[PSMZ24] = &z32;
         by_psm[PSMCT16] = &ct16;
@@ -252,7 +267,24 @@ void StoreRun(u8* bytes, const PageTable& t, u32 bp, u32 bw, u32 x, u32 y, const
         const u32 px = x + i;
         const u32 page = Page(bp, page_bw, px / t.width, page_y);
         const u32 in_page = std::min(count - i, t.width - px % t.width);
-        for (u32 k = 0, wx = px % t.width; k < in_page; ++k, ++wx)
+        u32 k = 0, wx = px % t.width;
+        if constexpr (Psm == PSMCT32 || Psm == PSMZ32) {
+            // Eight at a time where they lie as pairs (PageTable::pairs): two
+            // loads and four stores, not eight of each and the offsets.
+            if (t.pairs && in_page >= 8) {
+                for (; k < in_page && (wx & 7); ++k, ++wx) Store<Psm>(bytes, row[wx], page, values[i + k]);
+                for (; k + 8 <= in_page; k += 8, wx += 8) {
+                    u8* p = &bytes[(page * 256 + row[wx]) & kMask];
+                    const __m128i low = _mm_loadu_si128(reinterpret_cast<const __m128i*>(values + i + k));
+                    const __m128i high = _mm_loadu_si128(reinterpret_cast<const __m128i*>(values + i + k + 4));
+                    _mm_storel_epi64(reinterpret_cast<__m128i*>(p), low);
+                    _mm_storel_epi64(reinterpret_cast<__m128i*>(p + 16), _mm_unpackhi_epi64(low, low));
+                    _mm_storel_epi64(reinterpret_cast<__m128i*>(p + 32), high);
+                    _mm_storel_epi64(reinterpret_cast<__m128i*>(p + 48), _mm_unpackhi_epi64(high, high));
+                }
+            }
+        }
+        for (; k < in_page; ++k, ++wx)
             Store<Psm>(bytes, row[wx], page, values[i + k]);
         i += in_page;
     }
