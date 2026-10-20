@@ -78,6 +78,10 @@ public:
 
     /* Fullscreen (borderless, the desktop's resolution) or a window. */
     virtual void SetFullscreen(bool on) { (void)on; }
+    /* Fullscreen at the desktop's own refresh (a high frame rate that
+       follows the screen: 144 Hz kept), not one that 60 divides evenly (120
+       Hz on a 144 Hz screen, the default); taken again now if fullscreen. */
+    virtual void SetKeepRefresh(bool keep) { (void)keep; }
     virtual bool Fullscreen() const { return false; }
     /* The picture's shape on the screen, width over height: 4:3 as a
        television showed it (the default), 16:9, or 0 - the window's own

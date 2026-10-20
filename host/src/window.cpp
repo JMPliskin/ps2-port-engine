@@ -201,6 +201,7 @@ bool OpenWindow(const wchar_t* title, int width, int height) {
     g_display = ps2gpu::CreateVulkanDisplay(narrow.c_str(), width, height, &error);
     if (g_display) {
         Note("window", "window: Vulkan on " + g_display->Describe());
+        g_display->SetKeepRefresh(Setting("frame_rate", "60") == "display");
         if (SettingOn("fullscreen")) g_display->SetFullscreen(true);
         ApplyCursorArt();
         g_display->SetPresentObserver([](std::uint64_t due_ns, std::uint64_t shown_ns, bool dropped) {
@@ -624,6 +625,13 @@ bool WindowFullscreen() {
     if (g_display) return g_display->Fullscreen();
 #endif
     return SettingOn("fullscreen");
+}
+
+void SetWindowKeepRefresh(bool keep) {
+#ifdef PS2HOST_VULKAN
+    if (g_display) g_display->SetKeepRefresh(keep);
+#endif
+    (void)keep;
 }
 
 float WindowRefreshRate() {

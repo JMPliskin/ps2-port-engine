@@ -337,6 +337,10 @@ bool WindowFullscreen();
 /* The refresh rate of the screen the window is on, in Hz (0 when not known,
    or no window). */
 float WindowRefreshRate();
+/* Fullscreen at the screen's own refresh (Display::SetKeepRefresh; the
+   window opens so when the "frame_rate" setting is "display"), not one 60
+   divides evenly. */
+void SetWindowKeepRefresh(bool keep);
 /* Vertical sync on or off (the "vsync" setting): no tearing, or the least
    delay. */
 void SetWindowVsync(bool on);

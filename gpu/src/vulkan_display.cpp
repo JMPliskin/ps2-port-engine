@@ -122,6 +122,12 @@ public:
     }
     bool Vsync() const override { return vsync_; }
     float RefreshRate() const override { return refresh_hz_.load(std::memory_order_relaxed); }
+    void SetKeepRefresh(bool keep) override {
+        if (keep_refresh_ == keep) return;
+        keep_refresh_ = keep;
+        if (Fullscreen()) SetFullscreen(true);
+    }
+    bool keep_refresh_ = false;         // SetKeepRefresh's
     std::atomic<float> refresh_hz_{0.0f};       // Pump's
     unsigned refresh_looks_ = 0;
     Pacing TakePacing() override;
@@ -1639,11 +1645,15 @@ const SDL_DisplayMode* EvenMode(SDL_Window* window) {
 void VulkanDisplay::SetFullscreen(bool on) {
     if (!window_) return;
     if (on) {
-        const SDL_DisplayMode* mode = EvenMode(window_);
+        const SDL_DisplayMode* mode = keep_refresh_ ? nullptr : EvenMode(window_);
         SDL_SetWindowFullscreenMode(window_, mode);
         if (mode)
             std::fprintf(stderr, "[display] fullscreen at %dx%d, %.2f Hz\n", mode->w, mode->h,
                          double(mode->refresh_rate));
+        else if (keep_refresh_)
+            if (const SDL_DisplayMode* desktop = SDL_GetDesktopDisplayMode(SDL_GetDisplayForWindow(window_)))
+                std::fprintf(stderr, "[display] fullscreen at the screen's own %.2f Hz (frame rate DISPLAY)\n",
+                             double(desktop->refresh_rate));
     }
     SDL_SetWindowFullscreen(window_, on);
     fullscreen_cursor_stale_ = true;        // the system's pointer: hidden in fullscreen (UpdateCursor)
