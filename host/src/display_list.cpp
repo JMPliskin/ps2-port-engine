@@ -31,7 +31,7 @@ u32 DataWords(u32 code, bool& unpack) {
     }
 }
 
-bool Plausible(float v) { return v == 0.0f || (std::fabs(v) > 1e-6f && std::fabs(v) < 1e6f); }
+bool Plausible(float v) { return v == 0.0f || (std::fabs(v) > 1e-6f && std::fabs(v) < 1e9f); }
 
 }  // namespace
 

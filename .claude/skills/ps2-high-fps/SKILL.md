@@ -1,6 +1,6 @@
 ---
 name: ps2-high-fps
-description: Add high frame rates (120, the screen's own rate) to a ported PS2 game with the engine's ps2host/high_fps.h - the game kept at its own 60 steps a second, the pictures between its steps drawn with its transforms and camera placed between them. How to find a game's step loop, its once-a-frame logic, its transforms and its camera's inputs, the hooks to call, the traps, and the checks that prove nothing runs faster and nothing jumps. Use when adding or debugging high fps in any game under games/<name>/port.
+description: Add high frame rates (120, the screen's own rate) to a ported PS2 game with the engine's ps2host/high_fps.h - the game kept at its own 60 steps a second, the pictures between its steps drawn with its transforms and camera placed between them (or, for a game at 30 whose drawing is inside its updates, its display lists blended). How to find a game's step loop, its once-a-frame logic, its transforms and its camera's inputs, the hooks to call, the traps, and the checks that prove nothing runs faster and nothing jumps. Use when adding or debugging high fps in any game under games/<name>/port.
 ---
 
 # High frame rates for a PS2 port
@@ -141,10 +141,33 @@ each blank from 0x0029FA08 by its own blank handler).
    (Outbreak: black - its scene is drawn *inside* the update functions, calls
    3-24, not after them; skipping the whole game task left the last picture
    on screen).
-3. Where drawing is inside the updates, high fps needs those split by hand
-   (each subsystem's draw apart from its step), or an engine-level
-   technique (replaying the last picture's draw with its matrices placed) -
-   a project of its own, decided with the user.
+3. Where drawing is inside the updates: **blend the display lists**
+   (`ps2host/display_list.h`; Outbreak's port/high_fps.cpp is the example).
+   `PS2HOST_TRACE_KICKS=<frame>` shows where the lists are sent (Outbreak:
+   0x0018D470, at the next frame's start: 3 VIF1 chains a step, ~1.4M words).
+   Keep each step's chains as sent (`SetVif1ChainFilter`, within that
+   function only), and send every picture's as `BlendVif1Chains(before, now,
+   HighFpsPictureTime())` - a frame that did not step sends the last step's
+   so in place of its own. Before relying on it, dump two steps' chains and
+   classify the words that differ (UNPACK floats blended, the rest): Outbreak's
+   lists match code for code to their end and only ~9,000 floats differ
+   (matrices; vertices are model space) - and 228 of them, a projection's
+   translations up to 2e7, were left out by a float bound of 1e6: the back
+   wall and the mirror jumped back each in-between picture (now 1e9).
+   The cut must be large (100000: screen matrices with 2048-scale terms).
+4. Configure `steps_per_blank = 0.5`, `default_rate = "30"`: the engine's
+   rate, steps and picture time then work for 60, 120 and the screen's (the
+   F9 panel's FRAME RATE row shows 30/60/120/screen for such a game). Set the
+   interval to 0 above 30 and run the step (Outbreak: the task system
+   0x001B7CB0) only when `HighFpsSteps` says - never by parity: the game
+   sometimes waits two frames itself.
+5. Gate it to gameplay (`HighFpsFrameSteps` only in the gameplay mode): menus
+   and movies stay at the console's rate - check: the menu regressions with
+   `PS2HOST_FRAME_RATE=120` give the recorded CRCs.
+
+Outbreak's measures (the walk): a step's picture at 120 matches the 30 run's
+(0.01); every picture moves by an even amount; real time 0.58 -> ~1 core at
+60 (the blend of 1.4M words a picture, the VIF1 worker 15 -> 30%).
 
 ## Checks (all of them, every change)
 

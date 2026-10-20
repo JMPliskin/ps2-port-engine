@@ -503,7 +503,7 @@ int HighFpsSteps(unsigned blanks, int most) {
 
 void HighFpsBlank() {
     if (g_rate <= 0.0 || ++g_blanks_since <= g_game.gone * std::max(1, int(g_rate / 60.0 + 0.5))) return;
-    std::fprintf(stderr, "[high fps] 60 pictures a second (the race's frames stopped)\n");
+    std::fprintf(stderr, "[high fps] %.0f pictures a second (the game's frames stopped)\n", Own());
     g_cap = 0.0;
     g_placed.clear();
     for (CameraValues& v : g_cameras) v.placing = false;

@@ -10,9 +10,9 @@
  * the same code, its data are the same size and the code is an UNPACK
  * (data for VU memory: matrices, vertices, the values a VU program
  * transforms with), each pair of words that are both plausible floats (0, or
- * 1e-6 to 1e6 either way: a GIF tag, a count, a colour read as a far smaller
- * or odd float) and differ by less than `cut` is blended; every other word is
- * the newer list's. From the first code that differs on, the newer list's
+ * 1e-6 to 1e9 either way - a projection's translations reach 2e7: a GIF
+ * tag, a count, a colour read as a far smaller or odd float) and differ by
+ * less than `cut` is blended; every other word is the newer list's. From the first code that differs on, the newer list's
  * alone (what moved in or out of the picture).
  */
 
