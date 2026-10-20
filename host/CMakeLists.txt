@@ -22,6 +22,7 @@ add_library(ps2host STATIC
     ${CMAKE_CURRENT_LIST_DIR}/src/ipu.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/vif1_worker.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/threads.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/high_fps.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/iop.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/sdk.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/disc.cpp

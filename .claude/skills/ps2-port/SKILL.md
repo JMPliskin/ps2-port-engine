@@ -181,6 +181,9 @@ overridden while those are used). Art the port ships is
 original (a script draws it: `port/tools/make_cursor.py`, `make_icon_art.py`,
 `make_prompts.py`),
 never the game's.
+High frame rates (120, the screen's own: the game at its own 60 steps, the
+pictures between placed): `ps2host/high_fps.h`, the game's places found and
+checked as skill `ps2-high-fps` says.
 
 ## Working autonomously
 
