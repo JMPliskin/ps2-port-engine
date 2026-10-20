@@ -142,6 +142,11 @@ if(MSVC)
             list(GET profile_runtime 0 profile_runtime)
             target_link_libraries(ps2rt PUBLIC ${profile_runtime})
         else()
+            # The profile's time in the flags: a new profile builds everything
+            # again (Ninja does not follow the file - objects from the last
+            # one beside the new one's would not link with ThinLTO).
+            file(TIMESTAMP ${PS2HOST_PGO} pgo_time "%Y%m%d%H%M%S")
+            target_compile_definitions(ps2rt PUBLIC PS2HOST_PGO_TIME=${pgo_time})
             target_compile_options(ps2rt PUBLIC "/clang:-fprofile-instr-use=${PS2HOST_PGO}"
                                    /clang:-Wno-profile-instr-unprofiled /clang:-Wno-profile-instr-out-of-date
                                    /clang:-Wno-backend-plugin)
