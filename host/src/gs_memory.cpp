@@ -21,6 +21,9 @@
 #include <algorithm>
 #include <cstring>
 #include <emmintrin.h>
+#if defined(__SSE4_1__) || defined(__AVX2__)
+#include <smmintrin.h>
+#endif
 #include <cstdint>
 #include <vector>
 
@@ -148,6 +151,10 @@ struct PageTable {
     // 32-bit pixels whose every aligned eight in a row lie as four pairs, 16
     // bytes apart (a column's row: 0 1 4 5 8 9 12 13 - checked as built).
     bool pairs = false;
+    // 16-bit pixels whose every aligned sixteen in a row lie as four runs of
+    // eight bytes, 16 apart, each two pixels and the two eight after them
+    // (a column's row: 0 2 8 10 16 18 24 26 1 3 9 11 ... - checked as built).
+    bool pairs16 = false;
 };
 
 PageTable Build(u32 psm, u32 width, u32 height, bool half_width) {
@@ -180,6 +187,17 @@ struct PageTables {
                     for (u32 j = 0; j < 8 && pairs; ++j) pairs = row[j] == row[0] + kGroup[j];
                 }
             t->pairs = pairs;
+        }
+        for (PageTable* t : {&ct16, &ct16s, &z16, &z16s}) {
+            static constexpr std::uint16_t kGroup16[16] = {0, 4, 16, 20, 32, 36, 48, 52, 2, 6, 18, 22, 34, 38, 50, 54};
+            bool pairs = t->width % 16 == 0;
+            for (u32 y = 0; y < t->height && pairs; ++y)
+                for (u32 x = 0; x < t->width && pairs; x += 16) {
+                    const std::uint16_t* row = &t->offset[std::size_t(y) * t->width + x];
+                    pairs = row[0] % 64 <= 8;
+                    for (u32 j = 0; j < 16 && pairs; ++j) pairs = row[j] == row[0] + kGroup16[j];
+                }
+            t->pairs16 = pairs;
         }
         for (u32 psm : {PSMCT32, PSMCT24, PSMT8H, PSMT4HL, PSMT4HH}) by_psm[psm] = &ct32;
         by_psm[PSMZ32] = by_psm[PSMZ24] = &z32;
@@ -268,6 +286,30 @@ void StoreRun(u8* bytes, const PageTable& t, u32 bp, u32 bw, u32 x, u32 y, const
         const u32 page = Page(bp, page_bw, px / t.width, page_y);
         const u32 in_page = std::min(count - i, t.width - px % t.width);
         u32 k = 0, wx = px % t.width;
+#if defined(__SSE4_1__) || defined(__AVX2__)
+        if constexpr (Psm == PSMCT16) {
+            // Sixteen at a time where they lie so (PageTable::pairs16): the
+            // values packed to halfwords, each eight interleaved with the
+            // eight after it, four stores of eight bytes.
+            if (t.pairs16 && in_page >= 16) {
+                for (; k < in_page && (wx & 15); ++k, ++wx) Store<Psm>(bytes, row[wx], page, values[i + k]);
+                for (; k + 16 <= in_page; k += 16, wx += 16) {
+                    u8* p = &bytes[(page * 256 + row[wx]) & kMask];
+                    // (Each value's low half, as Store keeps it: masked, not saturated.)
+                    const __m128i* in = reinterpret_cast<const __m128i*>(values + i + k);
+                    const __m128i half = _mm_set1_epi32(0xFFFF);
+                    const auto at = [&](int n) { return _mm_and_si128(_mm_loadu_si128(in + n), half); };
+                    const __m128i low = _mm_packus_epi32(at(0), at(1));
+                    const __m128i high = _mm_packus_epi32(at(2), at(3));
+                    const __m128i first = _mm_unpacklo_epi16(low, high), second = _mm_unpackhi_epi16(low, high);
+                    _mm_storel_epi64(reinterpret_cast<__m128i*>(p), first);
+                    _mm_storel_epi64(reinterpret_cast<__m128i*>(p + 16), _mm_unpackhi_epi64(first, first));
+                    _mm_storel_epi64(reinterpret_cast<__m128i*>(p + 32), second);
+                    _mm_storel_epi64(reinterpret_cast<__m128i*>(p + 48), _mm_unpackhi_epi64(second, second));
+                }
+            }
+        }
+#endif
         if constexpr (Psm == PSMCT32 || Psm == PSMZ32) {
             // Eight at a time where they lie as pairs (PageTable::pairs): two
             // loads and four stores, not eight of each and the offsets.
