@@ -375,6 +375,34 @@ void GsLoadsACsm2Clut() {
     Check(ok, "a CSM2 CLUT loads from TEXCLUT's row, in order");
 }
 
+// UNPACKs given at once (UnpackRun's runs: V4-32 a block at a time, the
+// rest an element at a time) store what the same words a word at a time do
+// (the byte buffer): wrapping past data memory's end, skipping (WL < CL),
+// and the other formats of whole words.
+void VifUnpacksInRunsAsWordByWord() {
+    std::vector<u32> words;
+    u32 seed = 7;
+    auto unpack = [&](u32 cl, u32 wl, u32 format, u32 num, u32 address, u32 per) {
+        words.push_back(0x01000000u | wl << 8 | cl);                    // STCYCL
+        words.push_back((0x60u | format) << 24 | num << 16 | address);  // UNPACK
+        for (u32 i = 0; i < num * per; ++i) words.push_back(seed = seed * 1664525u + 1013904223u);
+    };
+    unpack(4, 4, 0xC, 8, 0x3FC, 4);         // V4-32 over the end of data memory
+    unpack(4, 4, 0xC, 37, 0x010, 4);
+    unpack(4, 2, 0xC, 6, 0x100, 4);         // V4-32 skipping
+    unpack(1, 1, 0x8, 5, 0x200, 3);         // V3-32
+    unpack(1, 1, 0xD, 9, 0x240, 2);         // V4-16
+    unpack(1, 1, 0xE, 4, 0x260, 1);         // V4-8
+    ps2host::Vu bulk(1), single(1);
+    ps2host::VifStream a, b;
+    a.vu = &bulk;
+    b.vu = &single;
+    a.Words(words.data(), u32(words.size()), 0);
+    for (u32 w : words) b.Words(&w, 1, 0);
+    Check(std::memcmp(bulk.Quad(0), single.Quad(0), 1024 * 16) == 0,
+          "UNPACKs in runs store what they do a word at a time");
+}
+
 void Path3GoesOneGroupPerWindow() {
     ps2host::Path3Queue queue;
     auto tag = [&](u32 nloop, bool eop, u32 flg, u32 nreg) {
@@ -1780,6 +1808,7 @@ int main() {
     GsFogsTowardsFogcol();
     GsLoadsACsm2Clut();
     Path3GoesOneGroupPerWindow();
+    VifUnpacksInRunsAsWordByWord();
     GsKeepsAFlatDepthExact();
     GsFillsTopLeft();
     GsTakesImagesInBlocks();

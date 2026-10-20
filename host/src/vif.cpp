@@ -146,6 +146,20 @@ void VifStream::UnpackRun(const std::uint32_t* words, std::uint32_t count) {
         auto byte = [zero_extend](std::uint32_t b) {
             return zero_extend ? (b & 0xFF) : std::uint32_t(std::int32_t(std::int8_t(std::uint8_t(b))));
         };
+        // V4-32 writing every quadword it passes (WL = CL): the words as they
+        // are into consecutive quadwords - a run at a time, up to the end of
+        // data memory (the vertices the game sends, most of an UNPACK's data).
+        if (u.format == 0xC && wl == cl) {
+            while (count - used >= 4 && k < u.num) {
+                const std::uint32_t at = u.address + k;
+                const std::uint32_t n = std::min({(count - used) / 4, u.num - k, vu->QuadsToEnd(at)});
+                std::memcpy(vu->Quad(at), words + used, std::size_t(n) * 16);
+                used += 4 * n;
+                k += n;
+            }
+            in_cycle = k % wl;
+            base = u.address + (k / wl) * cl;
+        }
         while (count - used >= per && k < u.num) {
             std::uint32_t* q = vu->Quad(base + in_cycle);
             const std::uint32_t* w = words + used;

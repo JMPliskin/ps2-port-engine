@@ -121,6 +121,8 @@ public:
 
     /* For tests: one 128-bit quadword of data memory. */
     u32* Quad(u32 address);
+    /* The quadwords from `address` (as Quad takes it) to data memory's end. */
+    u32 QuadsToEnd(u32 address) const { return data_mask_ + 1 - (address & data_mask_); }
 
 private:
     friend struct VuCore;
