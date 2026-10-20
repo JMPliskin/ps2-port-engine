@@ -4,20 +4,31 @@
 
 #include "ps2host/display_list.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 
 namespace ps2host {
 namespace {
 
-/* A VIF code's data, in words after it (and whether it is an UNPACK's). */
-u32 DataWords(u32 code, bool& unpack) {
+struct Code {
+    u32 at;         // the code's word
+    u32 code;
+    u32 words;      // its data's, after it
+    bool floats;    // an UNPACK V4-32: four floats a vector
+};
+
+struct Segment {
+    u64 key;        // its codes'
+    u32 first, end; // its codes
+};
+
+/* A VIF code's data, in words after it. */
+u32 DataWords(u32 code) {
     const u32 cmd = (code >> 24) & 0x7F;
     const u32 num = (code >> 16) & 0xFF;
     const u32 imm = code & 0xFFFF;
-    unpack = false;
     if ((cmd & 0x60) == 0x60) {         // UNPACK: vn, vl - num vectors
-        unpack = true;
         const u32 vl = cmd & 3, vn = (cmd >> 2) & 3;
         const u32 bits = (32u >> vl) * (vn + 1) * (num ? num : 256);
         return (bits + 31) / 32;
@@ -31,37 +42,183 @@ u32 DataWords(u32 code, bool& unpack) {
     }
 }
 
+bool Unpack(u32 code) { return ((code >> 24) & 0x60) == 0x60; }
+
+void Parse(const std::vector<u32>& w, std::vector<Code>& codes) {
+    codes.clear();
+    size_t i = 0;
+    while (i < w.size()) {
+        const u32 code = w[i];
+        const u32 words = DataWords(code);
+        if (i + 1 + words > w.size()) break;
+        const u32 cmd = (code >> 24) & 0x7F;
+        codes.push_back({u32(i), code, words, Unpack(code) && (cmd & 0x0F) == 0x0C});
+        i += 1 + words;
+    }
+}
+
+void Split(const std::vector<Code>& codes, int address, std::vector<Segment>& segments) {
+    segments.clear();
+    u32 first = 0;
+    u64 key = 1469598103934665603ull;
+    for (u32 j = 0; j < codes.size(); ++j) {
+        const u32 code = codes[j].code;
+        // (an UNPACK's address with FLG set is the double buffer's: a batch of
+        // vertices within a thing, not a thing's start)
+        if (j > first && address >= 0 && Unpack(code) && !(code & 0x8000) && int(code & 0x3FF) == address) {
+            segments.push_back({key, first, j});
+            first = j;
+            key = 1469598103934665603ull;
+        }
+        key = (key ^ code) * 1099511628211ull;
+    }
+    if (first < codes.size()) segments.push_back({key, first, u32(codes.size())});
+}
+
 bool Plausible(float v) { return v == 0.0f || (std::fabs(v) > 1e-6f && std::fabs(v) < 1e9f); }
+
+float Float(u32 w) {
+    float v;
+    std::memcpy(&v, &w, 4);
+    return v;
+}
+
+/* How far apart two segments' first UNPACKs are (each thing's matrices):
+   0 the same, ~1 a value a word unlike. */
+float Distance(const std::vector<u32>& a, const Code& ca, const std::vector<u32>& b, const Code& cb) {
+    if (!ca.floats || ca.words != cb.words) return 0.0f;
+    float d = 0.0f;
+    for (u32 k = 1; k <= ca.words; ++k) {
+        const u32 wa = a[ca.at + k], wb = b[cb.at + k];
+        if (wa == wb) continue;
+        const float x = Float(wa), y = Float(wb);
+        if (!Plausible(x) || !Plausible(y)) { d += 1.0f; continue; }
+        d += std::fabs(y - x) / (std::fabs(x) + std::fabs(y) + 1.0f);
+    }
+    return d;
+}
+
+/* A matched pair's words to blend, added to `plan` - false (none added) if
+   one jumps. */
+bool PlanPair(const std::vector<u32>& a, const std::vector<Code>& ca, u32 sa, const std::vector<u32>& b,
+              const std::vector<Code>& cb, const Segment& s, const ListBlendOptions& o, ListBlendPlan& plan) {
+    const size_t mark = plan.at.size();
+    for (u32 j = s.first; j < s.end; ++j) {
+        const Code& y = cb[j];
+        const Code& x = ca[sa + (j - s.first)];
+        if (!y.floats || !y.words) continue;
+        if (std::memcmp(&a[x.at + 1], &b[y.at + 1], y.words * 4) == 0) continue;
+        float scale[4] = {0, 0, 0, 0};
+        for (u32 k = 0; k < y.words; ++k) {
+            const float fa = Float(a[x.at + 1 + k]), fb = Float(b[y.at + 1 + k]);
+            if (Plausible(fa)) scale[k & 3] = std::max(scale[k & 3], std::fabs(fa));
+            if (Plausible(fb)) scale[k & 3] = std::max(scale[k & 3], std::fabs(fb));
+        }
+        for (u32 k = 0; k < y.words; ++k) {
+            const u32 wa = a[x.at + 1 + k], wb = b[y.at + 1 + k];
+            if (wa == wb) continue;
+            const float fa = Float(wa), fb = Float(wb);
+            if (!Plausible(fa) || !Plausible(fb) || !(std::fabs(fb - fa) < o.cut)) continue;
+            // (one word so is enough: a flickering light's billboard, its w
+            // jumping, blended is a beam across the room)
+            if (std::fabs(fb - fa) > o.jump * scale[k & 3]) {
+                plan.at.resize(mark);
+                plan.from.resize(mark);
+                plan.to.resize(mark);
+                return false;
+            }
+            plan.at.push_back(y.at + 1 + k);
+            plan.from.push_back(fa);
+            plan.to.push_back(fb);
+        }
+    }
+    return true;
+}
 
 }  // namespace
 
-ListBlend BlendVif1Chains(const Vif1Chain& a, const Vif1Chain& b, float t, float cut, Vif1Chain& out) {
-    ListBlend result;
-    out = b;
-    const size_t n = std::min(a.words.size(), b.words.size());
-    size_t i = 0;
-    while (i < n) {
-        const u32 ca = a.words[i], cb = b.words[i];
-        if (ca != cb) return result;    // (the rest is b's)
-        bool unpack = false;
-        const u32 words = DataWords(cb, unpack);
-        ++result.codes;
-        ++i;
-        if (i + words > n) return result;
-        if (unpack)
-            for (u32 k = 0; k < words; ++k) {
-                float fa, fb;
-                std::memcpy(&fa, &a.words[i + k], 4);
-                std::memcpy(&fb, &b.words[i + k], 4);
-                if (fa == fb || !Plausible(fa) || !Plausible(fb) || !(std::fabs(fb - fa) < cut)) continue;
-                const float blended = fa + t * (fb - fa);
-                std::memcpy(&out.words[i + k], &blended, 4);
-                ++result.blended;
-            }
-        i += words;
+ListBlend PlanListBlend(const Vif1Chain& a, const Vif1Chain& b, const ListBlendOptions& o, ListBlendPlan& plan) {
+    plan.at.clear();
+    plan.from.clear();
+    plan.to.clear();
+    ListBlend& r = plan.stats;
+    r = ListBlend{};
+    static thread_local std::vector<Code> ca, cb;
+    static thread_local std::vector<Segment> sa, sb;
+    Parse(a.words, ca);
+    Parse(b.words, cb);
+    Split(ca, o.segment_address, sa);
+    Split(cb, o.segment_address, sb);
+    r.codes = cb.size();
+    r.segments = u32(sb.size());
+    r.whole = ca.size() == cb.size() && std::equal(ca.begin(), ca.end(), cb.begin(),
+                                                   [](const Code& x, const Code& y) { return x.code == y.code; });
+
+    // The older list's segments by key, in order: (key, index).
+    static thread_local std::vector<std::pair<u64, u32>> keys;
+    keys.clear();
+    for (u32 i = 0; i < sa.size(); ++i) keys.push_back({sa[i].key, i});
+    std::sort(keys.begin(), keys.end());
+    static thread_local std::vector<bool> used;
+    used.assign(sa.size(), false);
+
+    u32 expected = 0, matched = 0;
+    for (const Segment& s : sb) {
+        auto lo = std::lower_bound(keys.begin(), keys.end(), std::make_pair(s.key, 0u));
+        auto hi = std::upper_bound(keys.begin(), keys.end(), std::make_pair(s.key, ~0u));
+        // Its place first; else the nearest values among the unused nearby.
+        u32 best = ~0u;
+        float best_d = 0.0f;
+        const auto at = std::lower_bound(lo, hi, std::make_pair(s.key, expected));
+        auto try_one = [&](u32 i) {
+            if (used[i]) return;
+            const float d = Distance(a.words, ca[sa[i].first], b.words, cb[s.first]);
+            const bool nearer = best == ~0u || d < best_d ||
+                                (d == best_d && (i > expected ? i - expected : expected - i) <
+                                                    (best > expected ? best - expected : expected - best));
+            if (nearer) { best = i; best_d = d; }
+        };
+        int n = 0;
+        for (auto p = at; p != hi && n < 16; ++p, ++n) try_one(p->second);
+        n = 0;
+        for (auto p = at; p != lo && n < 16; ++n) try_one((--p)->second);
+        if (best == ~0u) {
+            ++r.unmatched;
+            continue;
+        }
+        used[best] = true;
+        ++matched;
+        if (best != expected) ++r.moved;
+        expected = best + 1;
+        if (!PlanPair(a.words, ca, sa[best].first, b.words, cb, s, o, plan)) ++r.jumps;
     }
-    result.whole = a.words.size() == b.words.size();
-    return result;
+    if (matched && float(r.jumps + r.moved) > o.cut_share * float(matched)) {
+        r.cut = true;
+        plan.at.clear();
+        plan.from.clear();
+        plan.to.clear();
+    }
+    r.blended = plan.at.size();
+    return r;
+}
+
+void ApplyListBlend(const ListBlendPlan& plan, float t, std::vector<u32>& words, size_t offset) {
+    for (size_t i = 0; i < plan.at.size(); ++i) {
+        const size_t at = offset + plan.at[i];
+        if (at >= words.size()) continue;
+        const float v = plan.from[i] + t * (plan.to[i] - plan.from[i]);
+        std::memcpy(&words[at], &v, 4);
+    }
+}
+
+ListBlend BlendVif1Chains(const Vif1Chain& a, const Vif1Chain& b, float t, float cut, Vif1Chain& out) {
+    ListBlendOptions options;
+    options.cut = cut;
+    ListBlendPlan plan;
+    PlanListBlend(a, b, options, plan);
+    out = b;
+    ApplyListBlend(plan, t, out.words);
+    return plan.stats;
 }
 
 }  // namespace ps2host

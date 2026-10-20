@@ -743,7 +743,7 @@ int Run(const Options& options) {
         std::fprintf(stderr, "--replay-input: nothing to read in %s\n", options.replay_input.c_str());
     SetPaced(options.paced);
     if (!options.frames_dir.empty())
-        SetFrameDumps(options.frames_dir, options.frames_every, 200, u64(options.frames_from));
+        SetFrameDumps(options.frames_dir, options.frames_every, options.frames_limit, u64(options.frames_from));
     g_watch = options.watch;
     InstallDevices();
     InstallIopServers();
@@ -906,6 +906,7 @@ int Main(int argc, char** argv) {
         else if (arg == "--frames" && i + 1 < argc) options.frames_dir = argv[++i];
         else if (arg == "--frames-every" && i + 1 < argc) options.frames_every = std::stoi(argv[++i]);
         else if (arg == "--frames-from" && i + 1 < argc) options.frames_from = std::stoll(argv[++i]);
+        else if (arg == "--frames-limit" && i + 1 < argc) options.frames_limit = std::stoi(argv[++i]);
         else if (arg == "--budget" && i + 1 < argc) options.loop_budget = std::stoll(argv[++i]);
         else if (arg == "--limit" && i + 1 < argc) options.report_limit = std::stoi(argv[++i]);
         else if (arg == "--timeout" && i + 1 < argc) options.timeout_seconds = std::stoi(argv[++i]);

@@ -155,6 +155,22 @@ each blank from 0x0029FA08 by its own blank handler).
    translations up to 2e7, were left out by a float bound of 1e6: the back
    wall and the mirror jumped back each in-between picture (now 1e9).
    The cut must be large (100000: screen matrices with 2048-scale terms).
+   **Never blend the lists in lockstep**: the blender cuts them into the
+   things drawn (from each UNPACK to the things' matrix address - not one with
+   FLG, the double buffer's vertex batches) and matches each with the older
+   step's thing of the same codes and nearest values. Outbreak drew things in
+   another order from step to step (two light billboards traded places: a
+   beam across the room; 2D sprites with one screen matrix: a textured disc
+   over the picture), and a thing whose values jump (a flickering light's w)
+   is left as the game steps it. Glitches are found with
+   `engine/tools/blend_glitches.py DIR` over a long gameplay run's every
+   picture (Outbreak's `roam`): pixels unlike both neighbours where they
+   agree - then the list bisected (a switch that blends only a word range,
+   eight ranges at once) and the two steps' segments dumped and compared.
+   Watch also for lists sent after the frame's function returns (from the DMA
+   interrupt: Outbreak's 2D, once in a while): a frame's lists are all those
+   sent until the next frame's start, its step and picture time taken at its
+   start.
 4. Configure `steps_per_blank = 0.5`, `default_rate = "30"`: the engine's
    rate, steps and picture time then work for 60, 120 and the screen's (the
    F9 panel's FRAME RATE row shows 30/60/120/screen for such a game). Set the
