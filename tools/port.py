@@ -32,10 +32,11 @@ counts merged into build/port/pgo.profdata - which every build after it is
 compiled with (--no-pgo: without), the branches laid out and the inlining
 chosen as the game runs: Burnout 3's EE and GS threads 10-12% less CPU in a
 race, the pictures the same. A profile from older code still serves: what
-changed since is compiled as without one. A clang-cl build is linked with
-ThinLTO too (PS2_LTO=off: without): the host's functions the game's code
-calls inlined across files - Burnout 3's race in virtual time 12% faster
-again.
+changed since is compiled as without one. A game whose game.json says
+"lto": true is linked with ThinLTO too (clang-cl; PS2_LTO=on/off overrides):
+the host's functions the game's code calls inlined across files - Burnout
+3's race in virtual time 12% faster again, its link a minute (RE Outbreak's
+took half an hour: a game's choice).
 """
 
 from __future__ import annotations
@@ -331,6 +332,12 @@ def _build_jobs() -> int:
     return max(1, jobs)
 
 
+def _game_json(game) -> dict:
+    """game.json as written (its build options: lto, pgo_runs)."""
+    with open(game.path("game.json"), encoding="utf-8") as handle:
+        return json.load(handle)
+
+
 def pgo_profile(game) -> str:
     """Where `pgo` leaves the merged profile every build after it uses (in
     full: the compiler runs in the build's folder)."""
@@ -361,9 +368,12 @@ def build(game, generated: str, sse4: bool = False, pgo: str = "") -> str:
         profile = "generate"
     elif clang and pgo != "off" and os.path.exists(pgo_profile(game)):
         profile = pgo_profile(game).replace("\\", "/")
-    # ThinLTO with clang-cl (PS2_LTO=off: without), but not for the build
-    # that only counts.
-    lto = "ON" if clang and pgo != "generate" and os.environ.get("PS2_LTO", "").lower() != "off" else "OFF"
+    # ThinLTO with clang-cl where the game asks for it (game.json's "lto":
+    # its link can take long - RE Outbreak's half an hour, Burnout 3's a
+    # minute), or PS2_LTO=on/off says; never for the build that only counts.
+    wanted = os.environ.get("PS2_LTO", "").lower()
+    lto = "ON" if clang and pgo != "generate" and (wanted == "on" or (wanted != "off" and _game_json(game).get("lto"))) \
+        else "OFF"
     script = os.path.join(binary, "build.bat")
     with open(script, "w", encoding="utf-8") as handle:
         handle.write('@echo off\ncall "%s" >nul\n' % cppcheck.find_vcvars())
@@ -403,8 +413,7 @@ def build(game, generated: str, sse4: bool = False, pgo: str = "") -> str:
 def pgo_runs(game) -> list:
     """The scripted runs a profile is made from: game.json's "pgo_runs", else
     every one in port/runs."""
-    with open(game.path("game.json"), encoding="utf-8") as handle:
-        named = json.load(handle).get("pgo_runs")
+    named = _game_json(game).get("pgo_runs")
     if named:
         return list(named)
     runs = game.path(os.path.join("port", "runs"))
