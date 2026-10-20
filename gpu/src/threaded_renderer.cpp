@@ -81,6 +81,17 @@ public:
         Put(vertices, n * sizeof(GsVertex));
         End();
     }
+    /* The last state again (the bridge's fast path): its 200 bytes not
+       compared - 4.5% of the GS thread in splitscreen - where `gouraud`, the
+       one field that path changes, is the last one's too. */
+    void DrawTrianglesAgain(const GsDrawState& state, const GsVertex* vertices, std::size_t count) override {
+        if (!has_last_ || state.gouraud != last_.gouraud) return DrawTriangles(state, vertices, count);
+        const std::uint32_t n = std::uint32_t(count);
+        Op(kDrawSame, sizeof n + n * sizeof(GsVertex));
+        Put(&n, sizeof n);
+        Put(vertices, n * sizeof(GsVertex));
+        End();
+    }
     void Flush() override { Op(kFlush, 0); End(); }
     void Kick() override {
         Op(kKick, 0);

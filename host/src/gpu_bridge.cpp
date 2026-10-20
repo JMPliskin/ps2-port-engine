@@ -1263,6 +1263,16 @@ struct WordPixels {
     }
 };
 
+/* The renderer's DrawTriangles calls (DrawOn), for the fast path's
+   DrawTrianglesAgain: its state the last one drawn only if nothing has
+   drawn since. */
+u64 g_draws = 0;
+
+void DrawOn(Bridge& s, const ps2gpu::GsDrawState& state, const ps2gpu::GsVertex* v, std::size_t n) {
+    ++g_draws;
+    s.renderer->DrawTriangles(state, v, n);
+}
+
 /* A sprite's Z into its own colour target's memory (OnDraw's z_as_colour),
    drawn into that target itself: a Z format's page is a 32-bit colour
    page with its 32x16 quarters swapped (the block index's bits 3 and 4), so
@@ -1369,7 +1379,7 @@ bool ZIntoColour(Bridge& s, Owned& target, const ps2gpu::GsDrawState& state, u32
         quad[3].x = bx, quad[3].y = ay;
         quad[4].x = bx, quad[4].y = by;
         quad[5].x = ax, quad[5].y = by;
-        s.renderer->DrawTriangles(zs, quad, 6);
+        DrawOn(s, zs, quad, 6);
         Drew(s, target, u32(q.x0 + q.dx), u32(q.x1 + q.dx), u32(q.y1 + q.dy), u32(q.y0 + q.dy));
     }
     return true;
@@ -1595,6 +1605,7 @@ void OnDraw(const gs::Gs::DrawCall& call) {
         Owned* source = nullptr;    // a target sampled as the texture: fast only while it is not stale
         bool draws_colour = false;
         u32 y_offset = 0, t_offset = 0, th = 1;     // Containing's: the target's rows, the texture's
+        u64 last_draw = ~0ull;      // g_draws after the last draw of this state
     };
     static Fast fast;
     const u64 regs[12] = {call.prim, c.frame, c.scissor, c.tex0, c.tex1, c.clamp, c.alpha, c.test, c.zbuf,
@@ -1612,7 +1623,15 @@ void OnDraw(const gs::Gs::DrawCall& call) {
         }
         if (fast.t_offset)
             for (std::size_t i = 0; i < n; ++i) v[i].t += float(fast.t_offset) * v[i].q / float(fast.th);
-        s.renderer->DrawTriangles(st, v, n);
+        // The renderer's last draw this state's (but for gouraud) when
+        // nothing has drawn since the one before this.
+        if (fast.last_draw == g_draws) {
+            ++g_draws;
+            s.renderer->DrawTrianglesAgain(st, v, n);
+        } else {
+            DrawOn(s, st, v, n);
+        }
+        fast.last_draw = g_draws;
         if (fast.draws_colour) Drew(s, *fast.target, x0, x1, y1, y0);
         if (fast.depth) Drew(s, *fast.depth, x0, x1, y1, y0);
         return;
@@ -1866,7 +1885,7 @@ void OnDraw(const gs::Gs::DrawCall& call) {
     for (std::size_t i = 0; i < n; ++i) v[i].z = std::min(v[i].z, zmax);
     // Not timed apart: tens of millions of primitives a race, and a timer's
     // two clock reads each cost as much as recording one.
-    s.renderer->DrawTriangles(state, v, n);
+    DrawOn(s, state, v, n);
     if (s.primary) {
         // FBMSK over every bit the format stores: the colour is not written.
         const u32 stored = state.psm == gs::PSMCT24 ? 0xFFFFFFu : Is16(state.psm) ? 0x80F8F8F8u : 0xFFFFFFFFu;
@@ -1899,6 +1918,7 @@ void OnDraw(const gs::Gs::DrawCall& call) {
             fast.rows = rows;
             fast.zmax = zmax;
             fast.state = state;
+            fast.last_draw = g_draws;       // (the draw just made, above)
             fast.target = target;
             fast.depth = depth && state.depth_write ? depth : nullptr;
             fast.source = state.texture_target ? tex_source : nullptr;
@@ -1936,7 +1956,7 @@ void OnDraw(const gs::Gs::DrawCall& call) {
                 zv[i].a = u8(c >> 24);
             }
             Owned& view = Use(s, zs.fbp, zs.fbw, zs.psm, false, zs.width, zs.height, rows);
-            s.renderer->DrawTriangles(zs, zv, n);
+            DrawOn(s, zs, zv, n);
             Drew(s, view, x0 - x_offset, x1 - x_offset, y1, y0);
         }
         return;

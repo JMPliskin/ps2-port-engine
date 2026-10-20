@@ -229,6 +229,12 @@ public:
     virtual bool HasTarget(std::uint32_t fbp, std::uint32_t fbw, std::uint32_t psm) const = 0;
     /* Triangles, three vertices each, in GS order. */
     virtual void DrawTriangles(const GsDrawState& state, const GsVertex* vertices, std::size_t count) = 0;
+    /* The same, where the caller knows `state` is the last DrawTriangles'
+       (or DrawTrianglesAgain's) but for `gouraud`: a renderer that compares
+       each draw's state with the last may take less care. */
+    virtual void DrawTrianglesAgain(const GsDrawState& state, const GsVertex* vertices, std::size_t count) {
+        DrawTriangles(state, vertices, count);
+    }
     /* Runs what has been drawn. */
     virtual void Flush() = 0;
     /* Hands what has been recorded to the GPU without waiting for it (once a
