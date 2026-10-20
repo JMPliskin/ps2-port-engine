@@ -194,7 +194,6 @@ struct VuCore {
         out.vf = it;
         out.lanes = dest;
         std::memcpy(out.value, q, 16);
-        out.clean = Clean4(q);
     }
     /* Whether Clean leaves all four fields as they are: no infinity or NaN
        exponent, and no denormal (a zero exponent with a mantissa). */
@@ -291,11 +290,9 @@ struct VuCore {
         _mm_storeu_si128(reinterpret_cast<__m128i*>(out.value), after);
     }
     static PS2HOST_VU_INLINE void Move(Vu& v, Vu::Pending& out, int it, int fs, u32 dest) {
-        out.clean = !((v.unclean_ >> fs) & 1);
         HoldVf(v, out, it, dest, _mm_loadu_si128(reinterpret_cast<const __m128i*>(v.regs.vf[fs])));
     }
     static PS2HOST_VU_INLINE void Mr32(Vu& v, Vu::Pending& out, int it, int fs, u32 dest) {
-        out.clean = !((v.unclean_ >> fs) & 1);
         HoldVf(v, out, it, dest, _mm_shuffle_epi32(_mm_loadu_si128(reinterpret_cast<const __m128i*>(v.regs.vf[fs])),
                                                    _MM_SHUFFLE(0, 3, 2, 1)));
     }
@@ -313,25 +310,18 @@ struct VuCore {
     }
     static PS2HOST_VU_INLINE void Move(Vu& v, Vu::Pending& out, int it, int fs, u32 dest) {
         const u32 value[4] = {v.regs.vf[fs][0], v.regs.vf[fs][1], v.regs.vf[fs][2], v.regs.vf[fs][3]};
-        out.clean = !((v.unclean_ >> fs) & 1);
         HoldVf(v, out, it, dest, value);
     }
     static PS2HOST_VU_INLINE void Mr32(Vu& v, Vu::Pending& out, int it, int fs, u32 dest) {
         const u32* a = v.regs.vf[fs];
         const u32 value[4] = {a[1], a[2], a[3], a[0]};
-        out.clean = !((v.unclean_ >> fs) & 1);
         HoldVf(v, out, it, dest, value);
     }
 #endif
-    /* An upper write of Dest's fields into `reg`: clean ones clean the
-       register when they are all of it (else it stays as it was); others
-       make it unknown. */
+    /* An upper write of Dest's fields into `reg`, clean or not: nothing to
+       note now (the FMACs clamp whatever they do not know clean: Fmac). */
     template <u32 Dest>
-    static PS2HOST_VU_INLINE void Wrote(Vu& v, int reg, bool clean) {
-        if (reg <= 0) return;
-        if (!clean) v.unclean_ |= 1u << reg;
-        else if constexpr (Dest == 15) v.unclean_ &= ~(1u << reg);
-    }
+    static PS2HOST_VU_INLINE void Wrote(Vu&, int, bool) {}
     static PS2HOST_VU_INLINE void Mfir(Vu& v, Vu::Pending& out, int it, int is, u32 dest) {
         u32 x = v.regs.vc[is] & 0xFFFF;
         if (x & 0x8000) x |= 0xFFFF0000u;
@@ -456,33 +446,24 @@ struct VuCore {
         else if constexpr (Operand == 4) b = _mm_set1_epi32(int(c.vc[lifted::kRegQ]));
         else if constexpr (Operand == 5) b = _mm_set1_epi32(int(c.vc[lifted::kRegI]));
         else b = _mm_set1_epi32(int(c.vf[ft][Operand]));
-        // Cleaned here where the block does not know them clean and the run
-        // has not found them clean (unclean_); LanesSse then cleans neither.
-        // A run has DAZ and FTZ on (VuRounding): clamped is clean enough
-        // (ClampLanes), here and for the result.
-        // MAX and MINI take their operands as they are, and may leave a
-        // field unclean.
+        // Cleaned here where the block does not know them clean; LanesSse
+        // then cleans neither. A run has DAZ and FTZ on (VuRounding): clamped
+        // is clean enough (ClampLanes, four instructions), here and for the
+        // result - and a clean field clamped is the field itself, so every
+        // operand not known clean is clamped, with no record kept of which
+        // registers a run has found clean (testing and keeping that record
+        // in memory, operand by operand, cost more than the clamps: 12% of
+        // the VU bench). MAX and MINI take their operands as they are.
         constexpr bool kRaw = Op == lifted::kMax_ || Op == lifted::kMini;
-        if constexpr ((Known & 1) == 0 && !kRaw)
-            if ((v.unclean_ >> fs) & 1) a = lifted::ClampLanes(a);
-        if constexpr ((Known & 2) == 0 && !kRaw) {
-            if constexpr (Operand == 4 || Operand == 5) b = lifted::ClampLanes(b);
-            else if ((v.unclean_ >> ft) & 1) b = lifted::ClampLanes(b);
-        }
-        // ACC as the operands: cleaned only where not known clean (MADD,
-        // MSUB read it).
+        if constexpr ((Known & 1) == 0 && !kRaw) a = lifted::ClampLanes(a);
+        if constexpr ((Known & 2) == 0 && !kRaw) b = lifted::ClampLanes(b);
+        // ACC as the operands (MADD, MSUB read it): the same.
         __m128i acc = _mm_loadu_si128(reinterpret_cast<const __m128i*>(c.vacc));
         if constexpr ((Known & 4) == 0 && (Op == lifted::kMadd || Op == lifted::kMsub))
-            if (v.acc_unclean_) acc = lifted::ClampLanes(acc);
+            acc = lifted::ClampLanes(acc);
         const __m128i result = lifted::LanesSse<Op, Known | 7, true>(a, b, acc);
-        // An FMAC's result is clean (MAX and MINI write no ACC): all four
-        // fields of it make ACC clean.
-        if constexpr (To < 0 && Dest == 15 && !kRaw) v.acc_unclean_ = false;
-        else if constexpr (To < 0 && kRaw) v.acc_unclean_ = true;
         if constexpr (SetFlags == 1) FlagsOf<Dest>(v, result);
         else if constexpr (SetFlags == 2) StickyFlagsOf<Dest>(v, result);
-        if constexpr (To > 0 && kRaw) v.unclean_ |= 1u << To;
-        else if constexpr (To > 0 && Dest == 15) v.unclean_ &= ~(1u << To);    // all four fields, clean
         if constexpr (To == 0) {
             _mm_storeu_si128(reinterpret_cast<__m128i*>(v.discarded_), result);
             return;
@@ -643,9 +624,6 @@ struct VuCore {
     /* Any other upper operation, as macro mode's COP2 runs it. */
     static void Cop2(Vu& v, u32 word) {
         lifted::Cop2(v.regs, 0x4A000000u | (word & 0x01FFFFFF));
-        // Whatever it wrote is not known clean: fd's and ft's fields, ACC.
-        v.unclean_ |= ((1u << ((word >> 6) & 31)) | (1u << ((word >> 16) & 31))) & ~1u;
-        v.acc_unclean_ = true;
     }
     /* CLIP: fs.xyz against |ft.w| - compared as Clean leaves them: the
        magnitudes of clean floats are in the order of their bits (a
@@ -755,14 +733,6 @@ struct VuCore {
                     v.vf_ready_[pending.vf][lane] = ready;
                 }
             }
-            // Clean only if what lands is, and either it is all of the
-            // register or the rest was clean; with the upper writing the same
-            // register too, not known.
-            const u32 reg = 1u << pending.vf;
-            if (pending.clean && written != pending.vf && (pending.lanes == 15 || !(v.unclean_ & reg)))
-                v.unclean_ &= ~reg;
-            else
-                v.unclean_ |= reg;
         }
         FinishUpper(v, cycle, written, lanes, set_flags, sets_mac, sets_clip);
         if (pending.q_latency) {
