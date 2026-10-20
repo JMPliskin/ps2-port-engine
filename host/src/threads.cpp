@@ -1298,6 +1298,8 @@ void SetBlankRate(double hz) {
 
 unsigned FastForward() { return g_fast_forward.load(std::memory_order_relaxed); }
 
+u64 FrameNumber() { return S().frames; }
+
 u64 BlankPeriodNs() {
     const unsigned factor = g_fast_forward.load(std::memory_order_relaxed);
     const s64 own = g_blank_period_ns.load(std::memory_order_relaxed);

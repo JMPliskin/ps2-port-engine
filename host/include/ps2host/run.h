@@ -262,6 +262,9 @@ unsigned FastForward();
 /* The vertical blanks' period now, in nanoseconds: the display's (59.94 a
    second), SetFastForward's part of it or SetBlankRate's. */
 u64 BlankPeriodNs();
+/* The frames the game has drawn so far (a scripted run's --until-frame,
+   --frames-from count these). */
+u64 FrameNumber();
 /* Real time: when the last vertical blank was due (ClockNs), on the timer's
    own grid - not when the EE took it, which it does at its next loop head. */
 u64 LastVblankNs();
