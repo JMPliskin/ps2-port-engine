@@ -30,6 +30,9 @@ extern const ps2host::FunctionEntry kGuestFunctions[];
 extern const std::size_t kGuestFunctionCount;
 extern const ps2host::OverlayEntry kGuestOverlays[];
 extern const std::size_t kGuestOverlayCount;
+#ifdef PS2HOST_PGO_GENERATE
+extern "C" int __llvm_profile_write_file(void);   // PS2HOST_PGO=generate (LLVM's profile runtime)
+#endif
 
 /* The game's host implementations of guest functions (its port's overrides.cpp). */
 void RegisterGameOverrides();
@@ -199,6 +202,9 @@ int main(int argc, char** argv) {
     ps2host::CloseAudio();
     ps2host::ReleaseController();
     std::fflush(nullptr);
+#ifdef PS2HOST_PGO_GENERATE
+    __llvm_profile_write_file();            // (the profile's own writer runs at exit, which this skips)
+#endif
     TerminateProcess(GetCurrentProcess(), UINT(code));
     return code;
 }

@@ -125,6 +125,28 @@ if(MSVC)
         target_compile_options(ps2rt PUBLIC /clang:-msse4.1)
     endif()
     target_compile_definitions(ps2rt PUBLIC _CRT_SECURE_NO_WARNINGS)
+    # PS2HOST_PGO (clang-cl): "generate" - a build that counts what runs
+    # (LLVM_PROFILE_FILE names where it writes them) - or the .profdata
+    # merged from such runs (llvm-profdata), to build with what they ran
+    # (engine/tools/port.py's pgo).
+    set(PS2HOST_PGO "" CACHE STRING "Profile-guided build: 'generate', or the .profdata to build with")
+    if(PS2HOST_PGO AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+        if(PS2HOST_PGO STREQUAL "generate")
+            target_compile_options(ps2rt PUBLIC /clang:-fprofile-instr-generate)
+            target_compile_definitions(ps2rt PUBLIC PS2HOST_PGO_GENERATE=1)    # main.cpp writes the profile
+            get_filename_component(llvm_bin ${CMAKE_CXX_COMPILER} DIRECTORY)
+            file(GLOB profile_runtime ${llvm_bin}/../lib/clang/*/lib/windows/clang_rt.profile-x86_64.lib)
+            if(NOT profile_runtime)
+                message(FATAL_ERROR "PS2HOST_PGO=generate: LLVM's clang_rt.profile-x86_64.lib not found")
+            endif()
+            list(GET profile_runtime 0 profile_runtime)
+            target_link_libraries(ps2rt PUBLIC ${profile_runtime})
+        else()
+            target_compile_options(ps2rt PUBLIC "/clang:-fprofile-instr-use=${PS2HOST_PGO}"
+                                   /clang:-Wno-profile-instr-unprofiled /clang:-Wno-profile-instr-out-of-date
+                                   /clang:-Wno-backend-plugin)
+        endif()
+    endif()
     target_compile_options(ps2host PRIVATE /Z7)     # symbols for --sample, as the ports'
     target_compile_options(ps2rt PRIVATE /Z7)
     target_link_libraries(ps2host PRIVATE dbghelp winmm)  # ...which resolves them; 1 ms sleeps

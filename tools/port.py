@@ -4,6 +4,7 @@
     python engine/tools/port.py --game games/<name>            # generate, build, run
     python engine/tools/port.py --game games/<name> build      # generate and build only
     python engine/tools/port.py --game games/<name> run -- --trace
+    python engine/tools/port.py --game games/<name> pgo        # a profile-guided build (below)
     python engine/tools/port.py init <name> --iso "<disc image>" --title "..."  # a new game
 
 The port is the game's translated functions (src/lifted, from lift.py --emit) on
@@ -24,11 +25,20 @@ interpreter, which never sees them run.
 
 Nothing from the disc is built into the port: the executable is loaded at run
 time, from the game's extracted/ directory.
+
+`pgo` (clang-cl): a build that counts what its code does, run through the
+game's scripted runs (game.json's "pgo_runs", else all of port/runs), the
+counts merged into build/port/pgo.profdata - which every build after it is
+compiled with (--no-pgo: without), the branches laid out and the inlining
+chosen as the game runs: Burnout 3's EE and GS threads 10-12% less CPU in a
+race, the pictures the same. A profile from older code still serves: what
+changed since is compiled as without one.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shutil
@@ -318,14 +328,23 @@ def _build_jobs() -> int:
     return max(1, jobs)
 
 
-def build(game, generated: str, sse4: bool = False) -> str:
+def pgo_profile(game) -> str:
+    """Where `pgo` leaves the merged profile every build after it uses (in
+    full: the compiler runs in the build's folder)."""
+    return os.path.abspath(game.path(os.path.join(game.build, "port", "pgo.profdata")))
+
+
+def build(game, generated: str, sse4: bool = False, pgo: str = "") -> str:
     """Configure and build the port; returns the executable's path. `sse4`:
     the build for processors without AVX2 (PS2HOST_AVX2=OFF), in a folder of
     its own, copied beside the main build as <name>-sse4.exe - which the main
     build starts on such a processor (engine/host/src/cpu_check.cpp). The
-    compiler: clang-cl when installed (_clang_cl), else MSVC's."""
+    compiler: clang-cl when installed (_clang_cl), else MSVC's. `pgo`:
+    "generate" for the build that counts (a folder of its own: pgo below),
+    "off" for none; by default the profile `pgo` made, if there is one."""
     source = game.path("port")
-    binary = game.path(os.path.join(game.build, "port", "cmake-sse4" if sse4 else "cmake"))
+    folder = "cmake-pgo-generate" if pgo == "generate" else "cmake-sse4" if sse4 else "cmake"
+    binary = game.path(os.path.join(game.build, "port", folder))
     os.makedirs(binary, exist_ok=True)
     cmake = _visual_studio_tool("CMake", "bin", "cmake.exe")
     ninja = _visual_studio_tool("Ninja", "ninja.exe")
@@ -333,13 +352,20 @@ def build(game, generated: str, sse4: bool = False) -> str:
     _forget_other_compiler(binary, clang)
     compilers = (' -DCMAKE_C_COMPILER="%s" -DCMAKE_CXX_COMPILER="%s"' % ((clang.replace("\\", "/"),) * 2)
                  if clang else "")
+    # Named every time (CMake keeps what it was last told).
+    profile = ""
+    if clang and pgo == "generate":
+        profile = "generate"
+    elif clang and pgo != "off" and os.path.exists(pgo_profile(game)):
+        profile = pgo_profile(game).replace("\\", "/")
     script = os.path.join(binary, "build.bat")
     with open(script, "w", encoding="utf-8") as handle:
         handle.write('@echo off\ncall "%s" >nul\n' % cppcheck.find_vcvars())
         handle.write('"%s" -S "%s" -B "%s" -G Ninja -DCMAKE_BUILD_TYPE=Release '
-                     '-DCMAKE_MAKE_PROGRAM="%s" -DPS2_GENERATED_DIR="%s" -DPS2HOST_AVX2=%s%s >nul || exit /b 1\n'
+                     '-DCMAKE_MAKE_PROGRAM="%s" -DPS2_GENERATED_DIR="%s" -DPS2HOST_AVX2=%s "-DPS2HOST_PGO=%s"%s'
+                     ' >nul || exit /b 1\n'
                      % (cmake, source, binary, ninja, generated.replace("\\", "/"), "OFF" if sse4 else "ON",
-                        compilers))
+                        profile, compilers))
         handle.write('"%s" --build "%s" -j %d || exit /b 1\n' % (cmake, binary, _build_jobs()))
     result = subprocess.run(["cmd", "/c", script], capture_output=True, text=True)
     if result.returncode:
@@ -347,20 +373,71 @@ def build(game, generated: str, sse4: bool = False) -> str:
                   if "error" in line.lower()]
         raise SystemExit("port build failed:\n" + "\n".join(errors[:40] or
                                                            (result.stdout + result.stderr)[-4000:].splitlines()))
+    target = os.path.basename(os.path.normpath(game.directory))
+    executable = os.path.join(binary, target + ".exe")
+    if pgo == "generate":
+        # (Its tests would count too: the main build's run them.)
+        print("built %s (clang-cl, counting what runs)" % executable)
+        return executable
     tests = os.path.join(binary, "ps2host", "ps2host_tests.exe")
     result = subprocess.run([tests], capture_output=True, text=True)
     print(result.stdout.strip())
     if result.returncode:
         raise SystemExit("the host's own tests failed")
-    target = os.path.basename(os.path.normpath(game.directory))
-    executable = os.path.join(binary, target + ".exe")
     if sse4:
         beside = game.path(os.path.join(game.build, "port", "cmake", target + "-sse4.exe"))
         os.makedirs(os.path.dirname(beside), exist_ok=True)
         shutil.copyfile(executable, beside)
         executable = beside
-    print("built %s (%s)" % (executable, "clang-cl" if clang else "MSVC"))
+    print("built %s (%s%s)" % (executable, "clang-cl" if clang else "MSVC",
+                               ", profile-guided" if profile else ""))
     return executable
+
+
+def pgo_runs(game) -> list:
+    """The scripted runs a profile is made from: game.json's "pgo_runs", else
+    every one in port/runs."""
+    with open(game.path("game.json"), encoding="utf-8") as handle:
+        named = json.load(handle).get("pgo_runs")
+    if named:
+        return list(named)
+    runs = game.path(os.path.join("port", "runs"))
+    return sorted(name[:-5] for name in os.listdir(runs) if name.endswith(".args")) if os.path.isdir(runs) else []
+
+
+def pgo(game, generated: str) -> str:
+    """The profile-guided build (the module's docstring): the counting build,
+    its runs, their counts merged into pgo_profile, and the build with them.
+    Returns the last's executable."""
+    clang = _clang_cl()
+    if not clang:
+        raise SystemExit("pgo: a profile-guided build needs LLVM's clang-cl")
+    merge = os.path.join(os.path.dirname(clang), "llvm-profdata.exe")
+    if not os.path.isfile(merge):
+        raise SystemExit("pgo: llvm-profdata.exe not found beside %s" % clang)
+    runs = pgo_runs(game)
+    if not runs:
+        raise SystemExit("pgo: no scripted runs to make a profile from (port/runs/*.args)")
+    counting = os.path.abspath(build(game, generated, pgo="generate"))
+    raw = game.path(os.path.join(game.build, "port", "pgo"))
+    shutil.rmtree(raw, ignore_errors=True)
+    os.makedirs(raw)
+    # Each run's counts in a file of its own (%p: the process).
+    env = dict(os.environ, LLVM_PROFILE_FILE=os.path.join(raw, "run-%p.profraw"))
+    regress = os.path.join(os.path.dirname(os.path.abspath(__file__)), "regress.py")
+    for name in runs:
+        gpu = os.path.exists(game.path(os.path.join("port", "runs", name + ".gpu.crc")))
+        print("pgo: %s" % name, flush=True)
+        # (Its pictures checked as ever: a difference is reported, the counts kept.)
+        subprocess.run([sys.executable, regress, "--game", game.directory, name, "--exe", counting]
+                       + (["--gpu"] if gpu else []), env=env)
+    counts = [os.path.join(raw, f) for f in sorted(os.listdir(raw))
+              if f.endswith(".profraw") and os.path.getsize(os.path.join(raw, f))]
+    if not counts:
+        raise SystemExit("pgo: the runs left no counts in %s" % raw)
+    subprocess.run([merge, "merge", "-o", pgo_profile(game)] + counts, check=True)
+    print("pgo: %d runs' counts in %s" % (len(counts), pgo_profile(game)))
+    return build(game, generated)
 
 
 def discoveries_path(game) -> str:
@@ -405,9 +482,11 @@ def main(argv=None) -> int:
         return init_game.main(argv[1:])
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     game_config.add_argument(parser)
-    parser.add_argument("action", nargs="?", default="all", choices=("all", "build", "run"))
+    parser.add_argument("action", nargs="?", default="all", choices=("all", "build", "run", "pgo"))
     parser.add_argument("--sse4", action="store_true",
                         help="build: the build for processors without AVX2 (<name>-sse4.exe beside the main one)")
+    parser.add_argument("--no-pgo", action="store_true",
+                        help="build: without the profile `pgo` made (build/port/pgo.profdata)")
     parser.add_argument("--rounds", type=int, default=60,
                         help="build-and-run rounds to translate code found at run time")
     parser.add_argument("extra", nargs=argparse.REMAINDER,
@@ -420,7 +499,10 @@ def main(argv=None) -> int:
         executable = game.path(os.path.join(game.build, "port", "cmake", target + ".exe"))
         return run(game, executable, extra)
     if args.action == "build":
-        build(game, generate(game), sse4=args.sse4)
+        build(game, generate(game), sse4=args.sse4, pgo="off" if args.no_pgo else "")
+        return 0
+    if args.action == "pgo":
+        pgo(game, generate(game))
         return 0
     # Build and run until a run finds no more code copied at run time.
     for _round in range(args.rounds):
