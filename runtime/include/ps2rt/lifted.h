@@ -182,9 +182,9 @@ struct FmacForm {
     bool to_acc = false, valid = false;
 };
 
-constexpr FmacForm MakeForm(int op, int operand, bool to_acc) { return FmacForm{op, operand, to_acc, true}; }
+constexpr PS2RT_VU_INLINE FmacForm MakeForm(int op, int operand, bool to_acc) { return FmacForm{op, operand, to_acc, true}; }
 
-constexpr FmacForm Special1Form(u32 funct) {
+constexpr PS2RT_VU_INLINE FmacForm Special1Form(u32 funct) {
     constexpr int kBroadcast[7] = {kAdd, kSub, kMadd, kMsub, kMax_, kMini, kMul};
     if (funct <= 0x1B) return MakeForm(kBroadcast[funct >> 2], int(funct & 3), false);
     switch (funct) {
@@ -211,7 +211,7 @@ constexpr FmacForm Special1Form(u32 funct) {
     }
 }
 
-constexpr FmacForm AccumulatorFormOf(u32 index) {
+constexpr PS2RT_VU_INLINE FmacForm AccumulatorFormOf(u32 index) {
     constexpr int kBroadcast[4] = {kAdd, kSub, kMadd, kMsub};
     if (index <= 0x0F) return MakeForm(kBroadcast[index >> 2], int(index & 3), true);
     if (index >= 0x18 && index <= 0x1B) return MakeForm(kMul, int(index & 3), true);
@@ -235,7 +235,7 @@ constexpr FmacForm AccumulatorFormOf(u32 index) {
     }
 }
 
-constexpr FmacForm FmacFormOf(u32 word) {
+constexpr PS2RT_VU_INLINE FmacForm FmacFormOf(u32 word) {
     const u32 funct = word & 0x3F;
     return funct < 0x3C ? Special1Form(funct) : AccumulatorFormOf((word & 3) | ((word >> 4) & 0x7C));
 }
@@ -276,7 +276,11 @@ inline void MacroFmac(Context& c, u32 word, FmacForm f) {
 }
 #endif
 
-inline void Cop2(Context& c, u32 word) {
+/* Always inlined, with the decode above: at a lifted call site the word is a
+   constant, and only there does the decode fold away (a profile-guided build
+   left Cop2 out of line - the decode run every time, 2-3% of the EE). What it
+   calls is the compiler's to place. */
+PS2RT_VU_INLINE void Cop2(Context& c, u32 word) {
 #if PS2RT_VU_SSE
     const FmacForm f = FmacFormOf(word);
     if (f.valid) {
