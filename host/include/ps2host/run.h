@@ -232,6 +232,10 @@ void SetVif1Worker(bool on);
    screen counting frames while it loads (a game's hook turns it on and
    off). */
 void SetFastForward(unsigned factor);
+/* Real time: vertical blanks at `hz` a second instead of the display's
+   59.94 - a game's pictures at a screen's own refresh (a high frame rate's
+   DISPLAY); 0 for the display's again. SetFastForward above 1 comes first. */
+void SetBlankRate(double hz);
 /* Real time, from a guest thread (a game's override): the IOP runs a short
    slice and what it answered is delivered - its replies, due timers, a
    better thread woken - as in the EE's idle wait, so a loading step the game
@@ -255,6 +259,9 @@ void SetRealTimeFrom(u64 frame);
 void LeaveVirtualClock();
 /* The factor SetFastForward set (1: none). */
 unsigned FastForward();
+/* The vertical blanks' period now, in nanoseconds: the display's (59.94 a
+   second), SetFastForward's part of it or SetBlankRate's. */
+u64 BlankPeriodNs();
 /* Real time: when the last vertical blank was due (ClockNs), on the timer's
    own grid - not when the EE took it, which it does at its next loop head. */
 u64 LastVblankNs();
@@ -327,6 +334,9 @@ bool PumpWindow();
    the window opens with); and whether it is. */
 void SetWindowFullscreen(bool on);
 bool WindowFullscreen();
+/* The refresh rate of the screen the window is on, in Hz (0 when not known,
+   or no window). */
+float WindowRefreshRate();
 /* Vertical sync on or off (the "vsync" setting): no tearing, or the least
    delay. */
 void SetWindowVsync(bool on);

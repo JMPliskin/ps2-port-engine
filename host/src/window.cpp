@@ -626,6 +626,13 @@ bool WindowFullscreen() {
     return SettingOn("fullscreen");
 }
 
+float WindowRefreshRate() {
+#ifdef PS2HOST_VULKAN
+    if (g_display) return g_display->RefreshRate();
+#endif
+    return 0.0f;
+}
+
 ps2gpu::Display* WindowDisplay() {
 #ifdef PS2HOST_VULKAN
     return g_display.get();

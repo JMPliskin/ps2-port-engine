@@ -403,7 +403,11 @@ u64 FrameDue(u64 frame) {
     // At least 6 ms: a frame that alone takes longer on its way (a heavy
     // frame's VU1 work, 12 ms past its blank) still goes out on time, for
     // under a third of a frame's delay where all is quick.
-    keep = std::min<u64>(std::max<u64>(keep + 500'000, 6'000'000), 25'000'000);
+    // And under two periods of the blanks: the display keeps three pictures,
+    // one shown - two waiting; held back more (at 144 a second, 25 ms is
+    // 3.6 periods), the oldest waiting was dropped unshown, 3 a second.
+    const u64 most = std::min<u64>(25'000'000, 2 * BlankPeriodNs() - 1'000'000);
+    keep = std::min<u64>(std::max<u64>(keep + 500'000, std::min<u64>(6'000'000, most)), most);
     const u64 due = std::max(now, ended + keep);
     // Its blank to its time to be shown: the host's share of what a press
     // takes to reach the screen (the display's refresh and compositor after).

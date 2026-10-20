@@ -121,6 +121,9 @@ public:
         return std::uint32_t(h > 0 ? h : 0);
     }
     bool Vsync() const override { return vsync_; }
+    float RefreshRate() const override { return refresh_hz_.load(std::memory_order_relaxed); }
+    std::atomic<float> refresh_hz_{0.0f};       // Pump's
+    unsigned refresh_looks_ = 0;
     Pacing TakePacing() override;
     bool Focused() const override;
     bool KeyDown(int scancode) const override;
@@ -1658,6 +1661,14 @@ bool VulkanDisplay::Pump() {
         std::lock_guard<std::mutex> hold(title_lock_);
         if (title_changed_ && window_) SDL_SetWindowTitle(window_, title_.c_str());
         title_changed_ = false;
+    }
+    // The screen's refresh, for RefreshRate on other threads: looked at
+    // again every hundred pumps (the window moved to another screen, a
+    // fullscreen mode taken).
+    if (window_ && refresh_looks_++ % 100 == 0) {
+        const SDL_DisplayID id = SDL_GetDisplayForWindow(window_);
+        const SDL_DisplayMode* mode = id ? SDL_GetCurrentDisplayMode(id) : nullptr;
+        refresh_hz_.store(mode ? mode->refresh_rate : 0.0f, std::memory_order_relaxed);
     }
     // Each controller's: the triggers' effects as last set, when they change
     // (off on one SetTriggerTargets leaves out), and the motors as the game

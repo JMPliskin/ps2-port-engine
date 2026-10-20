@@ -69,6 +69,10 @@ public:
     virtual void SetVsync(bool on) { (void)on; }
     virtual bool Vsync() const { return false; }
 
+    /* The refresh rate of the screen the window is on, in its present mode
+       (fullscreen's own, EvenMode's), in Hz: 0 when not known. */
+    virtual float RefreshRate() const { return 0.0f; }
+
     /* The window's height in the screen's pixels (0 when not known). */
     virtual std::uint32_t PixelHeight() const { return 0; }
 

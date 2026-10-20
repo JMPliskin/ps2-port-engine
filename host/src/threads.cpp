@@ -408,6 +408,7 @@ bool TakeVblank(Scheduler& s) {
 // interrupt waits to be taken, the budget is spent again every half
 // millisecond.
 std::atomic<unsigned> g_fast_forward{1};    // SetFastForward
+std::atomic<s64> g_blank_period_ns{0};      // SetBlankRate (0: the display's)
 std::atomic<u64> g_fast_until{0};           // SetFastUntil: blanks faster before this frame...
 std::atomic<unsigned> g_fast_until_factor{8};   // ...this many times
 std::atomic<int> g_interrupt_waits{0};      // InterruptWait
@@ -529,7 +530,10 @@ void VblankTimer() {
                                    std::memory_order_relaxed);
             unsigned factor = g_fast_forward.load(std::memory_order_relaxed);
             if (S().frames < g_fast_until.load(std::memory_order_relaxed)) factor = std::max(factor, g_fast_until_factor.load(std::memory_order_relaxed));
-            next += factor > 1 ? period / factor : period;
+            const s64 own = g_blank_period_ns.load(std::memory_order_relaxed);
+            next += factor > 1 ? period / factor
+                    : own > 0  ? std::chrono::duration_cast<clock::duration>(std::chrono::nanoseconds(own))
+                               : period;
             if (clock::now() >= next + period) next = clock::now() + period;   // a stall: start again from now
             if (g_hitch_blanks && !s.vblank_due.load())
                 g_blank_due_ns.store(ClockNs(), std::memory_order_relaxed);
@@ -1288,7 +1292,18 @@ void SetFastForward(unsigned factor) {
     // they catch up here, on the loading screen's last picture.
     if (before > 1 && factor == 1 && !VirtualClock()) GsDrain();
 }
+void SetBlankRate(double hz) {
+    g_blank_period_ns.store(hz > 1.0 ? s64(1e9 / hz + 0.5) : 0, std::memory_order_relaxed);
+}
+
 unsigned FastForward() { return g_fast_forward.load(std::memory_order_relaxed); }
+
+u64 BlankPeriodNs() {
+    const unsigned factor = g_fast_forward.load(std::memory_order_relaxed);
+    const s64 own = g_blank_period_ns.load(std::memory_order_relaxed);
+    if (factor > 1) return 16'683'000 / factor;
+    return own > 0 ? u64(own) : 16'683'000;
+}
 
 bool RunIopBetweenSteps() {
     Scheduler& s = S();
