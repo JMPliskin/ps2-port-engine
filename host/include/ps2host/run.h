@@ -341,6 +341,10 @@ float WindowRefreshRate();
    window opens so when the "frame_rate" setting is "display"), not one 60
    divides evenly. */
 void SetWindowKeepRefresh(bool keep);
+/* Pictures the window showed late, so far: dropped, or more than a blank
+   period and a half after the one before (a game's high frame rate steps
+   down on them). */
+u64 LatePictures();
 /* Vertical sync on or off (the "vsync" setting): no tearing, or the least
    delay. */
 void SetWindowVsync(bool on);

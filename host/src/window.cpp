@@ -12,6 +12,7 @@
 #define NOMINMAX
 #include <windows.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <memory>
@@ -32,6 +33,8 @@
 #endif
 
 namespace ps2host {
+
+std::atomic<std::uint64_t> g_late_pictures{0};    // LatePictures
 
 namespace {
 
@@ -214,6 +217,16 @@ bool OpenWindow(const wchar_t* title, int width, int height) {
             }
             if (dropped) timeline::Dropped(due_ns);
             else timeline::Presented(due_ns, shown_ns);
+            // A picture dropped, or shown more than a period and a half
+            // after the one before (the one before shown again meanwhile).
+            static std::uint64_t last_shown = 0;
+            if (dropped) {
+                g_late_pictures.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                if (last_shown && shown_ns - last_shown > BlankPeriodNs() * 3 / 2)
+                    g_late_pictures.fetch_add(1, std::memory_order_relaxed);
+                last_shown = shown_ns;
+            }
         });
         if (SettingOn("vsync")) g_display->SetVsync(true);
         g_display->SetAspect(SettingAspect());
@@ -633,6 +646,8 @@ void SetWindowKeepRefresh(bool keep) {
 #endif
     (void)keep;
 }
+
+std::uint64_t LatePictures() { return g_late_pictures.load(std::memory_order_relaxed); }
 
 float WindowRefreshRate() {
 #ifdef PS2HOST_VULKAN
