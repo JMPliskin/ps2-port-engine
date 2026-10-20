@@ -227,6 +227,17 @@ void SetPresentAtBlankEnd(bool on);
 void StartVif1Worker();
 /* Whether real time runs VIF1 on its worker (default yes; --vif1-sync: no). */
 void SetVif1Worker(bool on);
+/* A VIF1 DMA chain as it is sent: its words, in runs (each: how many, and
+   the address they were read from) - the chain walked, its tags followed. */
+struct Vif1Chain {
+    std::vector<u32> words;
+    std::vector<std::pair<u32, u32>> runs;
+};
+/* Each VIF1 chain about to be sent goes to `filter` first (on the EE's
+   thread), which may keep it or change it - its words and runs - before it
+   is sent: a game's display list kept, or replaced by another (a high frame
+   rate's pictures between its steps). Empty: none (the default). */
+void SetVif1ChainFilter(std::function<void(Vif1Chain&)> filter);
 /* Real time: vertical blanks `factor` times as often as the display's (1:
    as they come) - for stretches the game only waits through, a loading
    screen counting frames while it loads (a game's hook turns it on and

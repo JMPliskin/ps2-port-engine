@@ -272,6 +272,7 @@ std::shared_ptr<ChainCopy> NewChainCopy() {
 
 // The words copied for VIF1's worker (Walk), for the frames line.
 u64 g_chain_words = 0;
+std::function<void(Vif1Chain&)> g_vif1_filter;     // SetVif1ChainFilter
 
 // Walks a started transfer and leaves the registers as it would; returns a
 // note (when `describe`: a transfer is noted only the first time).
@@ -300,12 +301,30 @@ std::string Walk(const Channel& ch, u32 chcr, bool describe) {
             copy->runs.emplace_back(count, from);
             g_chain_words += count;
         };
+    // A VIF1 chain a filter takes (SetVif1ChainFilter): walked whole first,
+    // filtered, then sent as the filter left it.
+    const bool filtered = g_vif1_filter && ch.base == 0x10009000u;
+    Vif1Chain chain;
+    DmaBlockSink send = sink;
+    if (filtered)
+        sink = [&chain](const u32* words, u32 count, u32 from) {
+            chain.words.insert(chain.words.end(), words, words + count);
+            chain.runs.emplace_back(count, from);
+        };
     char text[160] = "";
     try {
         Timed timed(Section::Dma);      // (VU1 and the GS, which it drives, timed apart)
         // The GIF takes no chain tags (TTE): dma.h.
         const bool tags = ch.base != 0x1000A000u;
         const DmaOutcome outcome = SendDmaBlocks(state, sink, 1u << 16, tags);
+        if (filtered) {
+            g_vif1_filter(chain);
+            const u32* at = chain.words.data();
+            for (const auto& [count, from] : chain.runs) {
+                send(at, count, from);
+                at += count;
+            }
+        }
         if (describe)
             std::snprintf(text, sizeof text, "%llu quadwords, %u tags%s",
                       static_cast<unsigned long long>(outcome.quadwords), outcome.tags,
@@ -359,6 +378,8 @@ std::string Walk(const Channel& ch, u32 chcr, bool describe) {
 constexpr u32 kVif1Fifo = 0x10005000u;
 
 }  // namespace
+
+void SetVif1ChainFilter(std::function<void(Vif1Chain&)> filter) { g_vif1_filter = std::move(filter); }
 
 namespace {
 std::string g_frames_dir;
