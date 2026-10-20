@@ -51,6 +51,13 @@ struct HighFpsCamera {
 };
 
 struct HighFpsGame {
+    // The game's steps a vertical blank on the console: 1 for a game that
+    // steps 60 times a second (Burnout 3), 0.5 for one that draws 30 pictures
+    // a second, a step each (Resident Evil Outbreak) - its own picture rate
+    // 60 or 30; above it, a high frame rate (FRAME RATE 60 is one for it).
+    double steps_per_blank = 1.0;
+    // FRAME RATE's value when the setting is not set: the game's own rate.
+    const char* default_rate = "60";
     std::vector<HighFpsRegion> transforms;
     std::vector<HighFpsCamera> cameras;
     // Further a step than this (in the game's units): a cut, not motion.
@@ -99,7 +106,16 @@ int HighFpsSteps(unsigned blanks, int most);
    handler): back to 60 when its frames have stopped. */
 void HighFpsBlank();
 
-/* Above 60: the rate (pictures a second; 0 at the game's own). */
+/* Above the game's own rate: the rate (pictures a second; 0 at its own). */
 double HighFpsRate();
+
+/* Where the picture drawn now is between the game's last two steps (1: as
+   the last left it) - for a game that makes its pictures between steps
+   itself (from its display lists: ps2host/display_list.h). */
+float HighFpsPictureTime();
+
+/* The game's own picture rate (60, 30) - 0 when it has not configured a
+   high frame rate (HighFpsConfigure): the F9 panel's FRAME RATE row. */
+double HighFpsOwnRate();
 
 }  // namespace ps2host

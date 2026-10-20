@@ -43,6 +43,7 @@ namespace ps2host {
 namespace {
 
 HighFpsGame g_game;
+bool g_configured = false;
 
 // The pictures a second while above 60 (0: not), and the steps one blank
 // moves the game's time on.
@@ -99,11 +100,15 @@ u64 g_late_seen = 0;                    // LatePictures at the last look
 /* FRAME RATE, as pictures a second (60: none above the game's own):
    PS2HOST_FRAME_RATE, else the setting - 120, or "display", the screen's
    refresh (up to 240; 60 where it is not known or below 90). */
+/* The game's own picture rate: 60 for a game that steps each blank, 30 for
+   one that steps every second one. */
+double Own() { return 60.0 * g_game.steps_per_blank; }
+
 double Wanted() {
     static const char* env = std::getenv("PS2HOST_FRAME_RATE");
-    const std::string rate = env ? std::string(env) : Setting("frame_rate", "60");
+    const std::string rate = env ? std::string(env) : Setting("frame_rate", g_game.default_rate);
     const double hz = rate == "display" ? double(WindowRefreshRate()) : std::atof(rate.c_str());
-    double want = hz >= 90.0 ? std::min(hz, 240.0) : 60.0;
+    double want = hz >= 1.5 * Own() ? std::min(hz, 240.0) : Own();
     // PS2HOST_HIGH_FPS_FROM=<frame>: 60 until then (a scripted run's test:
     // its presses land as at 60, and the same screen at 60 and above is
     // compared at the same times).
@@ -111,7 +116,7 @@ double Wanted() {
         const char* e = std::getenv("PS2HOST_HIGH_FPS_FROM");
         return e ? std::strtoull(e, nullptr, 10) : 0ull;
     }();
-    if (FrameNumber() < from) want = 60.0;
+    if (FrameNumber() < from) want = Own();
     return g_cap > 0.0 ? std::min(want, g_cap) : want;
 }
 
@@ -126,7 +131,7 @@ void KeepUp() {
     g_sampled = 0;
     if (g_looks++ == 0) return;         // (the change's own catching up)
     if (late * 20 > u64(sample)) {
-        g_cap = std::max(60.0, 60.0 * std::ceil(g_rate / 60.0 - 1.0 - 1e-6));
+        g_cap = std::max(Own(), 60.0 * std::ceil(g_rate / 60.0 - 1.0 - 1e-6));
         std::fprintf(stderr, "[high fps] %llu of %d pictures late at %.0f a second: %.0f for this race\n",
                      static_cast<unsigned long long>(late), sample, g_rate, g_cap);
     }
@@ -140,11 +145,11 @@ double Pace(double hz) {
     if (std::fabs(hz - 60.0 * multiple) < multiple) {
         SetBlankRate(0.0);
         SetFastForward(unsigned(multiple));
-        return 1.0 / multiple;
+        return g_game.steps_per_blank / multiple;
     }
     SetFastForward(1);
     SetBlankRate(hz);
-    return kStepRate / hz;
+    return g_game.steps_per_blank * kStepRate / hz;
 }
 
 /* The game running: its frames (HighFpsFrameSteps) went on within the last
@@ -411,6 +416,7 @@ void Reset() {
 
 void HighFpsConfigure(const HighFpsGame& game) {
     g_game = game;
+    g_configured = true;
     g_cameras.assign(game.cameras.size(), CameraValues{});
     for (size_t k = 0; k < game.cameras.size(); ++k) {
         CameraValues& v = g_cameras[k];
@@ -452,17 +458,17 @@ void HighFpsPicture() {
     static int differing = 0;
     const bool running = Running();
     if (!running) g_cap = 0.0;          // (the next run tries the setting's rate again)
-    const double want = running ? Wanted() : 60.0;
-    const double now = g_rate > 0.0 ? g_rate : 60.0;
+    const double want = running ? Wanted() : Own();
+    const double now = g_rate > 0.0 ? g_rate : Own();
     differing = std::fabs(want - now) >= 0.5 ? differing + 1 : 0;
-    if (differing >= (want > 60.0 ? 1 : g_game.settle)) {
+    if (differing >= (want > Own() ? 1 : g_game.settle)) {
         differing = 0;
         std::fprintf(stderr, "[high fps] %.0f pictures a second\n", want);
         PutBack();
         Reset();
         g_sampled = 0;
         g_looks = 0;
-        if (want > 60.0) {
+        if (want > Own()) {
             g_rate = want;
             g_per_picture = Pace(want);
         } else {
@@ -509,5 +515,9 @@ void HighFpsBlank() {
 }
 
 double HighFpsRate() { return g_rate; }
+
+float HighFpsPictureTime() { return g_picture_time; }
+
+double HighFpsOwnRate() { return g_configured ? Own() : 0.0; }
 
 }  // namespace ps2host

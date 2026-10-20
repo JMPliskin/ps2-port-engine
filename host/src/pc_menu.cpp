@@ -15,6 +15,7 @@
 #include <string>
 #include <vector>
 
+#include "ps2host/high_fps.h"
 #include "ps2host/run.h"
 #include "ps2host/settings.h"
 #include "ps2host/texture_pack.h"
@@ -67,6 +68,16 @@ const std::vector<Choice>& Choices() {
          [] { return OnOff(SettingOn("frame_pacing", FramePacingDefault())); },
          [](const std::string& v) { SetSettingOn("frame_pacing", v == "on"); },
          "PACING", {"ON", "OFF"}, "Frame pacing: pictures shown at an even pace."},
+        // FRAME RATE (high_fps.h): a game at 30 pictures a second has 30
+        // among its rates; one at 60 does not (the row its own, below).
+        {"Frame rate", {"30", "60", "120", "display"}, {"30 (the game's)", "60", "120", "The screen's"},
+         [] { return Setting("frame_rate", "30"); },
+         [](const std::string& v) { SetSetting("frame_rate", v); },
+         "FRAME RATE", {"30", "60", "120", "DISPLAY"}, "Pictures a second; the game still steps at its own pace."},
+        {"Frame rate ", {"60", "120", "display"}, {"60 (the game's)", "120", "The screen's"},
+         [] { return Setting("frame_rate", "60"); },
+         [](const std::string& v) { SetSetting("frame_rate", v); },
+         "FRAME RATE", {"60", "120", "DISPLAY"}, "Pictures a second; the game still steps at its own pace."},
         {"Texture pack", {"on", "off"}, {"On", "Off"},
          [] { return OnOff(texture_pack::Enabled()); },
          [](const std::string& v) {
@@ -83,7 +94,13 @@ std::vector<int> Rows() {
     std::vector<int> rows;
     const auto& c = Choices();
     for (int i = 0; i < int(c.size()); ++i)
-        if (std::string(c[i].label) != "Texture pack" || texture_pack::Count()) rows.push_back(i);
+    {
+        const std::string label = c[i].label;
+        // FRAME RATE: the row for the game's own rate (30 or 60), when it has one.
+        if (label == "Frame rate" && HighFpsOwnRate() != 30.0) continue;
+        if (label == "Frame rate " && HighFpsOwnRate() != 60.0) continue;
+        if (label != "Texture pack" || texture_pack::Count()) rows.push_back(i);
+    }
     rows.push_back(-1);
     return rows;
 }
