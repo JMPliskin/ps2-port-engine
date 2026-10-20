@@ -20,8 +20,9 @@
  * a sign turned over (w through 0: vertices thrown across the screen), a
  * flickering light's billboard. That segment (stepping as the game does), a
  * segment with no match (what came into the picture) and every
- * other word are the newer list's. Where many segments jump or move at once
- * (`cut_share` of them) the camera has cut: nothing is blended.
+ * other word are the newer list's. Where the camera's own segment jumps
+ * (`cut_segment`), or else where many segments jump or move at once
+ * (`cut_share` of them), the camera has cut: nothing is blended.
  *
  * A pair's blend is planned once (PlanListBlend: the words to blend, from and
  * to) and made for each picture between the two steps (ApplyListBlend).
@@ -36,6 +37,11 @@ struct ListBlendOptions {
     int segment_address = 0;    // a segment starts at each UNPACK to this VU address (-1: one segment)
     float jump = 0.5f;          // of a lane's largest value: a jump - the segment not blended
     float cut_share = 0.2f;     // segments jumping or moved, of those matched: the camera cut
+    float moved_distance = 0.02f;   // a match out of its place: its first values this far a word at most
+    // The segment that is the camera (its view's matrices: Outbreak's 1, the
+    // first after the list's start): its jump the cut, and only it (a flash
+    // of light makes many things jump at once); -1: `cut_share` decides.
+    int cut_segment = -1;
 };
 
 struct ListBlend {

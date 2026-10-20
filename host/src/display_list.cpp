@@ -84,13 +84,15 @@ float Float(u32 w) {
 }
 
 /* How far apart two segments' first UNPACKs are (each thing's matrices):
-   0 the same, ~1 a value a word unlike. */
-float Distance(const std::vector<u32>& a, const Code& ca, const std::vector<u32>& b, const Code& cb) {
+   0 the same, ~1 a value a word unlike; `words` the words that differ. */
+float Distance(const std::vector<u32>& a, const Code& ca, const std::vector<u32>& b, const Code& cb, u32* words) {
+    *words = 0;
     if (!ca.floats || ca.words != cb.words) return 0.0f;
     float d = 0.0f;
     for (u32 k = 1; k <= ca.words; ++k) {
         const u32 wa = a[ca.at + k], wb = b[cb.at + k];
         if (wa == wb) continue;
+        ++*words;
         const float x = Float(wa), y = Float(wb);
         if (!Plausible(x) || !Plausible(y)) { d += 1.0f; continue; }
         d += std::fabs(y - x) / (std::fabs(x) + std::fabs(y) + 1.0f);
@@ -163,36 +165,50 @@ ListBlend PlanListBlend(const Vif1Chain& a, const Vif1Chain& b, const ListBlendO
     used.assign(sa.size(), false);
 
     u32 expected = 0, matched = 0;
-    for (const Segment& s : sb) {
+    bool camera_cut = false;        // (options.cut_segment's)
+    for (u32 jb = 0; jb < sb.size(); ++jb) {
+        const Segment& s = sb[jb];
+        const bool camera = int(jb) == o.cut_segment;
         auto lo = std::lower_bound(keys.begin(), keys.end(), std::make_pair(s.key, 0u));
         auto hi = std::upper_bound(keys.begin(), keys.end(), std::make_pair(s.key, ~0u));
         // Its place first; else the nearest values among the unused nearby.
-        u32 best = ~0u;
+        u32 best = ~0u, best_words = 0;
         float best_d = 0.0f;
         const auto at = std::lower_bound(lo, hi, std::make_pair(s.key, expected));
         auto try_one = [&](u32 i) {
             if (used[i]) return;
-            const float d = Distance(a.words, ca[sa[i].first], b.words, cb[s.first]);
+            u32 words = 0;
+            const float d = Distance(a.words, ca[sa[i].first], b.words, cb[s.first], &words);
             const bool nearer = best == ~0u || d < best_d ||
                                 (d == best_d && (i > expected ? i - expected : expected - i) <
                                                     (best > expected ? best - expected : expected - best));
-            if (nearer) { best = i; best_d = d; }
+            if (nearer) { best = i; best_d = d; best_words = words; }
         };
         int n = 0;
         for (auto p = at; p != hi && n < 16; ++p, ++n) try_one(p->second);
         n = 0;
         for (auto p = at; p != lo && n < 16; ++n) try_one((--p)->second);
+        // Out of its place, only a near match: one far (a thing whose own
+        // match drew with other codes this step - more batches, its detail -
+        // paired with another of the codes it now has) is not one.
+        if (best != ~0u && best != expected && best_d > o.moved_distance * float(std::max(1u, best_words)))
+            best = ~0u;
         if (best == ~0u) {
             ++r.unmatched;
+            camera_cut |= camera;
             continue;
         }
         used[best] = true;
         ++matched;
         if (best != expected) ++r.moved;
+        camera_cut |= camera && best != expected;
         expected = best + 1;
-        if (!PlanPair(a.words, ca, sa[best].first, b.words, cb, s, o, plan)) ++r.jumps;
+        if (!PlanPair(a.words, ca, sa[best].first, b.words, cb, s, o, plan)) {
+            ++r.jumps;
+            camera_cut |= camera;
+        }
     }
-    if (matched && float(r.jumps + r.moved) > o.cut_share * float(matched)) {
+    if (o.cut_segment >= 0 ? camera_cut : matched && float(r.jumps + r.moved) > o.cut_share * float(matched)) {
         r.cut = true;
         plan.at.clear();
         plan.from.clear();
