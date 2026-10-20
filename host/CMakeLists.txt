@@ -154,10 +154,14 @@ if(MSVC)
     endif()
     # PS2HOST_LTO (clang-cl, lld-link): ThinLTO - the host's functions the
     # game's code calls (memory, the dispatch, the VU's) inlined across files.
+    # The link compiles the files again (the VU's take 2 GB and more each):
+    # as many at once as PS2HOST_LTO_JOBS (port.py: as for the compiler, by
+    # the memory there is - all the processors' worth ran out of it).
     option(PS2HOST_LTO "ThinLTO (clang-cl and lld-link)" OFF)
+    set(PS2HOST_LTO_JOBS "all" CACHE STRING "ThinLTO's code generators at once in the link")
     if(PS2HOST_LTO AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
         target_compile_options(ps2rt PUBLIC /clang:-flto=thin)
-        target_link_options(ps2rt PUBLIC /opt:lldltojobs=all)
+        target_link_options(ps2rt PUBLIC /opt:lldltojobs=${PS2HOST_LTO_JOBS})
     endif()
     target_compile_options(ps2host PRIVATE /Z7)     # symbols for --sample, as the ports'
     target_compile_options(ps2rt PRIVATE /Z7)

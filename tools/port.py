@@ -390,9 +390,9 @@ def build(game, generated: str, sse4: bool = False, pgo: str = "") -> str:
         handle.write('@echo off\ncall "%s" >nul\n' % cppcheck.find_vcvars())
         handle.write('"%s" -S "%s" -B "%s" -G Ninja -DCMAKE_BUILD_TYPE=Release '
                      '-DCMAKE_MAKE_PROGRAM="%s" -DPS2_GENERATED_DIR="%s" -DPS2HOST_AVX2=%s "-DPS2HOST_PGO=%s"'
-                     ' -DPS2HOST_LTO=%s%s >nul || exit /b 1\n'
+                     ' -DPS2HOST_LTO=%s -DPS2HOST_LTO_JOBS=%d%s >nul || exit /b 1\n'
                      % (cmake, source, binary, ninja, generated.replace("\\", "/"), "OFF" if sse4 else "ON",
-                        profile, lto, compilers))
+                        profile, lto, _build_jobs(), compilers))
         handle.write('"%s" --build "%s" -j %d || exit /b 1\n' % (cmake, binary, _build_jobs()))
     result = subprocess.run(["cmd", "/c", script], capture_output=True, text=True)
     if result.returncode:
