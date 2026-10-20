@@ -120,6 +120,20 @@ stop at 200 pictures a run.
 - Scripted runs above 60 desync from their presses (the menus take more
   pictures): switch at a frame with `PS2HOST_HIGH_FPS_FROM`.
 - Real time frame dumps stall: judge real time with the benchmark only.
+- A false cut is a jitter: the camera not blended for one step stands
+  still for its pictures, then goes on. Burnout's +0x20 values (its "way of
+  looking") are negated for a step now and then at speed, and shrink to a
+  few hundredths: both read as sharp turns. The engine now takes a negation
+  with the position moving on as no cut, and judges turns only for values
+  of a length. Find them with a real-time race at the screen's rate and
+  `PS2HOST_HIGH_FPS_TRACE`: `high_fps_trace.py`'s "jump" where the placed
+  position equals the step's for 2-3 pictures.
+- Anything that waits on the renderer's thread once a draw ruins high
+  rates: the texture pack's "is the replacement still on the GPU" drained
+  the threaded renderer's queue each draw (half the GS thread, the race
+  stepped down to 60). `PS2HOST_GPU_THREAD_LOG=1` lists the waits; a GS
+  thread profile (`--sample-gs`, `PS2HOST_SAMPLE_RAW`, `hotspots.py`) shows
+  `_Cnd_wait` under the culprit.
 
 ## Games at 30 pictures a second (Resident Evil Outbreak)
 
