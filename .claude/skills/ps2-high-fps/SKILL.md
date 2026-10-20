@@ -121,6 +121,31 @@ stop at 200 pictures a run.
   pictures): switch at a frame with `PS2HOST_HIGH_FPS_FROM`.
 - Real time frame dumps stall: judge real time with the benchmark only.
 
+## Games at 30 pictures a second (Resident Evil Outbreak)
+
+First measure the game's own rate: dump consecutive pictures in virtual time
+and `frame_motion.py steps` - "x 0 x 0" is 30 a second (Outbreak: its frame
+end waits for blanks past an interval - 0x001A90B0, 0x0029FA04, reloaded
+each blank from 0x0029FA08 by its own blank handler).
+
+1. **Try the interval first** (a picture every blank): if the game's steps
+   follow time (dt), that is native 60 - check with `match` against the
+   30-picture run at equal frames. Outbreak's steps follow pictures: twice
+   as fast. Burnout's car select followed time; its main menu did not.
+2. **Then the draw**: an in-between picture needs the game's drawing without
+   its step. Look for a separate draw: in Burnout the world update and the
+   draw were apart (one could run alone). Test a candidate split by running
+   only the later part on in-between pictures: `match` shows whether the
+   game keeps its speed (Outbreak: its gameplay frame 0x005FED00's calls
+   from the 25th on - speed exact), and the pictures whether they are drawn
+   (Outbreak: black - its scene is drawn *inside* the update functions, calls
+   3-24, not after them; skipping the whole game task left the last picture
+   on screen).
+3. Where drawing is inside the updates, high fps needs those split by hand
+   (each subsystem's draw apart from its step), or an engine-level
+   technique (replaying the last picture's draw with its matrices placed) -
+   a project of its own, decided with the user.
+
 ## Checks (all of them, every change)
 
 - **Regressions at 60 unchanged** (the setting off): `regress_all.py
