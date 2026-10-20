@@ -27,6 +27,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <ctime>
 #include <filesystem>
 #include <functional>
@@ -725,6 +726,25 @@ void InstallDevices() {
                               unsigned(memory.Read(qwc, 4)), unsigned(memory.Read(ch.base + kTadr, 4)));
             if (traced) std::fprintf(gs::TheGs().trace_out, "[dma] %s\n", text);
             if (ch.base == 0x10009000u) ++g_vif1_transfers;
+            // PS2HOST_TRACE_KICKS=<frame>: in that frame, each VIF1 or GIF
+            // transfer started, with the guest's calls that started it - who
+            // draws what (a high frame rate's search for a game's draw).
+            static const long long kick_frame = [] {
+                const char* e = std::getenv("PS2HOST_TRACE_KICKS");
+                return e ? std::atoll(e) : -1ll;
+            }();
+            if (kick_frame >= 0 && (ch.base == 0x10009000u || ch.base == 0x1000A000u) &&
+                (long long)FrameNumber() == kick_frame) {
+                std::string calls;
+                for (u32 a : CurrentCalls()) {
+                    char one[16];
+                    std::snprintf(one, sizeof one, " %08X", unsigned(a));
+                    calls += one;
+                }
+                std::fprintf(stderr, "[kick] %s MADR=0x%08X QWC=%u CHCR=0x%08X <-%s\n", ch.name,
+                             unsigned(memory.Read(madr, 4)), unsigned(memory.Read(qwc, 4)), unsigned(value),
+                             calls.c_str());
+            }
             const std::string walked = ch.walked ? Walk(ch, u32(value), describe) : std::string();
             if (describe) Note(key, ch.walked ? std::string(text) + ": " + walked : std::string(text));
             *Register(chcr) &= ~0x100u;                         // done
