@@ -147,6 +147,13 @@ if(MSVC)
                                    /clang:-Wno-backend-plugin)
         endif()
     endif()
+    # PS2HOST_LTO (clang-cl, lld-link): ThinLTO - the host's functions the
+    # game's code calls (memory, the dispatch, the VU's) inlined across files.
+    option(PS2HOST_LTO "ThinLTO (clang-cl and lld-link)" OFF)
+    if(PS2HOST_LTO AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+        target_compile_options(ps2rt PUBLIC /clang:-flto=thin)
+        target_link_options(ps2rt PUBLIC /opt:lldltojobs=all)
+    endif()
     target_compile_options(ps2host PRIVATE /Z7)     # symbols for --sample, as the ports'
     target_compile_options(ps2rt PRIVATE /Z7)
     target_link_libraries(ps2host PRIVATE dbghelp winmm)  # ...which resolves them; 1 ms sleeps
