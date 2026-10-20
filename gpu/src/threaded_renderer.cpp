@@ -270,10 +270,11 @@ public:
         Drain(1);
         return inner_->UploadReplacement(id, format, width, height, levels, data, bytes);
     }
-    bool HasReplacement(std::uint64_t id) const override {
-        Drain(2);
-        return inner_->HasReplacement(id);
-    }
+    // Asked each draw of a replaced texture: the renderer's own answer, safe
+    // from here, not after the queue drains (that was half the GS thread
+    // with a texture pack). One evicted meanwhile is drawn once as the game
+    // has it - as the renderer does for any it no longer holds.
+    bool HasReplacement(std::uint64_t id) const override { return inner_->HasReplacement(id); }
     bool BlockCompression() const override {
         Drain(3);
         return inner_->BlockCompression();

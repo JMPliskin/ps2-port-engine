@@ -30,6 +30,7 @@
 #include <mutex>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "gpu_internal.h"
 #include "gs_frag.h"
@@ -387,7 +388,12 @@ public:
                        std::uint32_t height) override;
     bool UploadReplacement(std::uint64_t id, std::uint32_t format, std::uint32_t width, std::uint32_t height,
                            std::uint32_t levels, const std::uint8_t* data, std::size_t bytes) override;
-    bool HasReplacement(std::uint64_t id) const override { return replacements_.count(id) != 0; }
+    // (any thread: the threaded renderer asks it each draw without waiting
+    // for its queue - replacements_ is the renderer thread's)
+    bool HasReplacement(std::uint64_t id) const override {
+        std::lock_guard<std::mutex> hold(resident_lock_);
+        return resident_.count(id) != 0;
+    }
     void UseReplacement(std::uint64_t key, std::uint64_t id) override { textures_[key].replacement = id; }
     bool BlockCompression() const override { return g_.bc; }
     void UploadDepth(std::uint32_t zbp, std::uint32_t width, std::uint32_t height, const std::uint32_t* z) override;
@@ -619,6 +625,14 @@ private:
        drawn for the longest go when they come to over kReplacementBudget. */
     std::unordered_map<std::uint64_t, Texture> replacements_;
     VkDeviceSize replacement_bytes_ = 0;
+    // Their ids, for HasReplacement from another thread.
+    mutable std::mutex resident_lock_;
+    std::unordered_set<std::uint64_t> resident_;
+    void Resident(std::uint64_t id, bool in) {
+        std::lock_guard<std::mutex> hold(resident_lock_);
+        if (in) resident_.insert(id);
+        else resident_.erase(id);
+    }
     std::uint64_t frame_ = 0;
     static constexpr VkDeviceSize kReplacementBudget = VkDeviceSize(1536) << 20;
     void EvictReplacements();
@@ -2258,6 +2272,7 @@ bool VulkanGsRenderer::UploadReplacement(std::uint64_t id, std::uint32_t format,
         replacement_bytes_ -= old->second.bytes;
         DestroyTexture(old->second);
         replacements_.erase(old);
+        Resident(id, false);
     }
     Texture texture;
     if (!MakeImage(texture.image, width, height, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
@@ -2289,6 +2304,7 @@ bool VulkanGsRenderer::UploadReplacement(std::uint64_t id, std::uint32_t format,
     texture.bytes = at;
     replacement_bytes_ += at;
     replacements_[id] = texture;
+    Resident(id, true);
     return true;
 }
 
@@ -2305,6 +2321,7 @@ void VulkanGsRenderer::EvictReplacements() {
         replacement_bytes_ -= found->second.bytes;
         DestroyTexture(found->second);
         replacements_.erase(found);
+        Resident(id, false);
     }
 }
 
