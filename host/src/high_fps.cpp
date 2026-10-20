@@ -199,9 +199,11 @@ void CameraTakenDown(const HighFpsCamera& camera, CameraValues& v) {
     if (camera.direction >= 0) {
         const float* la = v.last.data() + camera.direction;
         const float* na = v.now.data() + camera.direction;
+        // (only where the two are of a length: Burnout 3's +0x20 values
+        // shrink to a few hundredths now and then, and their turns are noise)
         const float lengths = std::sqrt(Dot3(la, la) * Dot3(na, na));
-        turn = lengths > 0.0f ? std::acos(std::min(1.0f, std::max(-1.0f, Dot3(la, na) / lengths))) * 57.29578f
-                              : 0.0f;
+        turn = lengths > 0.01f ? std::acos(std::min(1.0f, std::max(-1.0f, Dot3(la, na) / lengths))) * 57.29578f
+                               : 0.0f;
     }
     const bool reversed = step > 1.0f && Dot3(d, v.way) < 0.0f;
     const bool jumped = step > 1.0f && step > 3.0f * v.step;
