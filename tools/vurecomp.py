@@ -455,6 +455,29 @@ def fuse_flags(lines: list) -> list:
     return ["C::Fmac<%s, %d>(%s" % (", ".join(params), mode, args)]
 
 
+def mac_only(lines: list) -> list:
+    """The upper's flags as a fast block of a program that never reads
+    STATUS sets them: MAC alone (Fmac's SetFlags 3, MacFlags), STATUS's
+    sticky bits not at all."""
+    out = []
+    for line in lines:
+        if line.startswith("C::StickyFlags<"):
+            continue
+        if line.startswith("C::Flags<"):
+            line = "C::MacFlags<" + line[len("C::Flags<"):]
+        elif line.startswith("C::Fmac<"):
+            head, args = line.split(">(", 1)
+            params = head[len("C::Fmac<"):].split(", ")
+            if len(params) == 6:
+                if params[5] == "2":
+                    params = params[:5]
+                elif params[5] == "1":
+                    params[5] = "3"
+                line = "C::Fmac<%s>(%s" % (", ".join(params), args)
+        out.append(line)
+    return out
+
+
 # The lower operations that hold a vector register write back to the pair's
 # end, and where their arguments name it: (index of `it`, index of `dest`)
 # counted from the end of the argument list.
@@ -585,7 +608,7 @@ def leave_to(pc: int, chain: dict) -> str:
 def emit_pair(pc: int, lower: int, upper: int, mask: int, last: bool, index: int = 0,
               written: dict = None, clean: dict = None, dead_flags: bool = False,
               after: tuple = None, no_flags: bool = False, chain: dict = None, fl: Flags = None,
-              quiet: set = frozenset()) -> list:
+              quiet: set = frozenset(), no_status: bool = False) -> list:
     """One pair, as Run runs it, then where the run goes: on to the next pair
     of the block, or (`last`, a branch taken, the program's end) back to the
     driver with s.pc. `index` is its place in the block and `written` where
@@ -596,7 +619,8 @@ def emit_pair(pc: int, lower: int, upper: int, mask: int, last: bool, index: int
     `stopping` and `delayed` can be set only by the pair before - and are
     checked only after one that may set them. `no_flags`: the fast blocks
     of a program that never reads MAC or STATUS (fast_eligible) - an FMAC
-    leaves both alone (CLIP is as ever)."""
+    leaves both alone (CLIP is as ever). `no_status`: the fast blocks of a
+    program that never reads STATUS - an FMAC sets MAC alone (mac_only)."""
     if written is None:
         written = {}
     immediate = bool(upper & 0x80000000)
@@ -638,6 +662,8 @@ def emit_pair(pc: int, lower: int, upper: int, mask: int, last: bool, index: int
         upper_lines = [line.replace("C::Flags<", "C::StickyFlags<") for line in upper_lines]
         set_flags = False
     upper_lines = fuse_flags(upper_lines)
+    if no_status:
+        upper_lines = mac_only(upper_lines)
     if fl is not None and any(name in line for line in lower_lines
                               for name in ("C::Mac(v, cyc)", "C::Clip(v, cyc)", "C::Status(v, cyc)")):
         # A flag reader: what it reads landed first (Flags), and straight
@@ -686,7 +712,8 @@ def emit_pair(pc: int, lower: int, upper: int, mask: int, last: bool, index: int
         # Held, not queued (Flags): the pair's flags as FinishUpper takes them.
         kind = "mac" if sets_mac == "true" else "clip"
         if kind == "mac":
-            body.append("fm%d = C::MacLatest(v); fs%d = C::StatusLatest(v); fc%d = cyc;" % (index, index, index))
+            body.append("fm%d = C::MacLatest(v); fs%d = %s; fc%d = cyc;"
+                        % (index, index, "0u" if no_status else "C::StatusLatest(v)", index))
             fl.declared.append("u32 fm%d, fs%d; u64 fc%d;" % (index, index, index))
         else:
             body.append("fl%d = C::ClipLatest(v); fc%d = cyc;" % (index, index))
@@ -940,7 +967,7 @@ def quiet_blocks(blocks: list, pairs: dict) -> set:
 
 
 def emit_block(name: str, block: list, pairs: dict, mask: int, drops: set = frozenset(),
-               chain: dict = None, quiet: set = frozenset()) -> list:
+               chain: dict = None, quiet: set = frozenset(), no_status: bool = False) -> list:
     # The run's state and the cycle as locals, written back where the block
     # leaves (LEAVE): nothing the block does can reach them through memory.
     # A block starts only with as many pairs left to the limit as it has
@@ -962,7 +989,8 @@ def emit_block(name: str, block: list, pairs: dict, mask: int, drops: set = froz
     head = len(out)
     for i, pc in enumerate(block):
         out += emit_pair(pc, pairs[pc][0], pairs[pc][1], mask, i == len(block) - 1, i, written, clean,
-                         i in dead, pairs[block[i - 1]] if i else None, pc in drops, chain, fl, quiet)
+                         i in dead, pairs[block[i - 1]] if i else None, pc in drops, chain, fl, quiet,
+                         no_status)
     out[head:head] = ["    " + line for line in fl.declared]
     out.append("}")
     # The blocks it goes on into, declared before it (they may be in another file).
@@ -1034,14 +1062,17 @@ def generate_files(programs: list, what: str, single: str = None) -> dict:
         blocks = blocks_of(pairs, entries, mask)
         names = []
         drops = fast_drops(unit, pairs, mask)
-        fast = bool(drops)
+        # A fast variant wherever STATUS is never read: its MAC left out where
+        # no one sees it (drops), its STATUS everywhere (no_status).
+        fast = drops is not None
         quiet = quiet_blocks(blocks, pairs)
         for block in blocks:
             block_name = "%sBlock%04X" % (name, block[0])
             names.append((block[0], block_name))
             for variant, dropped in [("", frozenset())] + ([("Fast", drops)] if fast else []):
                 chain = {b[0]: "%sBlock%04X%s" % (name, b[0], variant) for b in blocks}
-                code = emit_block(block_name + variant, block, pairs, mask, dropped, chain, quiet)
+                code = emit_block(block_name + variant, block, pairs, mask, dropped, chain, quiet,
+                                  no_status=variant == "Fast")
                 if single is None and len(chunks[-1]) + len(code) > LINES_PER_FILE and chunks[-1]:
                     chunks.append([])
                 chunks[-1] += code + [""]

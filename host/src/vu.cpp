@@ -770,7 +770,7 @@ int Vu::Bench(const std::string& path, int passes, bool fast) {
         return 1;
     }
     double best = 0;
-    u64 pairs = 0, hash = 0;
+    u64 pairs = 0, hash = 0, data_hash = 0;
     // PS2HOST_VU_BY_PROGRAM: the best pass's time and pairs by the address
     // each run started at (the microprogram), most first.
     static const bool by_program = std::getenv("PS2HOST_VU_BY_PROGRAM") != nullptr;
@@ -781,7 +781,7 @@ int Vu::Bench(const std::string& path, int passes, bool fast) {
     for (int pass = 0; pass < passes; ++pass) {
         double seconds = 0;
         programs.clear();
-        u64 pass_pairs = 0, pass_hash = 1469598103934665603ull;
+        u64 pass_pairs = 0, pass_hash = 1469598103934665603ull, pass_data_hash = 1469598103934665603ull;
         std::uint8_t* micro_now = nullptr;
         for (Run& r : runs) {
             if (micro_now != r.micro.data() &&
@@ -812,19 +812,24 @@ int Vu::Bench(const std::string& path, int passes, bool fast) {
                 if (pass == 0) ++program_runs[r.s.pc];
             }
             // FNV-1a, a word at a time, over what the run left: registers, flags, data memory.
-            auto mix = [&pass_hash](const void* p, std::size_t n) {
+            // The second (data_hash) all but MAC and STATUS: what fast mode
+            // (--vu-fast) keeps exact.
+            auto mix = [&pass_hash, &pass_data_hash](const void* p, std::size_t n, bool data = true) {
                 const std::uint8_t* b = static_cast<const std::uint8_t*>(p);
                 for (std::size_t i = 0; i + 8 <= n; i += 8) {      // (every size here is a multiple of 8)
                     std::uint64_t word;
                     std::memcpy(&word, b + i, 8);
                     pass_hash = (pass_hash ^ word) * 1099511628211ull;
+                    if (data) pass_data_hash = (pass_data_hash ^ word) * 1099511628211ull;
                 }
             };
             mix(vu.regs.vf, sizeof vu.regs.vf);
             mix(vu.regs.vc, sizeof vu.regs.vc);
             mix(vu.regs.vacc, sizeof vu.regs.vacc);
             const u32 flags[4] = {vu.mac, vu.status, vu.clip, vu.p};
-            mix(flags, sizeof flags);
+            mix(flags, sizeof flags, false);
+            const u32 kept[2] = {vu.clip, vu.p};
+            pass_data_hash = (pass_data_hash ^ (u64(kept[0]) | u64(kept[1]) << 32)) * 1099511628211ull;
             mix(vu.data.data(), 16384);
         }
         if (pass == 0 || seconds < best) {
@@ -833,6 +838,7 @@ int Vu::Bench(const std::string& path, int passes, bool fast) {
         }
         pairs = pass_pairs;
         hash = pass_hash;
+        data_hash = pass_data_hash;
     }
     if (by_program) {
         std::vector<std::pair<double, u32>> order;
@@ -865,9 +871,10 @@ int Vu::Bench(const std::string& path, int passes, bool fast) {
                     (unsigned long long)(entries / u64(passes)), entries ? double(block_pairs) / double(entries) : 0.0);
         g_block_times = nullptr;
     }
-    std::printf("vu-bench: %zu runs, %llu pairs, best pass %.1f ms, %.2f ns a pair; state hash %016llX\n",
+    std::printf("vu-bench: %zu runs, %llu pairs, best pass %.1f ms, %.2f ns a pair; state hash %016llX"
+                " (but MAC and STATUS: %016llX)\n",
                 runs.size(), (unsigned long long)pairs, best * 1000, pairs ? best * 1e9 / double(pairs) : 0.0,
-                (unsigned long long)hash);
+                (unsigned long long)hash, (unsigned long long)data_hash);
     return 0;
 }
 

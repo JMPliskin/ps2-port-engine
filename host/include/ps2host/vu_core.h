@@ -464,6 +464,7 @@ struct VuCore {
         const __m128i result = lifted::LanesSse<Op, Known | 7, true>(a, b, acc);
         if constexpr (SetFlags == 1) FlagsOf<Dest>(v, result);
         else if constexpr (SetFlags == 2) StickyFlagsOf<Dest>(v, result);
+        else if constexpr (SetFlags == 3) MacFlagsOf<Dest>(v, result);
         if constexpr (To == 0) {
             _mm_storeu_si128(reinterpret_cast<__m128i*>(v.discarded_), result);
             return;
@@ -497,6 +498,7 @@ struct VuCore {
         else lifted::RunFmac(v.regs, f);
         if constexpr (SetFlags == 1) Flags<To, Dest>(v);
         else if constexpr (SetFlags == 2) StickyFlags<To, Dest>(v);
+        else if constexpr (SetFlags == 3) MacFlags<To, Dest>(v);
     }
 #endif
     /* Macro mode's COP2 operations, as it runs them (vu0.cpp's Cop2), without
@@ -671,7 +673,36 @@ struct VuCore {
         const u32 sign = u32(_mm_movemask_ps(_mm_castsi128_ps(bits))) & kLanes;
         v.status_latest_ |= ((zero ? 1u : 0u) | (sign ? 2u : 0u)) << 6;
     }
+    /* MAC alone, for the fast blocks of a program that never reads STATUS
+       (vurecomp.py: no_status): STATUS is left as it was - its bits, sticky
+       ones and all, were a read and a write of status_latest_ chaining every
+       FMAC to the one before. */
+    template <u32 Dest>
+    static PS2HOST_VU_INLINE void MacFlagsOf(Vu& v, __m128i bits) {
+        bits = _mm_shuffle_epi32(bits, _MM_SHUFFLE(0, 1, 2, 3));
+        const __m128i magnitude = _mm_and_si128(bits, _mm_set1_epi32(0x7FFFFFFF));
+        const u32 zero = u32(_mm_movemask_ps(_mm_castsi128_ps(_mm_cmpeq_epi32(magnitude, _mm_setzero_si128()))));
+        const u32 sign = u32(_mm_movemask_ps(_mm_castsi128_ps(bits)));
+        v.mac_latest_ = (zero & Dest) | (sign & Dest) << 4;
+    }
 #endif
+    /* The same for an upper that is not an FMAC (MacFlagsOf). */
+    template <int Target, u32 Dest>
+    static PS2HOST_VU_INLINE void MacFlags(Vu& v) {
+        const u32* out = Target > 0 ? v.regs.vf[Target] : Target == 0 ? v.discarded_ : v.regs.vacc;
+#if PS2RT_VU_SSE
+        MacFlagsOf<Dest>(v, _mm_loadu_si128(reinterpret_cast<const __m128i*>(out)));
+#else
+        u32 m = 0;
+        for (int lane = 0; lane < 4; ++lane) {
+            if (!(Dest & (8u >> lane))) continue;
+            const u32 bits = lifted::Clean(out[lane]);
+            if ((bits & 0x7FFFFFFFu) == 0) m |= 8u >> lane;
+            if (bits & 0x80000000u) m |= 0x80u >> lane;
+        }
+        v.mac_latest_ = m;
+#endif
+    }
     template <int Target, u32 Dest>
     static PS2HOST_VU_INLINE void Flags(Vu& v) {
         const u32* out = Target > 0 ? v.regs.vf[Target] : Target == 0 ? v.discarded_ : v.regs.vacc;
