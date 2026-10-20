@@ -182,6 +182,7 @@ struct Cached {
     u64 pack_generation = 0;
     u32 begin = 0, end = 0;
     bool valid = false;
+    bool indexed = false;           // in its pages' lists (Bridge::IndexTexture)
     u64 decoded_serial = 0;         // Bridge::serial when decoded
     u64 content = 0;                // a hash of its blocks when decoded
     bool decoded = false;
@@ -233,7 +234,30 @@ struct Bridge {
         bool operator==(const Cached* other) const { return t == other; }
     };
     std::vector<std::vector<PageTexture>> texture_pages = std::vector<std::vector<PageTexture>>(512);
+    // Only textures that may be valid are listed (every valid one is): one a
+    // write invalidates leaves its pages' lists, and comes back to them when
+    // it is decoded again (Validated). Kept listed, the textures the game's
+    // upload slots had ever held were each marked invalid again on every
+    // write there - 245 of them a write in splitscreen, 0.2 still valid: 4%
+    // of the GS thread.
+    void InvalidateTextures(u32 begin, u32 end) {
+        static std::vector<Cached*> going;
+        going.clear();
+        for (u32 page = begin >> 5; page <= ((end - 1) >> 5) && page < 512; ++page)
+            for (const PageTexture& t : texture_pages[page])
+                if (t.begin < end && begin < t.end) {
+                    t.t->valid = false;
+                    going.push_back(t.t);
+                }
+        for (Cached* t : going) IndexTexture(t, false);
+    }
+    void Validated(Cached* t) {
+        t->valid = true;
+        IndexTexture(t, true);
+    }
     void IndexTexture(Cached* t, bool add) {
+        if (t->indexed == add) return;
+        t->indexed = add;
         for (u32 page = t->begin >> 5; page <= ((std::max(t->end, t->begin + 1) - 1) >> 5) && page < 512; ++page) {
             std::vector<PageTexture>& list = texture_pages[page];
             if (add) {
@@ -497,10 +521,7 @@ void Sync(Bridge& b, u32 begin, u32 end, bool write, const Owned* except = nullp
             o.stale_beyond = true;
         }
     }
-    if (write && begin < end)
-        for (u32 page = begin >> 5; page <= ((end - 1) >> 5) && page < 512; ++page)
-            for (const Bridge::PageTexture& t : b.texture_pages[page])
-                if (t.begin < end && begin < t.end) t.t->valid = false;
+    if (write && begin < end) b.InvalidateTextures(begin, end);
 }
 
 /* An image transfer about to write blocks [begin, end) (Gs::on_write): the
@@ -534,9 +555,7 @@ void SyncWrite(Bridge& b, u32 begin, u32 end, const u8* cover) {
         if (first < o.end) MarkStale(o, 1, first, last);
         else o.stale_beyond = true;
     }
-    for (u32 page = first >> 5; page <= ((last - 1) >> 5) && page < 512; ++page)
-        for (const Bridge::PageTexture& t : b.texture_pages[page])
-            if (t.begin < last && first < t.end) t.t->valid = false;
+    b.InvalidateTextures(first, last);
 }
 
 /* The pending patch (Bridge::Patch): each pixel of the transfer's rectangle
@@ -1035,7 +1054,7 @@ u64 CachedTexture(Bridge& b, const gs::Context& c, u64 texa, u32 tw, u32 th) {
         gpu_holds_now = true;
         gpu_decode();
         t.replaced = t.pack_pending = false;
-        t.valid = true;
+        b.Validated(&t);
         t.decoded = false;              // the CPU's copy was not read: no hash to compare
     }
     if (!t.valid) {
@@ -1075,7 +1094,7 @@ u64 CachedTexture(Bridge& b, const gs::Context& c, u64 texa, u32 tw, u32 th) {
             ++b.unchanged;
             t.decoded_serial = b.serial;
         }
-        t.valid = true;
+        b.Validated(&t);
         t.decoded = true;
     }
     const u64 renderer_key = t.renderer_key;
