@@ -82,6 +82,7 @@ struct CameraValues {
     float step = 0.0f, turn = 0.0f;     // the last step's
     float way[3] = {};                  // the last step's move
     bool cut = false;                   // the last step a cut
+    bool flipped = false;               // the last step only turned its way of looking round
 };
 std::vector<CameraValues> g_cameras;
 
@@ -184,7 +185,11 @@ bool Shaped(const float* m) {
    more than 60 degrees and twice as far as in the step before (the game cut
    to another camera, or turned it round). Such a step is shown as it is,
    not blended: a picture between the two showed neither, a one-picture
-   lurch. */
+   lurch. But a way of looking only turned round (its values negated: Burnout
+   3's at speed, for a step, now and then) while the camera moved on as
+   before is no cut - blended as ever, those values as the step left them
+   (blended they would pass through 0); taken for one, the camera stood
+   still for the step's pictures, then went on: a jitter. */
 void CameraTakenDown(const HighFpsCamera& camera, CameraValues& v) {
     const float* a = v.last.data() + camera.position;
     const float* b = v.now.data() + camera.position;
@@ -199,10 +204,12 @@ void CameraTakenDown(const HighFpsCamera& camera, CameraValues& v) {
                               : 0.0f;
     }
     const bool reversed = step > 1.0f && Dot3(d, v.way) < 0.0f;
-    v.cut = (step > 1.0f && step > 3.0f * v.step) || reversed || (turn > 60.0f && turn > 2.0f * v.turn);
+    const bool jumped = step > 1.0f && step > 3.0f * v.step;
+    v.flipped = turn > 170.0f && !jumped && !reversed;
+    v.cut = jumped || reversed || (turn > 60.0f && turn > 2.0f * v.turn && !v.flipped);
     std::memcpy(v.way, d, sizeof v.way);
     v.step = step;
-    v.turn = turn;
+    if (!v.flipped) v.turn = turn;
 }
 
 /* The transforms and the cameras' values as the step left them. */
@@ -302,9 +309,11 @@ void PlaceBetween(float t) {
         if (!camera || v.cut) continue;
         std::memcpy(v.was.data(), camera, count * sizeof(float));
         std::memcpy(v.placed.data(), camera, count * sizeof(float));
+        const int way = v.flipped ? g_game.cameras[k].direction : -1;
         for (size_t i = 0; i < count; ++i) {
             const float a = v.last[i], b = v.now[i];
             if (a == b || !AValue(a) || !AValue(b) || !(std::fabs(b - a) < g_game.cut)) continue;
+            if (way >= 0 && int(i) >= way && int(i) < way + 3) continue;    // (turned round: the step's)
             v.placed[i] = a + t * (b - a);
         }
         std::memcpy(camera, v.placed.data(), count * sizeof(float));
