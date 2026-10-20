@@ -304,10 +304,12 @@ std::string Walk(const Channel& ch, u32 chcr, bool describe) {
     // A VIF1 chain a filter takes (SetVif1ChainFilter): walked whole first,
     // filtered, then sent as the filter left it.
     const bool filtered = g_vif1_filter && ch.base == 0x10009000u;
-    Vif1Chain chain;
+    static thread_local Vif1Chain chain;        // (its room kept: a scene's list is megabytes)
+    chain.words.clear();
+    chain.runs.clear();
     DmaBlockSink send = sink;
     if (filtered)
-        sink = [&chain](const u32* words, u32 count, u32 from) {
+        sink = [](const u32* words, u32 count, u32 from) {
             chain.words.insert(chain.words.end(), words, words + count);
             chain.runs.emplace_back(count, from);
         };
@@ -319,10 +321,17 @@ std::string Walk(const Channel& ch, u32 chcr, bool describe) {
         const DmaOutcome outcome = SendDmaBlocks(state, sink, 1u << 16, tags);
         if (filtered) {
             g_vif1_filter(chain);
-            const u32* at = chain.words.data();
-            for (const auto& [count, from] : chain.runs) {
-                send(at, count, from);
-                at += count;
+            if (queued && copy->words.empty()) {
+                // The worker's copy is the chain as filtered: taken, not copied.
+                g_chain_words += chain.words.size();
+                copy->words.swap(chain.words);
+                copy->runs.swap(chain.runs);
+            } else {
+                const u32* at = chain.words.data();
+                for (const auto& [count, from] : chain.runs) {
+                    send(at, count, from);
+                    at += count;
+                }
             }
         }
         if (describe)
