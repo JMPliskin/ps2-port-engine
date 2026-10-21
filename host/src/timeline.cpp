@@ -314,18 +314,37 @@ void Finish() {
     const double nominal = at(0.5);
     std::fprintf(stderr, "interval: median %.2f ms, 95%% %.2f, 99%% %.2f, 99.9%% %.2f, longest %.2f\n", nominal, at(0.95),
                  at(0.99), at(0.999), sorted.back());
+    // Each interval judged by the blanks of its moment (the last eight's
+    // median): a game whose blanks change rate - 144 a second in play, 60 in
+    // its cutscenes and menus - is late by its own, not by the run's median
+    // (every cutscene picture counted late at 144). A loading screen's blanks
+    // run faster than any screen (SetFastForward): not judged.
+    const std::vector<u64>& times = shown.size() > 1 ? shown : g_blanks;
+    const auto period = [&](std::size_t i) {
+        const auto end = std::upper_bound(g_blanks.begin(), g_blanks.end(), times[i + 1]);
+        const std::size_t b = std::size_t(end - g_blanks.begin());
+        if (b < 3) return nominal;
+        double gaps[8];
+        std::size_t n = 0;
+        for (std::size_t k = b - 1; k > 0 && n < 8; --k) gaps[n++] = double(g_blanks[k] - g_blanks[k - 1]) / 1e6;
+        std::sort(gaps, gaps + n);
+        return gaps[n / 2];
+    };
+    const auto late_at = [&](std::size_t i) {
+        const double own = period(i);
+        return own > 4.0 && intervals[i] > own * 1.5;
+    };
     unsigned late = 0, repeats = 0;
-    for (double ms : intervals)
-        if (ms > nominal * 1.5) {
+    for (std::size_t i = 0; i < intervals.size(); ++i)
+        if (late_at(i)) {
             ++late;
-            repeats += unsigned(ms / nominal + 0.5) - 1;
+            repeats += unsigned(intervals[i] / period(i) + 0.5) - 1;
         }
     std::fprintf(stderr, "frames shown late: %u (%u frames' time the picture repeated)\n", late, repeats);
     // The worst: what was busy in the frame before each.
-    const std::vector<u64>& times = shown.size() > 1 ? shown : g_blanks;
     std::vector<std::size_t> worst;
     for (std::size_t i = 0; i < intervals.size(); ++i)
-        if (intervals[i] > nominal * 1.5) worst.push_back(i);
+        if (late_at(i)) worst.push_back(i);
     std::sort(worst.begin(), worst.end(), [&](std::size_t a, std::size_t b) { return intervals[a] > intervals[b]; });
     if (worst.size() > 12) worst.resize(12);
     for (std::size_t i : worst) {
