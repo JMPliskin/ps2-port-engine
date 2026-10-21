@@ -88,6 +88,10 @@ struct Thread {
     LPVOID home = nullptr;
     Coroutine* coroutine = nullptr;
     std::vector<u32> home_calls;
+    // RequestDelivery: its budget was zeroed to deliver an interrupt at its
+    // next loop head, and this is what it was.
+    bool delivery_requested = false;
+    s64 saved_budget = 0;
 };
 
 }  // namespace
@@ -143,8 +147,6 @@ struct Scheduler {
     std::atomic<u32> vblank_owed{0};        // real time: more that came while one was due (TakeVblank)
     std::atomic<bool> timer_due{false};     // an EE timer's interrupt time has come
     std::atomic<lifted::Context*> running{nullptr};     // the thread on the processor
-    bool delivery_requested = false;        // the current thread's budget was zeroed
-    s64 saved_budget = 0;                   // ...and this is what it was
     std::vector<u32> interrupt_calls;
     // SetAlarm: a callback after a number of horizontal blanks (15,734 a
     // second, NTSC), run in interrupt context when the host clock passes it.
@@ -593,7 +595,9 @@ void LoopHead(lifted::Context& c, u32 address) {
         const auto idle_from = std::chrono::steady_clock::now();
         for (;;) {
             u32 seen = g_timer_seq.load(std::memory_order_acquire);
-            if (s.vblank_due || s.timer_due || s.delivery_requested || StopRequested() || IopReplyPending()) break;
+            if (s.vblank_due || s.timer_due || s.current->delivery_requested || StopRequested() ||
+                IopReplyPending())
+                break;
             WaitOnAddress(&g_timer_seq, &seen, sizeof seen, 2);
         }
         g_idle_ns.fetch_add(u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -601,7 +605,7 @@ void LoopHead(lifted::Context& c, u32 address) {
                             std::memory_order_relaxed);
         IdleSpan(idle_from);
     }
-    if (s.virtual_time && !s.delivery_requested) {
+    if (s.virtual_time && !s.current->delivery_requested) {
         // A slice ran: its time passes; what that time brings is delivered. In
         // an idle loop, the time to the next event passes at once.
         u64 step = u64(kSliceIterations) * kNsPerIteration;
@@ -618,12 +622,12 @@ void LoopHead(lifted::Context& c, u32 address) {
     }
     const bool frame = TakeVblank(s);
     const bool timers = s.timer_due.exchange(false);
-    const bool requested = s.delivery_requested;
+    const bool requested = s.current->delivery_requested;
     // With a real-time timer a budget can be spent for a frame another loop head
     // already took; without one, a spent budget that nobody asked for is the end.
     if (!frame && !timers && !requested && !s.realtime && !s.virtual_time) throw lifted::Abort{address, 2};
-    s.delivery_requested = false;
-    c.budget = requested ? s.saved_budget
+    s.current->delivery_requested = false;
+    c.budget = requested ? s.current->saved_budget
              : s.virtual_time ? (idle ? kIdleSliceIterations : kSliceIterations)
              : realtime_idle ? kIdleSliceIterations : s.loop_budget;
     if (StopRequested()) c.budget = -1;         // the watchdog fired meanwhile
@@ -714,10 +718,14 @@ void DeliverIopPacketNow() {
 
 void RequestDelivery() {
     Scheduler& s = S();
-    if (s.in_interrupt || !s.current || s.delivery_requested) return;
+    // (The request is the thread's: one that blocked or gave way before its
+    // loop head left the scheduler's flag set, and every request after it was
+    // dropped - Resident Evil Outbreak's wait for its display lists' DMA
+    // spinning to the next blank, a frame lost every few seconds.)
+    if (s.in_interrupt || !s.current || s.current->delivery_requested) return;
     lifted::Context& c = s.current->context;
-    s.saved_budget = c.budget;
-    s.delivery_requested = true;
+    s.current->saved_budget = c.budget;
+    s.current->delivery_requested = true;
     c.budget = 0;
 }
 
