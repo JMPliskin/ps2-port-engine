@@ -280,14 +280,42 @@ bool PartlyMasked(std::uint32_t kept) {
    from a copy of the target. */
 bool Is16Bit(std::uint32_t psm) { return psm == 0x02 || psm == 0x0A || psm == 0x32 || psm == 0x3A; }
 
+/* Dual-source blending (the factor a second output): Blender16 needs it. */
+bool g_dual_source_blend = false;
+
+/* How the blender can make a 16-bit target's blend exactly, the GS's five
+   bits a channel, without the shader reading a copy of the target: where
+   the target counts once (Cd's coefficient 1 - as D, or as A with FIX 0x80,
+   a factor of 1) or not at all. The shader works out the rest, S (gs.frag:
+   the blend with each Cd as 0), and the blender
+     1  writes S (Cd not in it, or it cancels: (Cs - Cd) * 1 + Cd);
+     2  adds S cut to five bits to the target;
+     3  takes away -S, cut up to five bits (D - Cs, as Cd - Cs).
+   The target's values are whole fives, so cutting the sum cuts only what is
+   added; a sum past 255 keeps 255, which every reader of a 16-bit target
+   cuts to the GS's 248. 0: the shader blends. Below Freezing Point's
+   shadows, its characters added into and taken out of a 16-bit buffer: 900
+   copies of it a picture, three quarters of the GPU's time at 3x. */
+int Blender16(const GsDrawState& s) {
+    if (!g_dual_source_blend || !s.blend || !Is16Bit(s.psm) || s.c == BlendAlpha::Dest) return 0;
+    using C = BlendColour;
+    const bool one = s.c == BlendAlpha::Fix && s.fix == 0x80;
+    auto sign = [](C plus, C minus) { return plus == C::Zero && minus == C::Source ? 3 : 2; };
+    if (s.a != C::Dest && s.b != C::Dest) return s.d == C::Dest ? sign(s.a, s.b) : 1;
+    if (!one) return 0;
+    if (s.a == C::Dest && s.b != C::Dest && s.d != C::Dest) return sign(s.d, s.b);     // Cd + D - B
+    if (s.b == C::Dest && s.a != C::Dest && s.d == C::Dest) return 1;                  // A
+    return 0;
+}
+
 bool ShaderBlend(const GsDrawState& s) {
     if (!s.blend) return false;
     // Into a 16-bit target: the blend's result cut to five bits a channel,
     // as the GS stores it (the blender would keep eight: the next blend over
     // it would read more than the GS has - Burnout 3's picture copied into
     // its 16-bit display buffer, blended over the last, came out 9 brighter
-    // in the dark).
-    if (Is16Bit(s.psm)) return true;
+    // in the dark) - unless the blender can (Blender16).
+    if (Is16Bit(s.psm)) return Blender16(s) == 0;
     if (s.a == s.b) return false;
     // The destination's alpha as the factor (C = Ad): over 128 on the GS,
     // over 255 as the blender reads a byte (DST_ALPHA) - at half its strength.
@@ -310,6 +338,15 @@ constexpr std::uint32_t kShaderBlend = 1u << 15;
 std::uint32_t PipelineKey(const GsDrawState& s) {
     const std::uint32_t masked = (~WriteMask(KeptBits(s.fbmsk, s.psm)) & 0xF) << 9;
     if (!s.blend) return masked;
+    if (const int way = Blender16(s)) {
+        // S written, or Cd + S, Cd - |S| (the shader's S, its factor 1): as
+        // the blend Cs * FIX + Cd, or (0 - Cs) * FIX + Cd.
+        if (way == 1) return masked;
+        const BlendColour a = way == 3 ? BlendColour::Zero : BlendColour::Source;
+        const BlendColour b = way == 3 ? BlendColour::Source : BlendColour::Zero;
+        return masked | 1u | std::uint32_t(a) << 1 | std::uint32_t(b) << 3 | std::uint32_t(BlendAlpha::Fix) << 5 |
+               std::uint32_t(BlendColour::Dest) << 7;
+    }
     return masked | 1u | std::uint32_t(s.a) << 1 | std::uint32_t(s.b) << 3 | std::uint32_t(s.c) << 5 |
            std::uint32_t(s.d) << 7 | (ShaderBlend(s) ? kShaderBlend : 0u);
 }
@@ -1002,6 +1039,7 @@ bool VulkanGsRenderer::Init(std::string* error) {
     vert_ = module(spirv_gs_vert, sizeof spirv_gs_vert);
     frag_ = g_.dual_source ? module(spirv_gs_frag, sizeof spirv_gs_frag)
                            : module(spirv_gs_frag_single, sizeof spirv_gs_frag_single);
+    g_dual_source_blend = g_.dual_source;
     frag_blend_ = module(spirv_gs_frag_blend, sizeof spirv_gs_frag_blend);
     if (!vert_ || !frag_ || !frag_blend_) {
         if (error) *error = "the GS shaders did not load";
@@ -3026,6 +3064,7 @@ void VulkanGsRenderer::Flush() {
                        std::uint32_t(state_.d) << 6;
     if (state_.textured && t->scale > 1) params.blend_ops |= (t->scale & 0xFFu) << 8;
     if (Is16Bit(state_.psm)) params.blend_ops |= 1u << 16;    // gs.frag: colour cut to five bits a channel
+    params.blend_ops |= std::uint32_t(Blender16(state_)) << 17;     // gs.frag: S for the blender
     const std::uint32_t count = std::uint32_t(pending_.size());
     static int complaints = 0;
     if (!set && complaints < 5) {

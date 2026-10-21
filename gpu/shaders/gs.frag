@@ -51,7 +51,8 @@ layout(push_constant) uniform Params {
     uint keep;          // ...the bits FBMSK keeps, RGBA bytes as the target holds them
     uint scale;         // a target drawn larger (the internal resolution): its pixels to a GS texel
     uint blend_ops;     // bits 0-7, SHADER_BLEND: ALPHA's A, B, C, D, two bits each; 8-15: Snap's scale;
-                        // 16: a 16-bit target (five bits a channel stored)
+                        // 16: a 16-bit target (five bits a channel stored); 17-18: its blend made
+                        // by the blender (gs_renderer.cpp's Blender16): 1 S written, 2 added, 3 taken away
 } p;
 
 // What a draw may use, from its parameters (gs_renderer.cpp's Features): a
@@ -375,12 +376,31 @@ void main() {
 #ifdef SHADER_BLEND
     // Cv = ((A - B) * C >> 7) + D, clamped (COLCLAMP), as the software GS.
     vec4 dst = round(texelFetch(destination, ivec2(gl_FragCoord.xy), 0) * 255.0);
+    // (A 16-bit target's five bits: a sum the blender clamped at 255 is 248.)
+    if (Has(kSixteen) && ((p.blend_ops >> 16) & 1u) != 0u) dst.rgb = floor(dst.rgb / 8.0) * 8.0;
     uint ops = p.blend_ops & 255u;
     vec3 op_a = (ops & 3u) == 0u ? c.rgb : (ops & 3u) == 1u ? dst.rgb : vec3(0.0);
     vec3 op_b = ((ops >> 2) & 3u) == 0u ? c.rgb : ((ops >> 2) & 3u) == 1u ? dst.rgb : vec3(0.0);
     float op_c = ((ops >> 4) & 3u) == 0u ? c.a : ((ops >> 4) & 3u) == 1u ? dst.a : float(p.fix);
     vec3 op_d = ((ops >> 6) & 3u) == 0u ? c.rgb : ((ops >> 6) & 3u) == 1u ? dst.rgb : vec3(0.0);
     c.rgb = clamp(floor((op_a - op_b) * op_c / 128.0) + op_d, 0.0, 255.0);
+#else
+    // A 16-bit target's blend the blender makes (the renderer's Blender16):
+    // here S, the blend with the target as 0 wherever it is an operand, cut
+    // to five bits a channel - up when it is taken away - for the blender to
+    // add to the target, or take away, by a factor of 1 (or written, 1).
+    // Not PABE's pass of the pixels left unblended.
+    const uint way = Has(kSixteen) && p.pabe != 2u ? (p.blend_ops >> 17) & 3u : 0u;
+    if (way != 0u) {
+        uint ops = p.blend_ops & 255u;
+        vec3 op_a = (ops & 3u) == 0u ? c.rgb : vec3(0.0);
+        vec3 op_b = ((ops >> 2) & 3u) == 0u ? c.rgb : vec3(0.0);
+        float op_c = ((ops >> 4) & 3u) == 0u ? c.a : float(p.fix);
+        vec3 op_d = ((ops >> 6) & 3u) == 0u ? c.rgb : vec3(0.0);
+        vec3 s = floor((op_a - op_b) * op_c / 128.0) + op_d;
+        c.rgb = way == 1u ? clamp(s, 0.0, 255.0)
+              : min(way == 3u ? ceil(-s / 8.0) * 8.0 : floor(s / 8.0) * 8.0, vec3(255.0));
+    }
 #endif
     // A 16-bit target keeps the top five bits of each colour byte.
     if (Has(kSixteen) && ((p.blend_ops >> 16) & 1u) != 0u) c.rgb = floor(c.rgb / 8.0) * 8.0;
@@ -393,6 +413,6 @@ void main() {
     }
 #ifndef SINGLE_OUTPUT
     float k = p.fix_factor != 0u ? float(p.fix) : c.a;
-    factor = vec4(k / 128.0);
+    factor = vec4(way != 0u ? 1.0 : k / 128.0);
 #endif
 }
