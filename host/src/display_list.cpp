@@ -101,10 +101,13 @@ float Distance(const std::vector<u32>& a, const Code& ca, const std::vector<u32>
 }
 
 /* A matched pair's words to blend, added to `plan` - false (none added) if
-   one jumps. */
+   one jumps. The newer list's words [skip_lo, skip_hi) are left out (the
+   camera's view, planned apart: PlanCamera). */
 bool PlanPair(const std::vector<u32>& a, const std::vector<Code>& ca, u32 sa, const std::vector<u32>& b,
-              const std::vector<Code>& cb, const Segment& s, const ListBlendOptions& o, ListBlendPlan& plan) {
+              const std::vector<Code>& cb, const Segment& s, const ListBlendOptions& o, ListBlendPlan& plan,
+              const std::vector<u32>* moving, u32 skip_lo = 0, u32 skip_hi = 0) {
     const size_t mark = plan.at.size();
+    const auto skipped = [&](u32 at) { return at >= skip_lo && at < skip_hi; };
     for (u32 j = s.first; j < s.end; ++j) {
         const Code& y = cb[j];
         const Code& x = ca[sa + (j - s.first)];
@@ -117,23 +120,29 @@ bool PlanPair(const std::vector<u32>& a, const std::vector<Code>& ca, u32 sa, co
         if (std::memcmp(&a[x.at + 1], &b[y.at + 1], y.words * 4) == 0) continue;
         float scale[4] = {0, 0, 0, 0};
         for (u32 k = 0; k < y.words; ++k) {
+            if (skipped(y.at + 1 + k)) continue;
             const float fa = Float(a[x.at + 1 + k]), fb = Float(b[y.at + 1 + k]);
             if (Plausible(fa)) scale[k & 3] = std::max(scale[k & 3], std::fabs(fa));
             if (Plausible(fb)) scale[k & 3] = std::max(scale[k & 3], std::fabs(fb));
         }
         for (u32 k = 0; k < y.words; ++k) {
             const u32 wa = a[x.at + 1 + k], wb = b[y.at + 1 + k];
-            if (wa == wb) continue;
+            if (wa == wb || skipped(y.at + 1 + k)) continue;
             const float fa = Float(wa), fb = Float(wb);
             if (!Plausible(fa) || !Plausible(fb) || !(std::fabs(fb - fa) < o.cut)) continue;
             // (one word so is enough: a flickering light's billboard, its w
             // jumping, blended is a beam across the room). A value within 0-1
-            // at both ends that moves by more than half is an offset wrapping
-            // round - a texture scrolled 1/24 a step, from 23/24 to 0 (Below
-            // Freezing Point's lights): blended, half a turn away for a
-            // picture, a flash. Its lane's largest (a translation's 1e6 in
-            // the same UNPACK) would never call it a jump.
-            const bool wraps = fa >= 0.0f && fa <= 1.0f && fb >= 0.0f && fb <= 1.0f && std::fabs(fb - fa) > 0.5f;
+            // at both ends, moving the step before, that moves by more than
+            // half is an offset wrapping round - a texture scrolled 1/24 a
+            // step, from 23/24 to 0 (Below Freezing Point's lights): blended,
+            // half a turn away for a picture, a flash. Its lane's largest (a
+            // translation's 1e6 in the same UNPACK) would never call it a
+            // jump. Still the step before, it is a switch (a light on, 0 to
+            // 1, in every lit thing's values): blended with the rest - stepped
+            // in some things and blended in others, the layers of one wall
+            // apart for a picture.
+            const bool wraps = fa >= 0.0f && fa <= 1.0f && fb >= 0.0f && fb <= 1.0f && std::fabs(fb - fa) > 0.5f &&
+                               moving && std::binary_search(moving->begin(), moving->end(), x.at + 1 + k);
             if (wraps || std::fabs(fb - fa) > o.jump * scale[k & 3]) {
                 plan.at.resize(mark);
                 plan.from.resize(mark);
@@ -146,6 +155,37 @@ bool PlanPair(const std::vector<u32>& a, const std::vector<Code>& ca, u32 sa, co
         }
     }
     return true;
+}
+
+/* The camera's segment: its view (rows view_first to view_end of its first
+   UNPACK of floats) blended whatever it does - its cut is judged apart
+   (ViewJumps) - and the rest as any thing's, left as the game steps it where
+   a value jumps: its lights' rows. A light switched on (0 to 1 in every
+   lit thing's segment, stepping there) blended in the camera's alone was
+   between on and off for a picture: Below Freezing Point's gate at 144. */
+void PlanCamera(const std::vector<u32>& a, const std::vector<Code>& ca, u32 sa, const std::vector<u32>& b,
+                const std::vector<Code>& cb, const Segment& s, const ListBlendOptions& o, ListBlendPlan& plan,
+                const std::vector<u32>* moving) {
+    u32 lo = 0, hi = 0;
+    for (u32 j = s.first; j < s.end; ++j) {
+        const Code& y = cb[j];
+        const Code& x = ca[sa + (j - s.first)];
+        if (!y.floats || !y.words || (y.code & 0x8000)) continue;
+        const u32 rows = y.words / 4;
+        lo = y.at + 1 + 4 * std::min(o.view_first, rows);
+        hi = y.at + 1 + 4 * std::min(o.view_end, rows);
+        for (u32 at = lo; at < hi; ++at) {
+            const u32 wa = a[x.at + (at - y.at)], wb = b[at];
+            if (wa == wb) continue;
+            const float fa = Float(wa), fb = Float(wb);
+            if (!Plausible(fa) || !Plausible(fb) || !(std::fabs(fb - fa) < o.cut)) continue;
+            plan.at.push_back(at);
+            plan.from.push_back(fa);
+            plan.to.push_back(fb);
+        }
+        break;
+    }
+    PlanPair(a, ca, sa, b, cb, s, o, plan, moving, lo, hi);
 }
 
 /* The camera's segment's view (rows `first` to `end` of its first UNPACK of
@@ -178,7 +218,8 @@ bool ViewJumps(const std::vector<u32>& a, const std::vector<Code>& ca, u32 sa, c
 
 }  // namespace
 
-ListBlend PlanListBlend(const Vif1Chain& a, const Vif1Chain& b, const ListBlendOptions& o, ListBlendPlan& plan) {
+ListBlend PlanListBlend(const Vif1Chain& a, const Vif1Chain& b, const ListBlendOptions& o, ListBlendPlan& plan,
+                        const std::vector<u32>* moving) {
     plan.at.clear();
     plan.from.clear();
     plan.to.clear();
@@ -252,12 +293,10 @@ ListBlend PlanListBlend(const Vif1Chain& a, const Vif1Chain& b, const ListBlendO
             // (Out of its place is no cut: a thing before it came or went -
             // the virus gauge.)
             camera_cut |= ViewJumps(a.words, ca, sa[best].first, b.words, cb, s, o.jump, o.view_first, o.view_end);
-            ListBlendOptions whole = o;
-            whole.jump = 1e30f;
-            PlanPair(a.words, ca, sa[best].first, b.words, cb, s, whole, plan);
+            PlanCamera(a.words, ca, sa[best].first, b.words, cb, s, o, plan, moving);
             continue;
         }
-        if (!PlanPair(a.words, ca, sa[best].first, b.words, cb, s, o, plan)) ++r.jumps;
+        if (!PlanPair(a.words, ca, sa[best].first, b.words, cb, s, o, plan, moving)) ++r.jumps;
     }
     if (o.cut_segment >= 0 ? camera_cut : matched && float(r.jumps + r.moved) > o.cut_share * float(matched)) {
         r.cut = true;

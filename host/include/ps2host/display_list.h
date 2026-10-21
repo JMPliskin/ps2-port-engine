@@ -20,8 +20,8 @@
  * jumps by more than `jump` of the largest in its lane (x, y, z or w) of its
  * UNPACK: a different thing in that place, a sign turned over (w through 0:
  * vertices thrown across the screen), a flickering light's billboard - or if
- * a value within 0-1 moves by more than half (a texture's offset wrapping
- * round). That segment (stepping as the game does), a segment with no match
+ * a value within 0-1 that was moving moves by more than half (a texture's
+ * offset wrapping round). That segment (stepping as the game does), a segment with no match
  * (what came into the picture) and every other word are the newer list's.
  * Where the camera's own segment jumps (`cut_segment`: its view's rows, each
  * by its own length), or else where many segments jump or move at once
@@ -68,8 +68,14 @@ struct ListBlendPlan {
     ListBlend stats;
 };
 
-/* The blend of `a` (older) into `b` (newer), planned. */
-ListBlend PlanListBlend(const Vif1Chain& a, const Vif1Chain& b, const ListBlendOptions& options, ListBlendPlan& plan);
+/* The blend of `a` (older) into `b` (newer), planned. `moving`: the words of
+   `a` blended the step before (the plan that made `a`'s `at`, in order) -
+   a value within 0-1 moving by more than half jumps only where it was moving
+   then (a texture's offset scrolling round), not where it was still (a
+   light switched on, 0 to 1: blended with the rest of its light). None: no
+   such jumps. */
+ListBlend PlanListBlend(const Vif1Chain& a, const Vif1Chain& b, const ListBlendOptions& options, ListBlendPlan& plan,
+                        const std::vector<u32>* moving = nullptr);
 
 /* `words` (b's own, from `offset` in them) made `t` of the way from a's (0:
    a's values, 1: b's). */
