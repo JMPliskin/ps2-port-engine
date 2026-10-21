@@ -185,6 +185,21 @@ each blank from 0x0029FA08 by its own blank handler).
    interrupt: Outbreak's 2D, once in a while): a frame's lists are all those
    sent until the next frame's start, its step and picture time taken at its
    start.
+   **Judge the camera by its view's rows**, each by its own length
+   (`cut_segment`, `view_first`/`view_end`), not by lanes: a projection's
+   translations (2e7) make every turn tiny by the lane, so a real cut was
+   blended through the walls, while a translation passing through 0 looked
+   like a jump - the camera still for a step, then on (jitter). Leave its
+   lights' rows out (a shot's flash), and its place in the list (a HUD
+   segment before it comes and goes).
+   **Watch a double buffer**: a list made for one half may name its half
+   where it sets FRAME itself (Outbreak's light composited after its shadow
+   pass). A picture between steps drawn into the other half sends those
+   draws to the half not shown - characters and lights flicker every other
+   picture. Find the writes (`GsRegisterWrites`, FRAME_1/2) and turn them to
+   the frame's half (Outbreak's ToHalf; the half from the game's own flip).
+   Test a scene of every kind the game has - the bar's lists had none, the
+   tunnels' did.
 4. Configure `steps_per_blank = 0.5`, `default_rate = "30"`: the engine's
    rate, steps and picture time then work for 60, 120 and the screen's (the
    F9 panel's FRAME RATE row shows 30/60/120/screen for such a game). Set the
