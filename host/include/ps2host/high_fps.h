@@ -106,6 +106,12 @@ int HighFpsSteps(unsigned blanks, int most);
    handler): back to 60 when its frames have stopped. */
 void HighFpsBlank();
 
+/* Back to the game's own rate at once, where the game knows its frames
+   should not be above it from now - not after HighFpsBlank's wait (`gone`
+   blanks): a movie starting (Resident Evil Outbreak's, played half a second
+   at the wrong cadence, ran short). */
+void HighFpsLeave(const char* why);
+
 /* Above the game's own rate: the rate (pictures a second; 0 at its own). */
 double HighFpsRate();
 
