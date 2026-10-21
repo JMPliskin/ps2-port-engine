@@ -133,7 +133,8 @@ void KeepUp() {
     if (g_looks++ == 0) return;         // (the change's own catching up)
     if (late * 20 > u64(sample)) {
         g_cap = std::max(Own(), 60.0 * std::ceil(g_rate / 60.0 - 1.0 - 1e-6));
-        std::fprintf(stderr, "[high fps] %llu of %d pictures late at %.0f a second: %.0f for this race\n",
+        std::fprintf(stderr,
+                     "[high fps] %llu of %d pictures late at %.0f a second: %.0f until the game's frames next stop\n",
                      static_cast<unsigned long long>(late), sample, g_rate, g_cap);
     }
 }
