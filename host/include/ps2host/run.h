@@ -603,6 +603,11 @@ bool OpenAudio();
 /* Stops the sound and finishes the WAV recording (--audio-wav), before the
    process ends. */
 void CloseAudio();
+/* The pad's report held as it last was (true), the presses made meanwhile
+   shown at the next report not held: for a game whose menus run only in
+   some of the frames that read the pad (a high frame rate's frames between
+   its steps), so no press falls in a frame they never see. */
+void SetPadHold(bool hold);
 /* ...and/or recorded to a WAV file (--audio-wav). */
 bool OpenWavDump(const std::string& path);
 void AudioFrames(const short* frames, unsigned count);

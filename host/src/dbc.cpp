@@ -132,6 +132,7 @@ u64 g_frame = 0;
 
 bool Pressed(int key) { return (WindowFocused() || KeysScripted()) && HostKeyDown(key); }
 u16 g_held = 0;                     // PadButtonsHeld: port 0's
+bool g_pad_hold = false;            // SetPadHold
 u16 (*g_pad_hook)() = nullptr;      // SetPadHook
 void (*g_controller_filter)(HostPadState*) = nullptr;     // SetControllerFilter
 u16 (*g_keyboard_mapper)() = nullptr;                       // SetKeyboardMapper
@@ -304,6 +305,32 @@ void PadData(u32 port, u8* data) {
     for (u32 i = 2; i < 6; ++i) data[i] = controller ? pad.sticks[i - 2] : 0x80;
     static const int kPressure[12] = {5, 7, 4, 6, 12, 13, 14, 15, 10, 11, 8, 9};
     for (u32 i = 0; i < 12; ++i) data[6 + i] = (buttons >> kPressure[i]) & 1 ? 0 : pressure[kPressure[i]];
+    // SetPadHold: the report as it last was while the game will not step,
+    // the presses meanwhile kept for the next it reads - a game that steps
+    // less often than it reads its pad (Resident Evil Outbreak above 30)
+    // saw a press only in a frame its menus did not run, and missed it.
+    struct Hold {
+        bool valid = false;
+        u8 data[kDataBytes];
+        u16 pending = 0;
+    };
+    static Hold holds[kPadPorts];
+    Hold& h = holds[port < kPadPorts ? port : 0];
+    const u16 now = u16(~(u32(data[0]) | u32(data[1]) << 8));
+    if (g_pad_hold && h.valid) {
+        h.pending |= u16(now & ~u16(~(u32(h.data[0]) | u32(h.data[1]) << 8)));
+        std::memcpy(data, h.data, kDataBytes);
+    } else {
+        const u16 shown = u16(now | h.pending);
+        data[0] = u8(~shown);
+        data[1] = u8(~shown >> 8);
+        static const int kPressureOf[12] = {5, 7, 4, 6, 12, 13, 14, 15, 10, 11, 8, 9};
+        for (u32 i = 0; i < 12; ++i)
+            if ((h.pending >> kPressureOf[i]) & 1 && !((now >> kPressureOf[i]) & 1)) data[6 + i] = 0xFF;
+        h.pending = 0;
+        std::memcpy(h.data, data, kDataBytes);
+        h.valid = true;
+    }
     if (port == 0) RecordOrReplay(data);    // (port 0's alone: one player's session)
 }
 
@@ -685,6 +712,8 @@ void InstallDbc() {
 }
 
 u16 PadButtonsHeld() { return g_held; }
+
+void SetPadHold(bool hold) { g_pad_hold = hold; }
 
 InputDevice LastInputDevice(u64* frame) {
     if (frame) *frame = g_last_input_frame;
