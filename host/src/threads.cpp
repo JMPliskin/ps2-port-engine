@@ -869,6 +869,7 @@ void StartRealTime() {
     s.timer_due = false;
     for (auto& [id, t] : s.threads) t->context.budget = s.loop_budget;
     if (s.realtime) StartRealTimeThreads();
+    AudioResync();
     std::fprintf(stderr, "[host] real time from frame %llu\n", (unsigned long long)s.frames);
 }
 

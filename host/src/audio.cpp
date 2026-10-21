@@ -84,6 +84,7 @@ struct Device {
     bool mute = false;
     bool log = false;
     std::atomic<bool> open{false}, stop{false};
+    std::atomic<bool> resync{false};    // AudioResync: the backlog dropped at the next Render
     std::atomic<int> opened{0};         // the audio thread's answer: 1 a device, -1 none
     std::thread thread;
     std::FILE* wav = nullptr;
@@ -148,6 +149,11 @@ inline float Cubic(float a, float b, float c, float d, float t) {
 }
 
 void Device::Render(float* out, unsigned frames) {
+    if (resync.exchange(false) && ring.Filled() > target_frames) {
+        ring.read.store(ring.written.load(std::memory_order_acquire) - target_frames, std::memory_order_release);
+        smoothed_fill = double(target_frames);
+        fade = kFadeFrames;
+    }
     const unsigned long long available = ring.Filled();
     // The fill the rate control steers by: the ring's, smoothed - it jumps by a
     // whole batch each time the SPU2 delivers one.
@@ -408,6 +414,8 @@ bool OpenWavDump(const std::string& path) {
     d.WriteHeader(0);
     return true;
 }
+
+void AudioResync() { D().resync = true; }
 
 bool AudioActive() {
     Device& d = D();

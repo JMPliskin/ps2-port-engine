@@ -608,6 +608,11 @@ bool OpenWavDump(const std::string& path);
 void AudioFrames(const short* frames, unsigned count);
 /* Whether the SPU2's output goes anywhere (a device or --audio-wav). */
 bool AudioActive();
+/* What the ring holds beyond its target dropped (faded in from where it
+   resumes): a run leaving virtual time (--real-time-from) made the sound of
+   its virtual frames faster than the device played it - the ring full, the
+   sound 0.7 s behind the picture and samples dropped for a minute. */
+void AudioResync();
 
 }  // namespace ps2host
 
