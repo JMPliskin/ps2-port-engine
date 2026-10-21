@@ -108,7 +108,12 @@ bool PlanPair(const std::vector<u32>& a, const std::vector<Code>& ca, u32 sa, co
     for (u32 j = s.first; j < s.end; ++j) {
         const Code& y = cb[j];
         const Code& x = ca[sa + (j - s.first)];
-        if (!y.floats || !y.words) continue;
+        // (Not an UNPACK to the double buffer, FLG: a batch's own data -
+        // model-space vertices, the same each step, and where not, values
+        // the program reads as other than coordinates: Outbreak's decal
+        // under a character took its CLUT from one, blended a black, then a
+        // white square on the floor.)
+        if (!y.floats || !y.words || (y.code & 0x8000)) continue;
         if (std::memcmp(&a[x.at + 1], &b[y.at + 1], y.words * 4) == 0) continue;
         float scale[4] = {0, 0, 0, 0};
         for (u32 k = 0; k < y.words; ++k) {
@@ -122,8 +127,14 @@ bool PlanPair(const std::vector<u32>& a, const std::vector<Code>& ca, u32 sa, co
             const float fa = Float(wa), fb = Float(wb);
             if (!Plausible(fa) || !Plausible(fb) || !(std::fabs(fb - fa) < o.cut)) continue;
             // (one word so is enough: a flickering light's billboard, its w
-            // jumping, blended is a beam across the room)
-            if (std::fabs(fb - fa) > o.jump * scale[k & 3]) {
+            // jumping, blended is a beam across the room). A value within 0-1
+            // at both ends that moves by more than half is an offset wrapping
+            // round - a texture scrolled 1/24 a step, from 23/24 to 0 (Below
+            // Freezing Point's lights): blended, half a turn away for a
+            // picture, a flash. Its lane's largest (a translation's 1e6 in
+            // the same UNPACK) would never call it a jump.
+            const bool wraps = fa >= 0.0f && fa <= 1.0f && fb >= 0.0f && fb <= 1.0f && std::fabs(fb - fa) > 0.5f;
+            if (wraps || std::fabs(fb - fa) > o.jump * scale[k & 3]) {
                 plan.at.resize(mark);
                 plan.from.resize(mark);
                 plan.to.resize(mark);

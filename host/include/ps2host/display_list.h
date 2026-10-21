@@ -8,22 +8,24 @@
  *
  * Each list is cut into the things it draws - a segment from each UNPACK to
  * one VU address (`segment_address`: where the game puts each thing's
- * matrices; not one to the double buffer, FLG) to the next. Each of the newer list's segments is matched with
- * one of the older list's of the same VIF codes - the one in its place, or,
- * where the game drew its things in another order (two billboards that
- * traded places), the one whose first values are nearest. In a matched pair
- * the UNPACK data that are plausible floats (0, or 1e-6 to 1e9 either way - a
- * projection's translations reach 2e7: a GIF tag, a count, a colour read as
- * a far smaller or odd float) and differ by less than `cut` are blended -
- * unless one of the pair's values jumps by more than `jump` of the largest
- * in its lane (x, y, z or w) of its UNPACK: a different thing in that place,
- * a sign turned over (w through 0: vertices thrown across the screen), a
- * flickering light's billboard. That segment (stepping as the game does), a
- * segment with no match (what came into the picture) and every
- * other word are the newer list's. Where the camera's own segment jumps
- * (`cut_segment`: its view's rows, each by its own length), or else where
- * many segments jump or move at once (`cut_share` of them), the camera has
- * cut: nothing is blended.
+ * matrices; not one to the double buffer, FLG) to the next. Each of the newer
+ * list's segments is matched with one of the older list's of the same VIF
+ * codes - the one in its place, or, where the game drew its things in another
+ * order (two billboards that traded places), the one whose first values are
+ * nearest. In a matched pair the UNPACK data (not those to the double buffer,
+ * FLG: a batch's own, read as more than coordinates) that are plausible
+ * floats (0, or 1e-6 to 1e9 either way - a projection's translations reach
+ * 2e7: a GIF tag, a count, a colour read as a far smaller or odd float) and
+ * differ by less than `cut` are blended - unless one of the pair's values
+ * jumps by more than `jump` of the largest in its lane (x, y, z or w) of its
+ * UNPACK: a different thing in that place, a sign turned over (w through 0:
+ * vertices thrown across the screen), a flickering light's billboard - or if
+ * a value within 0-1 moves by more than half (a texture's offset wrapping
+ * round). That segment (stepping as the game does), a segment with no match
+ * (what came into the picture) and every other word are the newer list's.
+ * Where the camera's own segment jumps (`cut_segment`: its view's rows, each
+ * by its own length), or else where many segments jump or move at once
+ * (`cut_share` of them), the camera has cut: nothing is blended.
  *
  * A pair's blend is planned once (PlanListBlend: the words to blend, from and
  * to) and made for each picture between the two steps (ApplyListBlend).
