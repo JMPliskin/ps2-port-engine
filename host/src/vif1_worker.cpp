@@ -37,6 +37,7 @@
 #include <string>
 #include <thread>
 
+#include "ps2host/iop_vm.h"
 #include "ps2host/profile.h"
 #include "ps2host/timeline.h"
 #include "ps2host/run.h"
@@ -186,12 +187,24 @@ void Vif1RunFrame(std::function<void()> command) {
     // The worker at most kFramesBehind frames behind the EE: what is shown
     // lags what the game has done by no more (input to picture), and the EE
     // waits for the worker, not the other way round.
+    // Meanwhile the IOP runs on, a slice every 2 ms (its blank's run is just
+    // before, in the same place: TakeVblank, FrameDone): the sound with it -
+    // a GPU behind its pictures held the EE here for 90 ms at a time, and the
+    // sound ran dry (a crackle).
     constexpr int kFramesBehind = 2;
     if (w.frames.load() >= kFramesBehind) {
         Timed timed(Section::GsWait);
         Waited waited{g_frame_wait_us};
         std::unique_lock<std::mutex> lock(w.mutex);
-        w.drained.wait(lock, [&] { return w.frames.load() < kFramesBehind; });
+        while (!w.drained.wait_for(lock, std::chrono::milliseconds(2),
+                                   [&] { return w.frames.load() < kFramesBehind; })) {
+            lock.unlock();
+            {
+                Timed iop(Section::Iop);
+                iop::Run(50'000);
+            }
+            lock.lock();
+        }
     }
     ++w.frames;
     Vif1Run([&w, command = std::move(command)] {
