@@ -21,8 +21,9 @@
  * flickering light's billboard. That segment (stepping as the game does), a
  * segment with no match (what came into the picture) and every
  * other word are the newer list's. Where the camera's own segment jumps
- * (`cut_segment`), or else where many segments jump or move at once
- * (`cut_share` of them), the camera has cut: nothing is blended.
+ * (`cut_segment`: its view's rows, each by its own length), or else where
+ * many segments jump or move at once (`cut_share` of them), the camera has
+ * cut: nothing is blended.
  *
  * A pair's blend is planned once (PlanListBlend: the words to blend, from and
  * to) and made for each picture between the two steps (ApplyListBlend).
@@ -42,6 +43,10 @@ struct ListBlendOptions {
     // first after the list's start): its jump the cut, and only it (a flash
     // of light makes many things jump at once); -1: `cut_share` decides.
     int cut_segment = -1;
+    // Its view: these rows (quadwords) of its first UNPACK of floats, each
+    // turned or moved by more than `jump` of its own length the cut (not its
+    // lights' rows: a shot's flash). The rest of it blended whole.
+    unsigned view_first = 0, view_end = ~0u;
 };
 
 struct ListBlend {

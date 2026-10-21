@@ -137,6 +137,34 @@ bool PlanPair(const std::vector<u32>& a, const std::vector<Code>& ca, u32 sa, co
     return true;
 }
 
+/* The camera's segment's view (rows `first` to `end` of its first UNPACK of
+   floats) turned or moved by more than `jump` of a row's own length: the
+   camera cut. Its lanes' largest are its translations' (a projection's reach
+   2e7), by which no turn is a jump - a cut from one corner of a room to
+   another blended through the walls. */
+bool ViewJumps(const std::vector<u32>& a, const std::vector<Code>& ca, u32 sa, const std::vector<u32>& b,
+               const std::vector<Code>& cb, const Segment& s, float jump, u32 first, u32 end) {
+    for (u32 j = s.first; j < s.end; ++j) {
+        const Code& y = cb[j];
+        const Code& x = ca[sa + (j - s.first)];
+        if (!y.floats || !y.words || x.words != y.words) continue;
+        for (u32 k = first * 4; k + 4 <= y.words && k < end * 4; k += 4) {
+            float d = 0.0f, la = 0.0f, lb = 0.0f;
+            bool plausible = true;
+            for (u32 l = 0; l < 4; ++l) {
+                const float fa = Float(a[x.at + 1 + k + l]), fb = Float(b[y.at + 1 + k + l]);
+                plausible &= Plausible(fa) && Plausible(fb);
+                d += (fb - fa) * (fb - fa);
+                la += fa * fa;
+                lb += fb * fb;
+            }
+            if (plausible && d > jump * jump * std::max(la, lb) && std::max(la, lb) > 1e-6f) return true;
+        }
+        return false;
+    }
+    return false;
+}
+
 }  // namespace
 
 ListBlend PlanListBlend(const Vif1Chain& a, const Vif1Chain& b, const ListBlendOptions& o, ListBlendPlan& plan) {
@@ -190,8 +218,10 @@ ListBlend PlanListBlend(const Vif1Chain& a, const Vif1Chain& b, const ListBlendO
         for (auto p = at; p != lo && n < 16; ++n) try_one((--p)->second);
         // Out of its place, only a near match: one far (a thing whose own
         // match drew with other codes this step - more batches, its detail -
-        // paired with another of the codes it now has) is not one.
-        if (best != ~0u && best != expected && best_d > o.moved_distance * float(std::max(1u, best_words)))
+        // paired with another of the codes it now has) is not one. (The
+        // camera is one of a kind, and its lights may flash.)
+        if (best != ~0u && best != expected && !camera &&
+            best_d > o.moved_distance * float(std::max(1u, best_words)))
             best = ~0u;
         if (best == ~0u) {
             ++r.unmatched;
@@ -200,13 +230,23 @@ ListBlend PlanListBlend(const Vif1Chain& a, const Vif1Chain& b, const ListBlendO
         }
         used[best] = true;
         ++matched;
-        if (best != expected) ++r.moved;
-        camera_cut |= camera && best != expected;
+        const bool moved = best != expected;
+        if (moved) ++r.moved;
         expected = best + 1;
-        if (!PlanPair(a.words, ca, sa[best].first, b.words, cb, s, o, plan)) {
-            ++r.jumps;
-            camera_cut |= camera;
+        if (camera) {
+            // The camera judged by its view's rows alone (ViewJumps): by its
+            // lanes, a translation passing through 0 - the camera moving on
+            // steadily - was a jump, and every such step a cut (the camera
+            // still for a step, then on).
+            // (Out of its place is no cut: a thing before it came or went -
+            // the virus gauge.)
+            camera_cut |= ViewJumps(a.words, ca, sa[best].first, b.words, cb, s, o.jump, o.view_first, o.view_end);
+            ListBlendOptions whole = o;
+            whole.jump = 1e30f;
+            PlanPair(a.words, ca, sa[best].first, b.words, cb, s, whole, plan);
+            continue;
         }
+        if (!PlanPair(a.words, ca, sa[best].first, b.words, cb, s, o, plan)) ++r.jumps;
     }
     if (o.cut_segment >= 0 ? camera_cut : matched && float(r.jumps + r.moved) > o.cut_share * float(matched)) {
         r.cut = true;
