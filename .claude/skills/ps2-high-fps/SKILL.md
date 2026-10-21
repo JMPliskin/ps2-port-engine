@@ -200,6 +200,13 @@ each blank from 0x0029FA08 by its own blank handler).
    the frame's half (Outbreak's ToHalf; the half from the game's own flip).
    Test a scene of every kind the game has - the bar's lists had none, the
    tunnels' did.
+   **Not every changing float is motion**: a texture offset that wraps (1/24
+   a step, 23/24 back to 0 - blended, half a turn away: a flash), a value a
+   program reads as an index (a decal's CLUT from its batch's own data:
+   squares on the floor). The engine treats a 0-1 value moving more than half
+   as a jump and never blends the double buffer's (FLG) data. Hunt the rest
+   with long wanders (the game's health cheat on, so the player survives),
+   every picture scanned, the worst bisected word by word.
 4. Configure `steps_per_blank = 0.5`, `default_rate = "30"`: the engine's
    rate, steps and picture time then work for 60, 120 and the screen's (the
    F9 panel's FRAME RATE row shows 30/60/120/screen for such a game). Set the
