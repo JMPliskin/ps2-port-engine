@@ -68,6 +68,14 @@ ListBlend PlanListBlend(const Vif1Chain& a, const Vif1Chain& b, const ListBlendO
    a's values, 1: b's). */
 void ApplyListBlend(const ListBlendPlan& plan, float t, std::vector<u32>& words, size_t offset = 0);
 
+/* Where `words` (a VIF1 list) writes the GS registers `registers` (0x4C:
+   FRAME_1, and so on) with A+D in its DIRECTs' GIF packets: each value's
+   first word. A list made for one of a double buffer's halves draws to its
+   own half where it names it (Outbreak's light composited after its shadow
+   pass): a picture between steps drawn into the other half has them
+   changed. */
+void GsRegisterWrites(const std::vector<u32>& words, const std::vector<u32>& registers, std::vector<u32>& at);
+
 /* Both at once: `out` = `b` blended `t` of the way from `a`. */
 ListBlend BlendVif1Chains(const Vif1Chain& a, const Vif1Chain& b, float t, float cut, Vif1Chain& out);
 

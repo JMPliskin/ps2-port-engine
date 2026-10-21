@@ -227,6 +227,40 @@ void ApplyListBlend(const ListBlendPlan& plan, float t, std::vector<u32>& words,
     }
 }
 
+void GsRegisterWrites(const std::vector<u32>& words, const std::vector<u32>& registers, std::vector<u32>& at) {
+    at.clear();
+    std::vector<Code> codes;
+    Parse(words, codes);
+    for (const Code& c : codes) {
+        const u32 cmd = (c.code >> 24) & 0x7F;
+        if (cmd != 0x50 && cmd != 0x51) continue;
+        // The DIRECT's GIF packets: their tags, and in a PACKED one each
+        // A+D (descriptor 0xE) - its value's two words, its register's byte.
+        u32 i = c.at + 1;
+        const u32 end = c.at + 1 + c.words;
+        while (i + 4 <= end) {
+            const u64 tag = words[i] | u64(words[i + 1]) << 32;
+            const u64 regs = words[i + 2] | u64(words[i + 3]) << 32;
+            i += 4;
+            const u32 nloop = u32(tag & 0x7FFF), flg = u32(tag >> 58) & 3;
+            const u32 nreg = u32(tag >> 60) ? u32(tag >> 60) : 16;
+            if (flg == 0) {
+                for (u32 l = 0; l < nloop && i + 4 <= end; ++l)
+                    for (u32 r = 0; r < nreg && i + 4 <= end; ++r, i += 4) {
+                        const u32 reg = words[i + 2] & 0xFF;
+                        if (((regs >> (4 * r)) & 0xF) == 0xE &&
+                            std::find(registers.begin(), registers.end(), reg) != registers.end())
+                            at.push_back(i);
+                    }
+            } else if (flg == 1) {
+                i += (nloop * nreg * 2 + 3) & ~3u;
+            } else {
+                i += nloop * 4;
+            }
+        }
+    }
+}
+
 ListBlend BlendVif1Chains(const Vif1Chain& a, const Vif1Chain& b, float t, float cut, Vif1Chain& out) {
     ListBlendOptions options;
     options.cut = cut;
