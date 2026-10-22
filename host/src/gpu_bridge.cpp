@@ -68,6 +68,7 @@
 #include "ps2host/timeline.h"
 #include "ps2host/settings.h"
 #include "ps2host/texture_pack.h"
+#include "pal_regional_presentation.h"
 
 #if PS2HOST_VULKAN
 #include "ps2gpu/display.h"
@@ -81,6 +82,9 @@ std::vector<u32> g_pipeline_hints;      // SetGpuPipelineHints
 }  // namespace
 
 void SetGpuPipelineHints(const u32* keys, std::size_t count) { g_pipeline_hints.assign(keys, keys + count); }
+
+namespace { bool g_pal_regional_presentation = false; }
+void EnablePalRegionalPresentation() { g_pal_regional_presentation = true; }
 
 #if PS2HOST_VULKAN
 
@@ -631,6 +635,45 @@ Pages PagesOf(const Owned& o, u32 x0, u32 x1, u32 y0, u32 y1) {
             if (page < 512) pages.set(page);
         }
     return pages;
+}
+
+pal_regional_presentation::Reject RegionalCandidate(const Bridge& b, const Owned& o) {
+    using namespace pal_regional_presentation;
+    Candidate c;
+    c.fbp = o.fbp; c.fbw = o.fbw; c.psm = o.psm;
+    c.width = o.width; c.height = o.height;
+    c.scale = b.renderer->Scale();
+    c.shown = gs::TheGs().ShownLines();
+    const auto regs = gs::TheGs().display_registers();
+    c.pmode = regs.pmode; c.smode2 = regs.smode2;
+    c.dispfb1 = regs.dispfb1; c.display1 = regs.display1;
+    c.dispfb2 = regs.dispfb2; c.display2 = regs.display2;
+    c.dbx = Bits(regs.dispfb2, 32, 11);
+    c.dby = Bits(regs.dispfb2, 43, 11);
+    c.initialized = o.drawn_serial != 0 &&
+        (o.reloads[0] + o.reloads[1] + o.reloads[2] + o.reloads[3]) != 0;
+    // The certified layout has 70 visible pages, blocks [0,2240), and no
+    // wrap in GS memory. PagesOf alone is not a generic wrap proof.
+    c.footprint_known = o.begin == 0 && o.full_end == 5120 &&
+        o.end >= 2240 && o.x1 <= 640 && o.y1 <= 1024;
+    if (c.fbp == 0 && c.fbw == 10 && c.psm == gs::PSMCT16S)
+        c.visible = PagesOf(o, 0, 640, 0, 448);
+    c.stale = o.stale_pages;
+    for (u32 block = 0; block < 2240; ++block)
+        if (b.blocks[block] == Bridge::kCpuNewer) { c.cpu_write = true; break; }
+    for (u32 block : b.patch.blocks)
+        if (block < 2240) { c.pending_patch = true; break; }
+    for (const auto& [key, other] : b.owned)
+        if (&other != &o && other.gpu_newer &&
+            ((other.dirty_pages & c.visible).any() ||
+             (other.dirty_begin < 2240 && other.dirty_end > 0))) {
+            c.other_producer = true;
+            break;
+        }
+    // stale_beyond concerns rows outside the used extent. The visible pages
+    // still pass the stale and competing producer checks above.
+    c.unknown = o.why != 2 || o.depth;
+    return Evaluate(c);
 }
 
 /* After the GPU drew into `o`, pixels [x0, x1) x [y0, y1): memory and the
@@ -1661,8 +1704,22 @@ void PresentGpuPicture(ps2gpu::Display& display, u64 due_ns) {
         std::uint64_t image = 0;
         int layout = 0;
         u32 w = 0, h = 0;
-        if (found != g_bridge->owned.end() && !found->second.stale &&
-            g_bridge->renderer->DisplayTarget(fbp, fbw, psm, &image, &layout, &w, &h)) {
+        const auto video = gs::TheGs().display_registers();
+        const bool selector_full_height = g_pal_regional_presentation &&
+            pal_regional_presentation::SelectorNeedsFullHeightFallback(
+                video.pmode, video.smode2, video.dispfb1, video.display1,
+                video.dispfb2, video.display2);
+        bool regional = false;
+        if (!selector_full_height && found != g_bridge->owned.end()) {
+            const Owned& o = found->second;
+            regional = g_pal_regional_presentation && o.stale &&
+                RegionalCandidate(*g_bridge, o) == pal_regional_presentation::Reject::None;
+        }
+        if (!selector_full_height && found != g_bridge->owned.end() &&
+            (!found->second.stale || regional) &&
+            g_bridge->renderer->DisplayTarget(fbp, fbw, psm, &image, &layout, &w, &h) &&
+            (!regional || pal_regional_presentation::PhysicalExtentMatches(
+                g_bridge->renderer->Scale(), w, h))) {
             // The target's own pixels, as many as the picture's 640x448 at the
             // internal resolution.
             const u32 k = g_bridge->renderer->Scale();

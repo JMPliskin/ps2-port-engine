@@ -109,6 +109,12 @@ MipChoice ChooseLevel(u32 mode, float q);
 class Gs {
 public:
     Memory memory;
+    struct DisplayRegisters {
+        u64 pmode, smode2, dispfb1, display1, dispfb2, display2;
+    };
+    DisplayRegisters display_registers() const {
+        return {pmode_, smode2_, dispfb_[0], display_[0], dispfb_[1], display_[1]};
+    }
     /* --gs-trace: log image transfers and primitives (stderr). */
     bool trace = false;
     std::FILE* trace_out = stderr;      // where the trace goes (a capture's trace.txt)

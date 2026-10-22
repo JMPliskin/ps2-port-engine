@@ -167,6 +167,9 @@ void SetFrameDumps(const std::string& dir, int every, int limit, u64 from = 0);
    files into `dump_dir` when that is not empty); ShadowRtt also samples GPU
    targets as textures. Primary (--gpu): it draws instead of the software GS. */
 enum class GpuMode { Shadow, ShadowRtt, Primary };
+/* Opt in to the certified Burnout 3 PAL regional presentation layout. Call
+   before Main; other games retain the original presentation rules. */
+void EnablePalRegionalPresentation();
 bool StartGpuRenderer(std::string* error, GpuMode mode, bool show);
 void GpuShadowFrame(u64 frame, const std::string& dump_dir);
 /* A capture (F12): the GPU's passes of `frame` dumped into `passes_dir`;
