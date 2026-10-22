@@ -63,6 +63,7 @@
 #include "xxhash.h"
 
 #include "ps2host/gs.h"
+#include "texture_page_index.h"
 #include "ps2host/profile.h"
 #include "ps2host/run.h"
 #include "ps2host/timeline.h"
@@ -186,6 +187,7 @@ struct Cached {
     u64 pack_generation = 0;
     u32 begin = 0, end = 0;
     bool valid = false;
+    bool indexed = false;          // only potentially valid textures are listed
     u64 decoded_serial = 0;         // Bridge::serial when decoded
     u64 content = 0;                // a hash of its blocks when decoded
     bool decoded = false;
@@ -225,24 +227,13 @@ struct Bridge {
     std::map<std::tuple<u32, u32, u32, bool>, Owned> owned;
     std::unordered_map<u64, Cached> textures;
     std::list<u64> texture_lru;     // most recent first
-    // The textures over each page (32 blocks) of local memory, for what a
-    // write there invalidates: scanning all 2,048 on every write was 3% of a
-    // race. Elements of `textures` stay put until erased.
-    std::vector<std::vector<Cached*>> texture_pages = std::vector<std::vector<Cached*>>(512);
-    void IndexTexture(Cached* t, bool add) {
-        for (u32 page = t->begin >> 5; page <= ((std::max(t->end, t->begin + 1) - 1) >> 5) && page < 512; ++page) {
-            std::vector<Cached*>& list = texture_pages[page];
-            if (add) {
-                list.push_back(t);
-            } else {
-                auto found = std::find(list.begin(), list.end(), t);
-                if (found != list.end()) {
-                    *found = list.back();
-                    list.pop_back();
-                }
-            }
-        }
-    }
+    // Only potentially valid textures over each GS page. Cache entries have
+    // stable addresses until eviction; invalid entries leave all page lists.
+    detail::TexturePageIndex<Cached> texture_pages;
+    void IndexTexture(Cached* t, bool add) { texture_pages.Index(t, add); }
+    void InvalidateTexture(Cached* t) { texture_pages.Invalidate(t); }
+    void InvalidateTextures(u32 begin, u32 end) { texture_pages.Invalidate(begin, end); }
+    void Validated(Cached* t) { texture_pages.Validated(t); }
     u64 next_texture = 1;
     u64 serial = 0;                 // counts GPU draws, so a texture knows if one went over it
     // Bumped when an image starts holding drawing memory lacks, or reaches
@@ -457,10 +448,7 @@ void Sync(Bridge& b, u32 begin, u32 end, bool write, const Owned* except = nullp
             o.stale_beyond = true;
         }
     }
-    if (write && begin < end)
-        for (u32 page = begin >> 5; page <= ((end - 1) >> 5) && page < 512; ++page)
-            for (Cached* t : b.texture_pages[page])
-                if (t->begin < end && begin < t->end) t->valid = false;
+    if (write && begin < end) b.InvalidateTextures(begin, end);
 }
 
 /* An image transfer about to write blocks [begin, end) (Gs::on_write): the
@@ -494,9 +482,7 @@ void SyncWrite(Bridge& b, u32 begin, u32 end, const u8* cover) {
         if (first < o.end) MarkStale(o, 1, first, last);
         else o.stale_beyond = true;
     }
-    for (u32 page = first >> 5; page <= ((last - 1) >> 5) && page < 512; ++page)
-        for (Cached* t : b.texture_pages[page])
-            if (t->begin < last && first < t->end) t->valid = false;
+    b.InvalidateTextures(first, last);
 }
 
 /* The pending patch (Bridge::Patch): each pixel of the transfer's rectangle
@@ -929,7 +915,6 @@ u64 CachedTexture(Bridge& b, const gs::Context& c, u64 texa, u32 tw, u32 th) {
             t.end = std::max(t.end, std::min(16384u, mips.tbp[n] + std::max(1u, std::max(1u, mips.tbw[n]) * 64 * h *
                                                                                     PixelBits(psm) / 8 / 256 + 32)));
         }
-        b.IndexTexture(&t, true);
     } else {
         b.texture_lru.splice(b.texture_lru.begin(), b.texture_lru, t.lru);
     }
@@ -942,18 +927,21 @@ u64 CachedTexture(Bridge& b, const gs::Context& c, u64 texa, u32 tw, u32 th) {
         t.owned_seen = b.owned.size();
     }
     for (const Owned* o : t.over)
-        if (o->drawn_serial > t.decoded_serial && o->begin < t.end && t.begin < o->drawn_end) t.valid = false;
+        if (o->drawn_serial > t.decoded_serial && o->begin < t.end && t.begin < o->drawn_end) b.InvalidateTexture(&t);
     // A texture pack (texture_pack.h), for textures from memory - not ones the
     // GPU drew, as PCSX2 replaces none of those. Turned on or off (Tab):
     // every texture comes back once, replaced or as the game has it.
     const bool pack = texture_pack::Active() && texture_pack::Wanted(Bits(c.tex0, 20, 14));
     if (t.pack_generation != texture_pack::Generation()) {
         t.pack_generation = texture_pack::Generation();
-        if (pack || t.replaced) t.valid = t.decoded = false;
+        if (pack || t.replaced) { b.InvalidateTexture(&t); t.decoded = false; }
     }
     if (t.valid && t.pack_pending && pack) Replace(b, t);       // its file read since
     // Its replacement gone from the GPU (not drawn for a while): again.
-    if (t.replaced && !b.renderer->HasReplacement(t.replacement)) t.valid = t.decoded = false;
+    if (t.replaced && !b.renderer->HasReplacement(t.replacement)) {
+        b.InvalidateTexture(&t);
+        t.decoded = false;
+    }
     // Decoded on the GPU, from its copy of local memory and its CLUT, the
     // CPU's newer blocks and CLUT rows sent over first.
     bool gpu_holds_now = false;
@@ -1026,7 +1014,7 @@ u64 CachedTexture(Bridge& b, const gs::Context& c, u64 texa, u32 tw, u32 th) {
         gpu_holds_now = true;
         gpu_decode();
         t.replaced = t.pack_pending = false;
-        t.valid = true;
+        b.Validated(&t);
         t.decoded = false;              // the CPU's copy was not read: no hash to compare
     }
     if (!t.valid) {
@@ -1066,7 +1054,7 @@ u64 CachedTexture(Bridge& b, const gs::Context& c, u64 texa, u32 tw, u32 th) {
             ++b.unchanged;
             t.decoded_serial = b.serial;
         }
-        t.valid = true;
+        b.Validated(&t);
         t.decoded = true;
     }
     const u64 renderer_key = t.renderer_key;

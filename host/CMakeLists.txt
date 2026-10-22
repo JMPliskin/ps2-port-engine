@@ -127,6 +127,9 @@ if(WIN32)
 endif()
 
 # The host's own tests, which need no game.
+add_executable(ps2host_texture_page_index_tests ${CMAKE_CURRENT_LIST_DIR}/tests/texture_page_index_tests.cpp)
+target_compile_features(ps2host_texture_page_index_tests PRIVATE cxx_std_17)
+
 # vu_corpus.cpp: random microprograms, compiled by engine/tools/vurecomp.py
 # --corpus as the build goes, which VuCompiledIsTheInterpreter runs both ways.
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
