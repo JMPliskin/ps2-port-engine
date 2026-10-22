@@ -130,6 +130,13 @@ endif()
 add_executable(ps2host_texture_page_index_tests ${CMAKE_CURRENT_LIST_DIR}/tests/texture_page_index_tests.cpp)
 target_compile_features(ps2host_texture_page_index_tests PRIVATE cxx_std_17)
 
+add_executable(ps2host_gs16_tests ${CMAKE_CURRENT_LIST_DIR}/tests/gs16_transfer_tests.cpp)
+target_include_directories(ps2host_gs16_tests PRIVATE ${CMAKE_CURRENT_LIST_DIR}/include)
+target_compile_features(ps2host_gs16_tests PRIVATE cxx_std_17)
+if(MSVC AND PS2HOST_AVX2)
+    target_compile_options(ps2host_gs16_tests PRIVATE /arch:AVX2)
+endif()
+
 # vu_corpus.cpp: random microprograms, compiled by engine/tools/vurecomp.py
 # --corpus as the build goes, which VuCompiledIsTheInterpreter runs both ways.
 find_package(Python3 COMPONENTS Interpreter REQUIRED)

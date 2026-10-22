@@ -20,6 +20,12 @@
 
 #include <algorithm>
 #include <cstring>
+#if defined(__SSE4_1__) || defined(__AVX2__)
+#include <smmintrin.h>
+#define PS2HOST_GS16_SIMD 1
+#else
+#define PS2HOST_GS16_SIMD 0
+#endif
 #include <cstdint>
 #include <vector>
 
@@ -144,6 +150,7 @@ struct PageTable {
     u32 width, height;                  // the page, in pixels
     bool half_width;                    // pages per row are BW / 2 (PSMT8, PSMT4)
     std::vector<std::uint16_t> offset;
+    bool pairs16 = false;              // certified 16-pixel column-row layout
 };
 
 PageTable Build(u32 psm, u32 width, u32 height, bool half_width) {
@@ -166,6 +173,16 @@ struct PageTables {
     PageTable t8 = Build(PSMT8, 128, 64, true), t4 = Build(PSMT4, 128, 128, true);
     const PageTable* by_psm[64] = {};
     PageTables() {
+        // Certify PSMCT16 only. Other 16-bit formats keep their scalar path.
+        static constexpr std::uint16_t group[16] = {0, 4, 16, 20, 32, 36, 48, 52, 2, 6, 18, 22, 34, 38, 50, 54};
+        bool pairs = ct16.width % 16 == 0;
+        for (u32 y = 0; y < ct16.height && pairs; ++y)
+            for (u32 x = 0; x < ct16.width && pairs; x += 16) {
+                const std::uint16_t* row = &ct16.offset[std::size_t(y) * ct16.width + x];
+                pairs = row[0] % 64 <= 8; // all stores stay in this 64-byte column
+                for (u32 j = 0; j < 16 && pairs; ++j) pairs = row[j] == row[0] + group[j];
+            }
+        ct16.pairs16 = pairs;
         for (u32 psm : {PSMCT32, PSMCT24, PSMT8H, PSMT4HL, PSMT4HH}) by_psm[psm] = &ct32;
         by_psm[PSMZ32] = by_psm[PSMZ24] = &z32;
         by_psm[PSMCT16] = &ct16;
@@ -243,7 +260,10 @@ inline void Store(u8* bytes, u32 within, u32 page, u32 value) {
 
 // A row's run: the page and the row of offsets within it found once a page,
 // not once a pixel.
-template <u32 Psm>
+#if defined(PS2HOST_GS16_TEST)
+std::uint64_t g_gs16_groups = 0; // test translation unit only; absent from the engine
+#endif
+template <u32 Psm, bool Vector16 = false>
 void StoreRun(u8* bytes, const PageTable& t, u32 bp, u32 bw, u32 x, u32 y, const u32* values, u32 count) {
     const u32 page_bw = t.half_width ? bw / 2 : bw;
     const std::uint16_t* row = &t.offset[std::size_t(y % t.height) * t.width];
@@ -252,7 +272,34 @@ void StoreRun(u8* bytes, const PageTable& t, u32 bp, u32 bw, u32 x, u32 y, const
         const u32 px = x + i;
         const u32 page = Page(bp, page_bw, px / t.width, page_y);
         const u32 in_page = std::min(count - i, t.width - px % t.width);
-        for (u32 k = 0, wx = px % t.width; k < in_page; ++k, ++wx)
+        u32 k = 0, wx = px % t.width;
+#if PS2HOST_GS16_SIMD
+        if constexpr (Psm == PSMCT16 && Vector16) {
+            if (t.pairs16 && in_page >= 16) {
+                for (; k < in_page && (wx & 15); ++k, ++wx)
+                    Store<Psm>(bytes, row[wx], page, values[i + k]);
+                for (; k + 16 <= in_page; k += 16, wx += 16) {
+                    u8* p = &bytes[(page * 256 + row[wx]) & kMask];
+                    const __m128i* in = reinterpret_cast<const __m128i*>(values + i + k);
+                    const __m128i mask = _mm_set1_epi32(0xFFFF);
+                    const auto at = [&](int n) { return _mm_and_si128(_mm_loadu_si128(in + n), mask); };
+                    // Mask before unsigned packing: preserve the low 16 bits,
+                    // including 0x8000..0xFFFF, without saturation of input u32s.
+                    const __m128i low = _mm_packus_epi32(at(0), at(1));
+                    const __m128i high = _mm_packus_epi32(at(2), at(3));
+                    const __m128i first = _mm_unpacklo_epi16(low, high), second = _mm_unpackhi_epi16(low, high);
+                    _mm_storel_epi64(reinterpret_cast<__m128i*>(p), first);
+                    _mm_storel_epi64(reinterpret_cast<__m128i*>(p + 16), _mm_unpackhi_epi64(first, first));
+                    _mm_storel_epi64(reinterpret_cast<__m128i*>(p + 32), second);
+                    _mm_storel_epi64(reinterpret_cast<__m128i*>(p + 48), _mm_unpackhi_epi64(second, second));
+#if defined(PS2HOST_GS16_TEST)
+                    ++g_gs16_groups;
+#endif
+                }
+            }
+        }
+#endif
+        for (; k < in_page; ++k, ++wx)
             Store<Psm>(bytes, row[wx], page, values[i + k]);
         i += in_page;
     }
@@ -268,7 +315,8 @@ void Memory::WriteRun(u32 bp, u32 bw, u32 x, u32 y, u32 psm, const u32* values, 
         case PSMZ32: StoreRun<PSMZ32>(b, *t, bp, bw, x, y, values, count); return;
         case PSMCT24: StoreRun<PSMCT24>(b, *t, bp, bw, x, y, values, count); return;
         case PSMZ24: StoreRun<PSMZ24>(b, *t, bp, bw, x, y, values, count); return;
-        case PSMCT16: case PSMCT16S: case PSMZ16: case PSMZ16S:
+        case PSMCT16: StoreRun<PSMCT16, true>(b, *t, bp, bw, x, y, values, count); return;
+        case PSMCT16S: case PSMZ16: case PSMZ16S:
             StoreRun<PSMCT16>(b, *t, bp, bw, x, y, values, count); return;
         case PSMT8: StoreRun<PSMT8>(b, *t, bp, bw, x, y, values, count); return;
         case PSMT4: StoreRun<PSMT4>(b, *t, bp, bw, x, y, values, count); return;
