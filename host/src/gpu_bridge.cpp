@@ -64,6 +64,7 @@
 
 #include "ps2host/gs.h"
 #include "texture_page_index.h"
+#include "gpu_thread_setting.h"
 #include "ps2host/profile.h"
 #include "ps2host/run.h"
 #include "ps2host/timeline.h"
@@ -1761,9 +1762,11 @@ bool StartGpuRenderer(std::string* error, GpuMode mode, bool show) {
     if (!bridge.renderer) return false;
     // Vulkan's recording on a thread of its own, beside the GS thread's
     // (PS2HOST_GPU_THREAD=0: on the GS thread, as before).
-    const char* threaded = std::getenv("PS2HOST_GPU_THREAD");
-    if (!threaded || std::strcmp(threaded, "0") != 0)
+    const bool threaded = detail::GpuThreadAtStartup(std::getenv("PS2HOST_GPU_THREAD"));
+    if (threaded)
         bridge.renderer = ps2gpu::MakeThreadedGsRenderer(std::move(bridge.renderer));
+    SetEffectiveSetting("gpu_thread", threaded ? "on" : "off");
+    std::fprintf(stderr, "[gpu] renderer thread: %s\n", threaded ? "on" : "off");
     g_bridge = &bridge;
     OpenTexturePack();
     bridge.primary = mode == GpuMode::Primary;

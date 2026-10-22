@@ -24,8 +24,19 @@ bool SettingOn(const std::string& key, bool fallback = false);
 /* Sets one and writes the file. */
 void SetSetting(const std::string& key, const std::string& value);
 void SetSettingOn(const std::string& key, bool on);
-/* Sets one for this run only (--setting): the file is not written. */
+/* Runtime overrides take precedence over saved values, are locked against UI
+   changes, and are never copied to disk by another setting's write. */
 void RunSetting(const std::string& key, const std::string& value);
+void OverrideSetting(const std::string& key, const std::string& value, const std::string& source);
+std::string SettingOverride(const std::string& key); // "CLI", "env", or empty
+std::string SavedSetting(const std::string& key, const std::string& fallback = "");
+/* A startup-only consumer records what it actually applied. F9 may change the
+   saved/requested value without changing this effective value. */
+void SetEffectiveSetting(const std::string& key, const std::string& value);
+std::string EffectiveSetting(const std::string& key, const std::string& fallback = "");
+/* Last persistence failure, cleared by a successful write/load. Failed writes
+   leave both the original file and the in-memory preference unchanged. */
+std::string SettingsError();
 
 }  // namespace ps2host
 

@@ -304,6 +304,8 @@ void PresentFrame();
 bool PumpWindow();
 /* Fullscreen on or off (saved as the "fullscreen" setting, settings.h, which
    the window opens with); and whether it is. */
+// Port default only: saved preferences and CLI still take precedence. Set before OpenWindow.
+void SetFullscreenDefault(bool on);
 void SetWindowFullscreen(bool on);
 bool WindowFullscreen();
 /* Vertical sync on or off (the "vsync" setting): no tearing, or the least

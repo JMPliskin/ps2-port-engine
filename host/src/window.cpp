@@ -37,6 +37,7 @@ namespace {
 
 HWND g_window = nullptr;
 bool g_closed = false;
+bool g_fullscreen_default = false; // opt-in by each port before opening its window
 
 #ifdef PS2HOST_VULKAN
 std::unique_ptr<ps2gpu::Display> g_display;
@@ -201,7 +202,7 @@ bool OpenWindow(const wchar_t* title, int width, int height) {
     g_display = ps2gpu::CreateVulkanDisplay(narrow.c_str(), width, height, &error);
     if (g_display) {
         Note("window", "window: Vulkan on " + g_display->Describe());
-        if (SettingOn("fullscreen")) g_display->SetFullscreen(true);
+        if (SettingOn("fullscreen", g_fullscreen_default)) g_display->SetFullscreen(true);
         ApplyCursorArt();
         g_display->SetPresentObserver([](std::uint64_t due_ns, std::uint64_t shown_ns, bool dropped) {
             // Shown on the display's own thread (its lane named so); dropped
@@ -422,8 +423,11 @@ void KeepFullscreenSetting() {
 #ifdef PS2HOST_VULKAN
     static int last = -1;
     const int now = g_display && g_display->Fullscreen() ? 1 : 0;
-    if (last >= 0 && now != last) SetSettingOn("fullscreen", now != 0);
-    last = now;
+    if (SettingOverride("fullscreen").empty() && last >= 0 && now != last)
+        SetSettingOn("fullscreen", now != 0);
+    const bool wanted = SettingOn("fullscreen", now != 0);
+    if (g_display && now != int(wanted)) g_display->SetFullscreen(wanted);
+    last = int(wanted);
 #endif
 }
 
@@ -449,9 +453,9 @@ bool PumpWindow() {
         static std::chrono::steady_clock::time_point notice_until{};
         static bool notice = false;
         if (g_display->TakeTexturePackToggle() && texture_pack::Count()) {
-            const bool on = !texture_pack::Enabled();
+            SetSettingOn("texture_pack", !texture_pack::Enabled());
+            const bool on = SettingOn("texture_pack", texture_pack::Enabled());
             texture_pack::SetEnabled(on);
-            SetSettingOn("texture_pack", on);
             SetWindowOverlay({on ? "TEXTURE PACK ON  (Tab)" : "TEXTURE PACK OFF  (Tab)"});
             notice = true;
             notice_until = std::chrono::steady_clock::now() + std::chrono::seconds(2);
@@ -469,6 +473,7 @@ bool PumpWindow() {
 
 void SetWindowFullscreen(bool on) {
     SetSettingOn("fullscreen", on);
+    on = SettingOn("fullscreen", WindowFullscreen());
 #ifdef PS2HOST_VULKAN
     if (g_display) g_display->SetFullscreen(on);
 #endif
@@ -584,7 +589,7 @@ void SetWindowAspect(const std::string& aspect) {
 void SetWindowAntiAliasing(const std::string& mode) {
     SetSetting("antialiasing", mode);
 #ifdef PS2HOST_VULKAN
-    if (g_display) g_display->SetAntiAliasing(DisplayAntiAliasing(mode));
+    if (g_display) g_display->SetAntiAliasing(DisplayAntiAliasing(Setting("antialiasing", "off")));
 #endif
 }
 
@@ -607,6 +612,7 @@ float PictureAspect() {
 
 void SetWindowVsync(bool on) {
     SetSettingOn("vsync", on);
+    on = SettingOn("vsync", WindowVsync());
 #ifdef PS2HOST_VULKAN
     if (g_display) g_display->SetVsync(on);
 #endif
@@ -619,11 +625,13 @@ bool WindowVsync() {
     return SettingOn("vsync");
 }
 
+void SetFullscreenDefault(bool on) { g_fullscreen_default = on; }
+
 bool WindowFullscreen() {
 #ifdef PS2HOST_VULKAN
     if (g_display) return g_display->Fullscreen();
 #endif
-    return SettingOn("fullscreen");
+    return SettingOn("fullscreen", g_fullscreen_default);
 }
 
 ps2gpu::Display* WindowDisplay() {

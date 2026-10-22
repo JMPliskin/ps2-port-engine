@@ -32,6 +32,7 @@ bool g_releasing = false;                // closed, the game's input held back u
 int g_row = 0;
 
 struct Choice {
+    const char* key;
     const char* label;
     std::vector<std::string> values;        // as the setting keeps them
     std::vector<std::string> shown;         // as the panel says them
@@ -46,32 +47,40 @@ std::string OnOff(bool on) { return on ? "on" : "off"; }
 
 const std::vector<Choice>& Choices() {
     static const std::vector<Choice> choices = {
-        {"Resolution", {"original", "2x", "3x", "4x", "display"},
+        {"resolution", "Resolution", {"original", "2x", "3x", "4x", "display"},
          {"Original (640x448)", "2x", "3x", "4x", "The screen's"},
          [] { return Setting("resolution", "original"); },
          [](const std::string& v) { SetSetting("resolution", v); },
          "RESOLUTION", {"1X", "2X", "3X", "4X", "AUTO"}, "The resolution the game is drawn at."},
-        {"Aspect ratio", {"4:3", "16:9", "auto"}, {"4:3", "16:9", "Fill the window"},
+        {"aspect", "Aspect ratio", {"4:3", "16:9", "auto"}, {"4:3", "16:9", "Fill the window"},
          [] { return Setting("aspect", "4:3"); },
          [](const std::string& v) { SetWindowAspect(v); },
          "ASPECT", {"4:3", "16:9", "FILL"}, "The picture's shape: 4:3, 16:9 or the window's."},
-        {"Fullscreen", {"off", "on"}, {"Off", "On"},
+        {"fullscreen", "Fullscreen", {"off", "on"}, {"Off", "On"},
          [] { return OnOff(WindowFullscreen()); },
          [](const std::string& v) { SetWindowFullscreen(v == "on"); },
          "FULLSCREEN", {"OFF", "ON"}, "Play in a window or on the whole screen."},
-        {"V-sync", {"off", "on"}, {"Off", "On"},
+        {"vsync", "V-sync", {"off", "on"}, {"Off", "On"},
          [] { return OnOff(WindowVsync()); },
          [](const std::string& v) { SetWindowVsync(v == "on"); },
          "V-SYNC", {"OFF", "ON"}, "Wait for the screen's refresh: no tearing."},
-        {"Frame pacing", {"on", "off"}, {"On", "Off"},
+        {"frame_pacing", "Frame pacing", {"on", "off"}, {"On", "Off"},
          [] { return OnOff(SettingOn("frame_pacing", FramePacingDefault())); },
          [](const std::string& v) { SetSettingOn("frame_pacing", v == "on"); },
          "PACING", {"ON", "OFF"}, "Frame pacing: pictures shown at an even pace."},
-        {"Texture pack", {"on", "off"}, {"On", "Off"},
+        {"fps_counter", "FPS counter (F1)", {"off", "on"}, {"Off", "On"},
+         [] { return OnOff(SettingOn("fps_counter", false)); },
+         [](const std::string& v) { SetSettingOn("fps_counter", v == "on"); },
+         "FPS COUNTER", {"OFF", "ON"}, "Show presentation FPS. F1 also toggles it."},
+        {"gpu_thread", "GPU Thread", {"off", "on"}, {"Off", "On"},
+         [] { return OnOff(SettingOn("gpu_thread", true)); },
+         [](const std::string& v) { SetSetting("gpu_thread", v); },
+         "GPU THREAD", {"OFF", "ON"}, "Changes require restarting the game."},
+        {"texture_pack", "Texture pack", {"on", "off"}, {"On", "Off"},
          [] { return OnOff(texture_pack::Enabled()); },
          [](const std::string& v) {
-             texture_pack::SetEnabled(v == "on");
              SetSettingOn("texture_pack", v == "on");
+             texture_pack::SetEnabled(SettingOn("texture_pack", texture_pack::Enabled()));
          },
          "TEXTURES", {"ON", "OFF"}, "The texture pack's textures, or the game's own."},
     };
@@ -88,6 +97,23 @@ std::vector<int> Rows() {
     return rows;
 }
 
+std::string Value(const Choice& c, bool game = false) {
+    const auto show = [&](const std::string& value) {
+        for (std::size_t i = 0; i < c.values.size(); ++i)
+            if (c.values[i] == value) return game ? c.game_values[i] : c.shown[i];
+        return value;
+    };
+    const std::string requested = c.get();
+    std::string value = show(requested);
+    if (std::string(c.key) == "gpu_thread") {
+        const std::string active = EffectiveSetting(c.key, requested);
+        if (active != requested) value = show(active) + " -> " + value + " (restart)";
+    }
+    const std::string source = SettingOverride(c.key);
+    if (!source.empty()) value += " [" + source + "]";
+    return value;
+}
+
 void Draw(bool force = false) {
     std::vector<std::string> lines = {"PC SETTINGS   (F9 closes)"};
     const std::vector<int> rows = Rows();
@@ -97,10 +123,7 @@ void Draw(bool force = false) {
             text = "Close";
         } else {
             const Choice& c = Choices()[rows[r]];
-            const std::string now = c.get();
-            std::string shown = now;
-            for (std::size_t i = 0; i < c.values.size(); ++i)
-                if (c.values[i] == now) shown = c.shown[i];
+            const std::string shown = Value(c);
             text = std::string(c.label) + std::string(16 - std::min<std::size_t>(15, std::string(c.label).size()), ' ') +
                    "< " + shown + " >";
         }
@@ -108,6 +131,11 @@ void Draw(bool force = false) {
     }
     lines.push_back("");
     lines.push_back("Up/Down choose, Left/Right change");
+    if (g_row >= 0 && g_row < int(rows.size()) && rows[g_row] >= 0)
+        lines.push_back(Choices()[rows[g_row]].help);
+    lines.push_back("[CLI]/[env]: fixed for this run");
+    const std::string error = SettingsError();
+    if (!error.empty()) lines.push_back(error + " - preference unchanged");
     static std::vector<std::string> shown;
     if (force || lines != shown) SetWindowOverlay(lines);     // drawn again only when it changes
     shown = lines;
@@ -122,6 +150,7 @@ void Change(int step) {
         return;
     }
     const Choice& c = Choices()[which];
+    if (!SettingOverride(c.key).empty()) return;
     const std::string now = c.get();
     int at = 0;
     for (int i = 0; i < int(c.values.size()); ++i)
@@ -168,11 +197,9 @@ std::vector<PcSetting> PcSettings() {
     for (int i : Rows()) {
         if (i < 0) continue;
         const Choice& c = Choices()[std::size_t(i)];
-        const std::string now = c.get();
-        std::string value = now;
-        for (std::size_t v = 0; v < c.values.size(); ++v)
-            if (c.values[v] == now) value = c.game_values[v];
-        settings.push_back({c.game_label, value, c.help});
+        std::string help = c.help;
+        if (!SettingOverride(c.key).empty()) help += " Fixed for this run.";
+        settings.push_back({c.game_label, Value(c, true), help});
     }
     return settings;
 }
@@ -183,6 +210,7 @@ void StepPcSetting(int index, int step) {
         if (i < 0) continue;
         if (n++ != index) continue;
         const Choice& c = Choices()[std::size_t(i)];
+        if (!SettingOverride(c.key).empty()) return;
         const std::string now = c.get();
         int at = 0;
         for (int v = 0; v < int(c.values.size()); ++v)
