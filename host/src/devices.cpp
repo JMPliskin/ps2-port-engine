@@ -462,7 +462,7 @@ void FrameTimes(u64 frame) {
 }
 bool UntilFrameReached() { return g_until_reached; }
 
-// F12 (or L3+R3): the next frame captured whole, for looking into what it
+// F12: the next frame captured whole, for looking into what it
 // drew - captures/<time>-frame<N>/ beside the PC settings: the picture at
 // the internal resolution and at the PS2's, every drawing pass, GS local
 // memory and the GS trace of the frame.

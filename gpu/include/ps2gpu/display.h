@@ -95,7 +95,7 @@ public:
     }
     /* The window's title (taken up by the window's own thread, in Pump). */
     virtual void SetTitle(const std::string& title) { (void)title; }
-    /* F12, or L3 with R3 on a controller, since the last call: a capture asked for. */
+    /* Keyboard F12 since the last call: a diagnostic capture asked for. */
     virtual bool TakeCapture() { return false; }
     /* Tab since the last call: the texture pack turned on or off. */
     virtual bool TakeTexturePackToggle() { return false; }
