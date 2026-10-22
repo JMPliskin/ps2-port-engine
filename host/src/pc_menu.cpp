@@ -45,6 +45,10 @@ struct Choice {
 
 std::string OnOff(bool on) { return on ? "on" : "off"; }
 
+void ClearOverlay() {
+    SetWindowOverlay({});
+}
+
 const std::vector<Choice>& Choices() {
     static const std::vector<Choice> choices = {
         {"resolution", "Resolution", {"original", "2x", "3x", "4x", "display"},
@@ -64,6 +68,10 @@ const std::vector<Choice>& Choices() {
          [] { return OnOff(WindowVsync()); },
          [](const std::string& v) { SetWindowVsync(v == "on"); },
          "V-SYNC", {"OFF", "ON"}, "Wait for the screen's refresh: no tearing."},
+        {"antialiasing", "Antialiasing", {"off", "fxaa", "smaa"}, {"Off", "FXAA", "SMAA"},
+         [] { return Setting("antialiasing", "off"); },
+         [](const std::string& v) { SetWindowAntiAliasing(v); },
+         "ANTIALIASING", {"OFF", "FXAA", "SMAA"}, "Smooth the picture's edges before display scaling."},
         {"frame_pacing", "Frame pacing", {"on", "off"}, {"On", "Off"},
          [] { return OnOff(SettingOn("frame_pacing", FramePacingDefault())); },
          [](const std::string& v) { SetSettingOn("frame_pacing", v == "on"); },
@@ -146,7 +154,7 @@ void Change(int step) {
     const int which = rows[std::size_t(g_row)];
     if (which < 0) {
         g_open = false;
-        SetWindowOverlay({});
+        ClearOverlay();
         return;
     }
     const Choice& c = Choices()[which];
@@ -238,7 +246,7 @@ void UpdatePcMenu() {
     if (went_down(kToggle) || (g_open && went_down(kBack))) {
         g_open = !g_open;
         g_row = 0;
-        if (!g_open) SetWindowOverlay({});
+        if (!g_open) ClearOverlay();
         else Draw(true);
     } else if (g_open) {
         const int rows = int(Rows().size());

@@ -92,9 +92,9 @@ int main(int argc, char** argv) {
     Key(VK_F9); Check(!PcMenuOpen() && overlay.empty(), "F9 closes and releases input");
     Check(Read(file) == before_open, "opening/closing does not rewrite preferences");
     Check(Row("FPS COUNTER") >= 0 && Row("GPU THREAD") >= 0, "new functional options exposed");
-    Check(PcSettings().size() == 7, "no empty texture pack row");
+    Check(PcSettings().size() == 8, "no empty texture pack row");
     pack_count = 1;
-    Check(PcSettings().size() == 8, "existing loaded texture pack remains available");
+    Check(PcSettings().size() == 9, "existing loaded texture pack remains available");
     StepPcSetting(Row("TEXTURES"), 1); Check(pack && SettingOn("texture_pack"), "texture pack setter persists");
     pack_count = 0;
     Key(VK_F9); Key(VK_RIGHT);
