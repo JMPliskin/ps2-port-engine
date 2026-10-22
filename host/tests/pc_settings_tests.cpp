@@ -45,6 +45,7 @@ void Pad(unsigned buttons) {
 }
 
 namespace ps2host {
+AudioTimingSnapshot GetAudioTimingSnapshot() { return {}; }
 bool WindowFocused() { return focused; }
 bool HostKeyDown(int k) { return keys.count(k) != 0; }
 bool HostPad(HostPadState* out) { *out = pad; return true; }
@@ -55,6 +56,7 @@ bool WindowVsync() { return SettingOn("vsync", false); }
 void SetWindowFullscreen(bool v) { SetSettingOn("fullscreen", v); }
 void SetWindowVsync(bool v) { SetSettingOn("vsync", v); }
 void SetWindowAspect(const std::string& v) { SetSetting("aspect", v); }
+void SetWindowAntiAliasing(const std::string& v) { SetSetting("antialiasing", v); }
 namespace texture_pack {
 std::size_t Count() { return pack_count; }
 bool Enabled() { return pack; }

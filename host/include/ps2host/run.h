@@ -556,6 +556,17 @@ void CloseAudio();
 bool OpenWavDump(const std::string& path);
 void AudioFrames(const short* frames, unsigned count);
 
+/* Read-only audio timing for recovery checks. Reading this snapshot does not
+   change the queue, interpolation, or device state. Device counters/padding
+   are collected when PS2HOST_AUDIO_LOG is enabled. */
+struct AudioTimingSnapshot {
+    unsigned long long written = 0, read = 0;
+    unsigned padding = 0, buffer = 0;
+    unsigned long long underruns = 0, dropped = 0;
+    bool open = false;
+};
+AudioTimingSnapshot GetAudioTimingSnapshot();
+
 }  // namespace ps2host
 
 #endif  /* PS2HOST_RUN_H */

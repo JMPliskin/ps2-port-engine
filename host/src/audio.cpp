@@ -59,6 +59,10 @@ constexpr int kRate = 48000;
 constexpr unsigned kRingFrames = 1u << 15;      // 683 ms: room for a long hitch's catch-up
 constexpr double kMaxStretch = 0.005;           // the rate control's reach: +-0.5%
 constexpr unsigned kFadeFrames = 96;            // 2 ms: into and out of silence
+// Existing capture/drag traces show >250 ms without production, then a burst
+// filling ~683 ms. Recover only during two seconds after that discontinuity.
+constexpr auto kProducerGap = std::chrono::milliseconds(250);
+constexpr long long kRecoveryUs = 2000000;
 
 // The ring between the SPU2 (one writer) and the audio thread (one reader):
 // interleaved stereo floats; positions count frames and only ever grow.
@@ -70,7 +74,8 @@ struct Ring {
 
 struct Stats {
     std::atomic<unsigned> batches{0}, ran_dry{0};
-    std::atomic<unsigned long long> dropped{0};
+    std::atomic<unsigned long long> dropped{0}, recovered_frames{0};
+    std::atomic<unsigned> recoveries{0};
     std::atomic<double> longest_ms{0};
     std::atomic<int> fewest_ms{1 << 30}, most_ms{0};
     std::atomic<double> stretch_min{1}, stretch_max{1};
@@ -82,12 +87,16 @@ struct Device {
     unsigned target_frames = kRate * 60 / 1000;
     bool mute = false;
     bool log = false;
+    std::atomic<unsigned> padding{0}, buffer_frames{0};
+    std::atomic<unsigned long long> total_underruns{0}, total_dropped{0};
     std::atomic<bool> open{false}, stop{false};
     std::atomic<int> opened{0};         // the audio thread's answer: 1 a device, -1 none
     std::thread thread;
     std::FILE* wav = nullptr;
     unsigned long long wav_frames = 0;
-    std::chrono::steady_clock::time_point last_batch{};
+    std::chrono::steady_clock::time_point last_batch{}; // producer only
+    std::atomic<long long> recovery_until_us{0};
+    void NoteBatch(std::chrono::steady_clock::time_point now);
 
     // The reader's state (the audio thread's alone).
     double phase = 0;                   // between the frame `read` and the next, 0-1
@@ -95,6 +104,7 @@ struct Device {
     bool buffering = true;              // filling to the target before playing on
     float last[2] = {0, 0};             // the last frame played: faded out from
     unsigned fade = 0;                  // frames left of a fade in
+    float fade_from[2] = {0, 0};        // a recovery crossfades from the last output
 
     ~Device() { Close(); }
     void Close() {
@@ -146,7 +156,43 @@ inline float Cubic(float a, float b, float c, float d, float t) {
     return b + 0.5f * t * (c - a + t * (2.0f * a - 5.0f * b + 4.0f * c - d + t * (3.0f * (b - c) + d - a)));
 }
 
+void Device::NoteBatch(std::chrono::steady_clock::time_point now) {
+    if (last_batch.time_since_epoch().count()) {
+        const auto gap = now - last_batch;
+        if (log) AtomicMax(stats.longest_ms, std::chrono::duration<double, std::milli>(gap).count());
+        if (gap >= kProducerGap)
+            recovery_until_us.store(std::chrono::duration_cast<std::chrono::microseconds>(
+                now.time_since_epoch()).count() + kRecoveryUs, std::memory_order_release);
+    }
+    last_batch = now;
+}
+
 void Device::Render(float* out, unsigned frames) {
+    if (!frames) return;
+    auto until = recovery_until_us.load(std::memory_order_acquire);
+    if (until) {
+        const auto now = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (now > until) {
+            recovery_until_us.compare_exchange_strong(until, 0);
+        } else {
+            const auto end = ring.written.load(std::memory_order_acquire);
+            const auto at = ring.read.load(std::memory_order_relaxed);
+            // Leave normal batch jitter alone (at least 20 ms / two callbacks).
+            // The sole reader advances past obsolete excess, retaining the newest
+            // target-sized tail. The writer and the device's buffers are untouched.
+            if (end - at > target_frames + std::max(2u * frames, unsigned(kRate / 50))) {
+                const auto skipped = end - at - target_frames;
+                ring.read.store(end - target_frames, std::memory_order_release);
+                phase = 0;
+                smoothed_fill = double(target_frames);
+                fade_from[0] = last[0]; fade_from[1] = last[1];
+                fade = kFadeFrames;
+                stats.recovered_frames += skipped;
+                ++stats.recoveries;
+            }
+        }
+    }
     const unsigned long long available = ring.Filled();
     // The fill the rate control steers by: the ring's, smoothed - it jumps by a
     // whole batch each time the SPU2 delivers one.
@@ -157,6 +203,7 @@ void Device::Render(float* out, unsigned frames) {
             return;
         }
         buffering = false;
+        fade_from[0] = fade_from[1] = 0;
         fade = kFadeFrames;
         smoothed_fill = double(available);
     }
@@ -180,7 +227,11 @@ void Device::Render(float* out, unsigned frames) {
         for (int ch = 0; ch < 2; ++ch) {
             const float before = at ? frame(at - 1, ch) : frame(at, ch);
             float v = Cubic(before, frame(at, ch), frame(at + 1, ch), frame(at + 2, ch), t);
-            if (fade) v *= float(kFadeFrames - fade) / float(kFadeFrames);
+            if (fade) {
+                const float gain = float(kFadeFrames - fade) / float(kFadeFrames);
+                v *= gain;
+                if (fade_from[ch] != 0.0f) v += fade_from[ch] * (1.0f - gain);
+            }
             out[2 * k + ch] = v;
         }
         if (fade) --fade;
@@ -196,6 +247,7 @@ void Device::Render(float* out, unsigned frames) {
         // Ran dry: what was playing fades to silence, and the ring fills to
         // the target before it plays again.
         if (log) ++stats.ran_dry;
+        if (log) ++total_underruns;
         for (unsigned n = 0; k < frames; ++k, ++n) {
             const float g = n < kFadeFrames ? float(kFadeFrames - n) / float(kFadeFrames) : 0.0f;
             out[2 * k] = last[0] * g;
@@ -221,9 +273,9 @@ void LogStats(Device& d) {
     Stats& s = d.stats;
     const int fewest = s.fewest_ms.exchange(1 << 30);
     std::fprintf(stderr, "[audio] %u batches, longest wait %.1f ms; ring %d-%d ms (target %u), ran dry %u times, "
-                         "%llu frames dropped, rate %.4f-%.4f\n",
+                         "%llu frames dropped, rate %.4f-%.4f; recovery %u trims / %llu obsolete frames\n",
                  s.batches.exchange(0), s.longest_ms.exchange(0), fewest == (1 << 30) ? 0 : fewest, s.most_ms.exchange(0), d.target_frames * 1000 / kRate, s.ran_dry.exchange(0), s.dropped.exchange(0),
-                 s.stretch_min.exchange(1), s.stretch_max.exchange(1));
+                 s.stretch_min.exchange(1), s.stretch_max.exchange(1), s.recoveries.exchange(0), s.recovered_frames.exchange(0));
 }
 
 // ---------------------------------------------------------------- WASAPI
@@ -291,6 +343,7 @@ bool RunWasapi(Device& d) {
                                  1000.0 * buffer_frames / kRate, d.target_frames * 1000 / kRate, 100.0 * level);
             }
             ever = true;
+            if (d.log) d.buffer_frames.store(buffer_frames, std::memory_order_relaxed);
             d.opened.store(1);
             BYTE* out = nullptr;
             if (SUCCEEDED(render->GetBuffer(buffer_frames, &out)))
@@ -301,6 +354,7 @@ bool RunWasapi(Device& d) {
             WaitForSingleObject(event, 100);
             UINT32 padding = 0;
             if (FAILED(client->GetCurrentPadding(&padding))) break;      // the device went away
+            if (d.log) d.padding.store(padding, std::memory_order_relaxed);
             const UINT32 room = buffer_frames - padding;
             if (!room) continue;
             BYTE* out = nullptr;
@@ -414,12 +468,9 @@ void AudioFrames(const short* frames, unsigned count) {
         std::fwrite(frames, 4, count, d.wav);
         d.wav_frames += count;
     }
-    if (!d.open) return;
+    if (!d.open || !count) return;
+    d.NoteBatch(std::chrono::steady_clock::now());
     if (d.log) {
-        const auto now = std::chrono::steady_clock::now();
-        if (d.last_batch.time_since_epoch().count())
-            AtomicMax(d.stats.longest_ms, std::chrono::duration<double, std::milli>(now - d.last_batch).count());
-        d.last_batch = now;
         ++d.stats.batches;
         LogStats(d);
     }
@@ -430,6 +481,7 @@ void AudioFrames(const short* frames, unsigned count) {
         // A burst the ring cannot hold (the emulation far ahead of the device:
         // virtual time, a catch-up): the newest are dropped.
         if (d.log) d.stats.dropped += count - room;
+        if (d.log) d.total_dropped += count - room;
         count = unsigned(room);
     }
     float* data = r.data.data();
@@ -439,6 +491,19 @@ void AudioFrames(const short* frames, unsigned count) {
         data[2 * at + 1] = frames[2 * k + 1] * (1.0f / 32768.0f);
     }
     r.written.store(w + count, std::memory_order_release);
+}
+
+AudioTimingSnapshot GetAudioTimingSnapshot() {
+    Device& d = D();
+    AudioTimingSnapshot s;
+    s.read = d.ring.read.load(std::memory_order_acquire);
+    s.written = d.ring.written.load(std::memory_order_acquire);
+    s.padding = d.padding.load(std::memory_order_relaxed);
+    s.buffer = d.buffer_frames.load(std::memory_order_relaxed);
+    s.underruns = d.total_underruns.load(std::memory_order_relaxed);
+    s.dropped = d.total_dropped.load(std::memory_order_relaxed);
+    s.open = d.open.load(std::memory_order_relaxed);
+    return s;
 }
 
 }  // namespace ps2host

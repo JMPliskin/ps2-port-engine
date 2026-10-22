@@ -136,6 +136,10 @@ if(WIN32)
     target_include_directories(ps2host_pc_settings_tests PRIVATE ${CMAKE_CURRENT_LIST_DIR}/include
         ${PS2_ENGINE_DIR}/runtime/include)
     target_compile_features(ps2host_pc_settings_tests PRIVATE cxx_std_17)
+    add_executable(ps2host_audio_recovery_tests ${CMAKE_CURRENT_LIST_DIR}/tests/audio_recovery_tests.cpp)
+    target_include_directories(ps2host_audio_recovery_tests PRIVATE ${CMAKE_CURRENT_LIST_DIR}/include
+        ${PS2_ENGINE_DIR}/runtime/include)
+    target_compile_features(ps2host_audio_recovery_tests PRIVATE cxx_std_17)
 endif()
 
 add_executable(ps2host_gs16_tests ${CMAKE_CURRENT_LIST_DIR}/tests/gs16_transfer_tests.cpp)
